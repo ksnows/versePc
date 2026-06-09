@@ -1,13 +1,13 @@
 {
-  "version": "1.0.11",
-  "releaseDate": "2026-06-09T00:00:00Z",
-  "releaseName": "VersePC v1.0.11",
-  "releaseNotes": "## 更新内容\n- 新增多源自动更新检测，支持 GitHub 和夸克网盘两种下载方式\n- 修复微软账户登录功能\n- Java 下载速度优化，自动选择最快的国内镜像源\n- 启动时自动检测 Java 环境，缺失时引导安装\n- 离线账户名称输入优化",
+  "version": "1.0.12",
+  "releaseDate": "2026-06-10T00:00:00Z",
+  "releaseName": "VersePC v1.0.12",
+  "releaseNotes": "## 更新内容\n- 修复运行30分钟后崩溃的问题\n- 修复崩溃后无法重启的问题（端口占用）\n- 退出时正确清理所有子进程\n- 日志文件自动轮转，防止磁盘爆满\n- 新增多源自动更新检测\n- 更新卡片黑白配色优化",
   "files": {
     "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.0.11/VersePC-Setup-1.0.11.exe",
-      "sha256": "F323CD9B26CC1F2287DC86055673B12ED548940CE9F25EB60F5F54FEC75A2F42",
-      "size": 162781756
+      "url": "https://github.com/doujie081231/versePc/releases/download/v1.0.12/VersePC-Setup-1.0.12.exe",
+      "sha256": "8FC6FEBF04C5E3D15DDAF98FD834872523155B8CBC0A9EF5A0133DD27B65AA56",
+      "size": 162782110
     }
   },
   "minSupportedVersion": "1.0.0",

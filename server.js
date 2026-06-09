@@ -4000,6 +4000,8 @@ function getMirrorUrls(originalUrl) {
     if (originalUrl.startsWith('https://libraries.minecraft.net/')) {
         const forgeMirror = originalUrl.replace('https://libraries.minecraft.net/', 'https://maven.minecraftforge.net/');
         if (!urls.includes(forgeMirror)) urls.push(forgeMirror);
+        const bmclapiMaven = originalUrl.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/maven/');
+        if (!urls.includes(bmclapiMaven)) urls.push(bmclapiMaven);
     }
     urls.push(originalUrl);
     return urls;
