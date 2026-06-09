@@ -3084,6 +3084,12 @@ function registerAIChatIPC() {
     }
 
     const toolResultCache = new Map();
+    setInterval(() => {
+        const now = Date.now();
+        for (const [key, val] of toolResultCache) {
+            if (now - val.time > 60000) toolResultCache.delete(key);
+        }
+    }, 30000);
 
     async function executeTool(name, args) {
         if (typeof args === 'string') {
@@ -3117,7 +3123,7 @@ function registerAIChatIPC() {
                 const noCacheTools = ['install_mod', 'install_version', 'install_loader', 'install_modpack', 'launch_game', 'stop_game', 'toggle_mod', 'manage_settings', 'execute_command', 'write_file', 'edit_file', 'translate_mod', 'download_cfpa_pack', 'explore_environment', 'select_version'];
                 if (!noCacheTools.includes(name)) {
                     toolResultCache.set(cacheKey, { result, time: Date.now() });
-                    if (toolResultCache.size > 50) {
+                    if (toolResultCache.size > 30) {
                         const oldest = toolResultCache.keys().next().value;
                         toolResultCache.delete(oldest);
                     }

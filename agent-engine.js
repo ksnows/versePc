@@ -2766,7 +2766,7 @@ Take action now. Do not explain your limitations.`
         const budget = this._getContextBudget(conversation);
         let totalTokens = 0;
         for (const msg of conversation) totalTokens += this._estimateMessageTokens(msg);
-        if (totalTokens <= budget && conversation.length <= 60) return;
+        if (totalTokens <= budget && conversation.length <= 30) return;
 
         const systemMsgs = [];
         let systemEnd = 0;

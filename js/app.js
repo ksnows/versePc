@@ -6632,7 +6632,9 @@ async function handleSkinUpload(input) {
         formData.append('accountId', _currentDetailAccount.id);
         formData.append('model', 'default');
         const resp = await fetch('/api/upload-skin', { method: 'POST', body: formData });
-        const result = await resp.json();
+        const text = await resp.text();
+        let result;
+        try { result = JSON.parse(text); } catch (e) { showToast('上传失败: 服务器返回异常', 'error'); return; }
         if (result.success) {
             _currentDetailAccount.skinFile = result.fileName;
             const accUuid = (_currentDetailAccount.uuid || '').replace(/-/g, '');
