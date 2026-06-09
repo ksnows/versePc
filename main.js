@@ -85,6 +85,12 @@ function getAutoUpdater() {
 const diagFs = require('fs');
 const diagLogPath = require('path').join(require('electron').app.getPath('userData'), 'agent-diag.log');
 let _diagEnabled = true;
+try {
+    const stat = diagFs.statSync(diagLogPath);
+    if (stat.size > 5 * 1024 * 1024) {
+        diagFs.writeFileSync(diagLogPath, `[${new Date().toISOString()}] 日志已轮转\n`);
+    }
+} catch (e) {}
 const diagLog = (msg) => {
     if (!_diagEnabled) return;
     try {
@@ -1168,8 +1174,9 @@ app.whenReady().then(async () => {
         try {
             sseLog('[DEBUG SSE] require sse-server...');
             const { createSSEServer } = require('./sse-server');
-            const result = createSSEServer({ executeTool: sseExecuteTool });
-            ssePort = result ? result.PORT : 3001;
+            const sseResult = createSSEServer({ executeTool: sseExecuteTool });
+            global._sseServer = sseResult ? sseResult.server : null;
+            ssePort = sseResult ? sseResult.PORT : 3001;
             sseLog('[DEBUG SSE] SSE server created: port=' + ssePort);
         } catch (e) {
             sseLog('[DEBUG SSE] SSE server failed: ' + e.message);
@@ -1207,16 +1214,32 @@ app.on('before-quit', async (event) => {
     if (shuttingDown) return;
     shuttingDown = true;
 
-                    if (global._previewServer) {
-                        try { global._previewServer.close(); } catch (e) {}
-                        global._previewServer = null;
-                    }
-                    if (global._bgProcesses) {
-                        for (const [pid, proc] of Object.entries(global._bgProcesses)) {
-                            try { process.kill(Number(pid)); } catch (e) {}
-                        }
-                        global._bgProcesses = {};
-                    }
+    if (global._previewServer) {
+        try { global._previewServer.close(); } catch (e) {}
+        global._previewServer = null;
+    }
+    if (global._sseServer) {
+        try { global._sseServer.close(); } catch (e) {}
+        global._sseServer = null;
+    }
+    if (global._bgProcesses) {
+        for (const [pid, proc] of Object.entries(global._bgProcesses)) {
+            try { process.kill(Number(pid)); } catch (e) {}
+        }
+        global._bgProcesses = {};
+    }
+    if (terminalSessions && terminalSessions.size > 0) {
+        for (const [id, session] of terminalSessions) {
+            try { session.process.kill(); } catch (e) {}
+        }
+        terminalSessions.clear();
+    }
+    if (mcpClients && mcpClients.size > 0) {
+        for (const [name, client] of mcpClients) {
+            try { client.child.kill(); } catch (e) {}
+        }
+        mcpClients.clear();
+    }
 
     if (serverModuleCache && serverModuleCache.cleanupOnShutdown) {
         try {
@@ -4973,7 +4996,16 @@ ${JSON.stringify(toTranslate, null, 2)}`;
                                     global._bgProcesses[pid].stderr += chunk;
                                 }
                             });
-                            child.on('exit', (code) => { if (global._bgProcesses[pid]) global._bgProcesses[pid].exitCode = code; });
+                            child.on('exit', (code) => {
+                                if (global._bgProcesses[pid]) {
+                                    global._bgProcesses[pid].exitCode = code;
+                                    if (global._bgProcesses[pid].child) {
+                                        try { global._bgProcesses[pid].child.stdout?.destroy(); } catch (e) {}
+                                        try { global._bgProcesses[pid].child.stderr?.destroy(); } catch (e) {}
+                                    }
+                                    delete global._bgProcesses[pid];
+                                }
+                            });
                             global._bashSession.cwd = workDir;
                             return JSON.stringify({ output: `后台进程已启动 (PID: ${pid})。使用 bash(command="taskkill /PID ${pid} /F") 停止。`, pid, background: true });
                         } catch (e) {
