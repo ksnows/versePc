@@ -119,10 +119,67 @@ if (process.platform === 'win32') {
 
 // 窗口配置文件路径和缓存
 const CONFIG_PATH = path.join(require('os').homedir(), '.versepc', 'window-config.json');
+const STORE_PATH = path.join(require('os').homedir(), '.versepc', 'app-store.json');
 let windowConfigCache = null;     // 配置缓存对象
 let windowConfigCacheTime = 0;    // 缓存时间戳
 const CONFIG_CACHE_DURATION = 1000; // 缓存有效期（1秒）
 let savedWindowBounds = null;     // 保存的窗口边界（用于全屏恢复）
+
+function autoRepairJsonFile(filePath, backupSuffix) {
+    try {
+        if (!fs.existsSync(filePath)) return false;
+        const content = fs.readFileSync(filePath, 'utf8');
+        JSON.parse(content);
+        return true;
+    } catch (e) {
+        console.error(`[AutoRepair] Detected corrupted file: ${filePath}`);
+        try {
+            const backupPath = filePath + backupSuffix;
+            fs.copyFileSync(filePath, backupPath);
+            console.log(`[AutoRepair] Backup created: ${backupPath}`);
+        } catch (backupErr) {
+            console.error(`[AutoRepair] Backup failed:`, backupErr.message);
+        }
+        try {
+            const dir = path.dirname(filePath);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            const defaultContent = filePath.includes('window-config')
+                ? JSON.stringify({ fullscreen: false, windowMode: true, windowWidth: 1200, windowHeight: 800 }, null, 2)
+                : '{}';
+            fs.writeFileSync(filePath, defaultContent);
+            console.log(`[AutoRepair] File reset to defaults: ${filePath}`);
+        } catch (resetErr) {
+            console.error(`[AutoRepair] Reset failed:`, resetErr.message);
+        }
+        return false;
+    }
+}
+
+function repairVersePCData() {
+    const dataDir = path.join(require('os').homedir(), '.versepc');
+    if (!fs.existsSync(dataDir)) return;
+    autoRepairJsonFile(CONFIG_PATH, '.corrupted.json');
+    autoRepairJsonFile(STORE_PATH, '.corrupted.json');
+    try {
+        const versionsDir = path.join(dataDir, 'versions');
+        if (fs.existsSync(versionsDir)) {
+            const versions = fs.readdirSync(versionsDir);
+            for (const ver of versions) {
+                const verPath = path.join(versionsDir, ver);
+                const stat = fs.statSync(verPath);
+                if (stat.isDirectory()) {
+                    const versionJson = path.join(verPath, 'version.json');
+                    autoRepairJsonFile(versionJson, '.corrupted.json');
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[AutoRepair] Version scan error:', e.message);
+    }
+    console.log('[AutoRepair] Data integrity check completed');
+}
+
+repairVersePCData();
 
 // ============================================================================
 // 全局错误处理
@@ -569,7 +626,6 @@ ipcMain.handle('clipboard-read-text', async () => {
 // ============================================================================
 // 持久化存储 (Key-Value Store) - 基于 JSON 文件的应用状态存储
 // ============================================================================
-const STORE_PATH = path.join(require('os').homedir(), '.versepc', 'app-store.json');
 
 /**
  * 加载存储数据
