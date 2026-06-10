@@ -283,11 +283,26 @@ function createWindow() {
                 if (len === 0) {
                     console.log('[GPU] Page not rendered in 8s, flagging GPU disable for next launch');
                     require('fs').writeFileSync(disableGpuFile, '1');
+                    mainWindow.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+                        '<html><body style="background:#0a0a0a;color:#e5e5e5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>VersePC 启动异常</h2><p>页面加载失败，可能是显卡驱动问题</p><p style="color:#888;font-size:13px">已自动标记禁用GPU加速，请重启应用</p><p style="margin-top:20px"><button onclick="location.href=\'https://github.com/doujie081231/versePc/issues\'" style="padding:8px 16px;border:1px solid #555;border-radius:6px;background:transparent;color:#e5e5e5;cursor:pointer">报告问题</button></p></div></body></html>'
+                    ));
                 }
             }).catch(() => {});
         } catch (e) {}
     }, 8000);
     mainWindow.webContents.once('did-finish-load', () => clearTimeout(_gpuWatchdog));
+
+    // 渲染进程崩溃检测
+    mainWindow.webContents.on('render-process-gone', (event, details) => {
+        console.error('[Renderer] Process gone:', details.reason);
+        mainWindow.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
+            '<html><body style="background:#0a0a0a;color:#e5e5e5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>VersePC 崩溃</h2><p>渲染进程异常退出: ' + (details.reason || 'unknown') + '</p><p style="margin-top:20px"><button onclick="location.reload()" style="padding:8px 16px;border:1px solid #555;border-radius:6px;background:transparent;color:#e5e5e5;cursor:pointer">重新加载</button></p></div></body></html>'
+        ));
+    });
+
+    mainWindow.webContents.on('unresponsive', () => {
+        console.warn('[Renderer] Window became unresponsive');
+    });
 
     // 窗口关闭时清理引用
     mainWindow.on('closed', () => {
