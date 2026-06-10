@@ -2522,12 +2522,23 @@ function isVersionComplete(versionId) {
     if (!versionJson) return false;
 
     if (versionJson.inheritsFrom) {
-        const parentJsonPath = path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`);
-        if (!fs.existsSync(parentJsonPath)) return false;
-        const parentData = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'));
-        if (!parentData.inheritsFrom) {
-            const parentJarPath = path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`);
-            if (!fs.existsSync(parentJarPath)) return false;
+        const extFolders = loadExternalFolders();
+        let parentJsonFound = false;
+        const parentJsonSearchPaths = [];
+        for (const folder of extFolders) {
+            if (fs.existsSync(path.join(folder.path, 'versions', versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`))) {
+                parentJsonSearchPaths.push(path.join(folder.path, 'versions', versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`));
+            }
+        }
+        parentJsonSearchPaths.push(path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`));
+        for (const p of parentJsonSearchPaths) {
+            if (fs.existsSync(p)) { parentJsonFound = true; break; }
+        }
+        if (!parentJsonFound) return false;
+
+        if (!versionJson.jar) {
+            const mainJarPath = findMainJar(versionJson, versionId);
+            if (!mainJarPath || !fs.existsSync(mainJarPath)) return false;
         }
     }
 
@@ -2545,12 +2556,20 @@ function isVersionComplete(versionId) {
             const gp = fp[0].replace(/\./g, path.sep);
             const cl = fp.length >= 4 ? `-${fp[3]}` : '';
             const jn = `${fp[1]}-${fp[2]}${cl}.jar`;
-            const libPath = path.join(LIBRARIES_DIR, gp, fp[1], fp[2], jn);
+            const localPath = path.join(LIBRARIES_DIR, gp, fp[1], fp[2], jn);
+            let found = fs.existsSync(localPath);
+            if (!found) {
+                const extFolders = loadExternalFolders();
+                for (const folder of extFolders) {
+                    const extPath = path.join(folder.path, 'libraries', gp, fp[1], fp[2], jn);
+                    if (fs.existsSync(extPath)) { found = true; break; }
+                }
+            }
             const isForgeCore = (
                 (fp[0] === 'net.minecraftforge' && fp[1] === 'forge') ||
                 (fp[0] === 'net.minecraft' && fp[1] === 'client' && (fp[3] === 'srg' || fp[3] === 'extra'))
             );
-            if (isForgeCore && !fs.existsSync(libPath)) {
+            if (isForgeCore && !found) {
                 forgeCoreMissing++;
                 console.log(`[isVersionComplete] ${versionId}: Forge核心库缺失: ${jn}`);
             }
@@ -4246,6 +4265,16 @@ function selectJavaForVersion(versionId, settings, versionJson = null) {
 async function checkDependencies(versionId, settings, externalVersionDir = null) {
     console.log(`[DepCheck] 开始检查版本 ${versionId} 的依赖`);
     
+    let externalAssetsDir = null;
+    if (externalVersionDir) {
+        const exRoot = findExternalRoot(externalVersionDir) || path.dirname(path.dirname(externalVersionDir));
+        const exAssets = path.join(exRoot, 'assets');
+        if (fs.existsSync(exAssets)) {
+            externalAssetsDir = exAssets;
+            console.log(`[DepCheck] 外部资源目录: ${externalAssetsDir}`);
+        }
+    }
+    
     const result = {
         java: { ok: false, path: '', version: '', required: 8, message: '' },
         versionJson: { ok: false, message: '' },
@@ -4323,6 +4352,12 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                 jsonSearchPaths.push(path.join(externalRoot, 'versions', versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`));
             }
             jsonSearchPaths.push(path.join(path.dirname(externalVersionDir), versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`));
+            const externalFolders = loadExternalFolders();
+            for (const folder of externalFolders) {
+                if (!fs.existsSync(folder.path)) continue;
+                const candidate = path.join(folder.path, 'versions', versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`);
+                if (!jsonSearchPaths.includes(candidate)) jsonSearchPaths.push(candidate);
+            }
         }
         jsonSearchPaths.push(path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`));
 
@@ -4334,16 +4369,16 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
             }
         }
 
-        const parentJarPath = findMainJar(versionJson, versionId, externalVersionDir);
-        const parentJarFound = !!parentJarPath && fs.existsSync(parentJarPath);
+        const mainJarPath = findMainJar(versionJson, versionId, externalVersionDir);
+        const mainJarFound = !!mainJarPath && fs.existsSync(mainJarPath);
 
-        if (!parentJsonFound || !parentJarFound) {
+        if (!parentJsonFound && !mainJarFound) {
             result.parentVersion.ok = false;
             result.parentVersion.message = `缺少基础版本 ${versionJson.inheritsFrom}，请先安装`;
             result.missingFiles.push({
                 type: 'parent_version',
                 id: versionJson.inheritsFrom,
-                message: `缺少基础版本 ${versionJson.inheritsFrom} (JSON: ${parentJsonFound ? '有' : '无'}, JAR: ${parentJarFound ? '有' : '无'})`
+                message: `缺少基础版本 ${versionJson.inheritsFrom} (JSON: ${parentJsonFound ? '有' : '无'}, JAR: ${mainJarFound ? '有' : '无'})`
             });
         }
     }
@@ -4680,14 +4715,32 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
         const extraLib = forgeLibraries.find(l =>
             l.name && l.name.startsWith('net.minecraft:client:') && l.name.endsWith(':extra'));
 
+        let externalRootForForge = null;
+        if (externalVersionDir) {
+            externalRootForForge = findExternalRoot(externalVersionDir);
+            if (!externalRootForForge) externalRootForForge = path.dirname(path.dirname(externalVersionDir));
+        }
+
         const forgeCoreDir = (fp) => path.join(LIBRARIES_DIR, fp[0].replace(/\./g, path.sep), fp[1], fp[2]);
+        const forgeCoreDirExt = (fp) => externalRootForForge ? path.join(externalRootForForge, 'libraries', fp[0].replace(/\./g, path.sep), fp[1], fp[2]) : null;
+
+        const findForgeCoreFile = (fp, jarName) => {
+            const localPath = path.join(forgeCoreDir(fp), jarName);
+            if (fs.existsSync(localPath)) return localPath;
+            const extDir = forgeCoreDirExt(fp);
+            if (extDir) {
+                const extPath = path.join(extDir, jarName);
+                if (fs.existsSync(extPath)) return extPath;
+            }
+            return localPath;
+        };
 
         if (forgeClientLib) {
             const fp = forgeClientLib.name.split(':');
             const cl = fp.length >= 4 ? `-${fp[3]}` : '';
             forgeCoreLibs.push({
                 name: forgeClientLib.name,
-                path: path.join(forgeCoreDir(fp), `${fp[1]}-${fp[2]}${cl}.jar`),
+                path: findForgeCoreFile(fp, `${fp[1]}-${fp[2]}${cl}.jar`),
                 desc: 'Forge客户端核心'
             });
         }
@@ -4695,7 +4748,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
             const fp = forgeMainLib.name.split(':');
             forgeCoreLibs.push({
                 name: forgeMainLib.name,
-                path: path.join(forgeCoreDir(fp), `${fp[1]}-${fp[2]}.jar`),
+                path: findForgeCoreFile(fp, `${fp[1]}-${fp[2]}.jar`),
                 desc: 'Forge主核心'
             });
         }
@@ -4703,7 +4756,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
             const sp = srgLib.name.split(':');
             forgeCoreLibs.push({
                 name: srgLib.name,
-                path: path.join(forgeCoreDir(sp), `${sp[1]}-${sp[2]}-srg.jar`),
+                path: findForgeCoreFile(sp, `${sp[1]}-${sp[2]}-srg.jar`),
                 desc: 'Minecraft SRG映射客户端'
             });
         }
@@ -4711,7 +4764,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
             const ep = extraLib.name.split(':');
             forgeCoreLibs.push({
                 name: extraLib.name,
-                path: path.join(forgeCoreDir(ep), `${ep[1]}-${ep[2]}-extra.jar`),
+                path: findForgeCoreFile(ep, `${ep[1]}-${ep[2]}-extra.jar`),
                 desc: 'Minecraft额外客户端'
             });
         }
@@ -4721,27 +4774,36 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
             if (forgeVerMatch) {
                 const mcVer = forgeVerMatch[1];
                 const fVer = forgeVerMatch[2];
-                const forgeDir = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', `${mcVer}-${fVer}`);
-                if (fs.existsSync(forgeDir)) {
-                    try {
-                        const files = fs.readdirSync(forgeDir);
-                        const clientJar = files.find(f => f.endsWith('-client.jar'));
-                        if (clientJar) forgeCoreLibs.push({ name: `forge-client:${mcVer}-${fVer}`, path: path.join(forgeDir, clientJar), desc: 'Forge客户端核心' });
-                    } catch (_) {}
+                const forgeSearchBases = [LIBRARIES_DIR];
+                if (externalRootForForge) forgeSearchBases.unshift(path.join(externalRootForForge, 'libraries'));
+                let forgeDirFound = false;
+                for (const base of forgeSearchBases) {
+                    const forgeDir = path.join(base, 'net', 'minecraftforge', 'forge', `${mcVer}-${fVer}`);
+                    if (fs.existsSync(forgeDir)) {
+                        try {
+                            const files = fs.readdirSync(forgeDir);
+                            const clientJar = files.find(f => f.endsWith('-client.jar'));
+                            if (clientJar) { forgeCoreLibs.push({ name: `forge-client:${mcVer}-${fVer}`, path: path.join(forgeDir, clientJar), desc: 'Forge客户端核心' }); forgeDirFound = true; }
+                        } catch (_) {}
+                        break;
+                    }
                 }
-                const clientDir = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client');
-                if (fs.existsSync(clientDir)) {
-                    try {
-                        for (const sd of fs.readdirSync(clientDir)) {
-                            const fullDir = path.join(clientDir, sd);
-                            try { if (!fs.statSync(fullDir).isDirectory()) continue; } catch (_) { continue; }
-                            const files = fs.readdirSync(fullDir);
-                            const srgFile = files.find(f => f.endsWith('-srg.jar'));
-                            if (srgFile) forgeCoreLibs.push({ name: `client-srg:${sd}`, path: path.join(fullDir, srgFile), desc: 'Minecraft SRG映射客户端' });
-                            const extraFile = files.find(f => f.endsWith('-extra.jar'));
-                            if (extraFile) forgeCoreLibs.push({ name: `client-extra:${sd}`, path: path.join(fullDir, extraFile), desc: 'Minecraft额外客户端' });
-                        }
-                    } catch (_) {}
+                for (const base of forgeSearchBases) {
+                    const clientDir = path.join(base, 'net', 'minecraft', 'client');
+                    if (fs.existsSync(clientDir)) {
+                        try {
+                            for (const sd of fs.readdirSync(clientDir)) {
+                                const fullDir = path.join(clientDir, sd);
+                                try { if (!fs.statSync(fullDir).isDirectory()) continue; } catch (_) { continue; }
+                                const files = fs.readdirSync(fullDir);
+                                const srgFile = files.find(f => f.endsWith('-srg.jar'));
+                                if (srgFile) forgeCoreLibs.push({ name: `client-srg:${sd}`, path: path.join(fullDir, srgFile), desc: 'Minecraft SRG映射客户端' });
+                                const extraFile = files.find(f => f.endsWith('-extra.jar'));
+                                if (extraFile) forgeCoreLibs.push({ name: `client-extra:${sd}`, path: path.join(fullDir, extraFile), desc: 'Minecraft额外客户端' });
+                            }
+                        } catch (_) {}
+                        if (forgeCoreLibs.length > 0) break;
+                    }
                 }
                 if (forgeCoreLibs.length === 0) {
                     forgeCoreLibs.push({ name: `net.minecraftforge:forge:${mcVer}-${fVer}:client`, path: path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', `${mcVer}-${fVer}`, `forge-${mcVer}-${fVer}-client.jar`), desc: 'Forge客户端核心' });
@@ -4784,7 +4846,14 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
 
     if (versionJson.assetIndex) {
         const assetIndexInfo = versionJson.assetIndex;
-        const assetIndexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
+        let assetIndexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
+        if (!fs.existsSync(assetIndexPath) && externalAssetsDir) {
+            const exIndexPath = path.join(externalAssetsDir, 'indexes', `${assetIndexInfo.id}.json`);
+            if (fs.existsSync(exIndexPath)) {
+                assetIndexPath = exIndexPath;
+                console.log(`[DepCheck] 在外部目录找到资源索引: ${assetIndexPath}`);
+            }
+        }
 
         if (!fs.existsSync(assetIndexPath)) {
             result.assets.ok = false;
@@ -4808,7 +4877,13 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                 for (const [name, info] of assetEntries) {
                     const hash = info.hash;
                     const subDir = hash.substring(0, 2);
-                    const assetPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
+                    let assetPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
+                    if (!fs.existsSync(assetPath) && externalAssetsDir) {
+                        const exAssetPath = path.join(externalAssetsDir, 'objects', subDir, hash);
+                        if (fs.existsSync(exAssetPath)) {
+                            assetPath = exAssetPath;
+                        }
+                    }
                     if (!fs.existsSync(assetPath)) {
                         missingCount++;
                         if (missingCount <= 50) {
@@ -4849,7 +4924,13 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
     return result;
 }
 
-async function downloadMissingDependencies(missingFiles, onProgress, versionJson, maxThreads = null) {
+async function downloadMissingDependencies(missingFiles, onProgress, versionJson, maxThreads = null, externalVersionDir = null) {
+    let dlExternalAssetsDir = null;
+    if (externalVersionDir) {
+        const exRoot = findExternalRoot(externalVersionDir) || path.dirname(path.dirname(externalVersionDir));
+        const exAssets = path.join(exRoot, 'assets');
+        if (fs.existsSync(exAssets)) dlExternalAssetsDir = exAssets;
+    }
     const parentVersions = missingFiles.filter(f => f.type === 'parent_version');
     for (const pv of parentVersions) {
         console.log(`[Download] Installing missing parent version: ${pv.id}`);
@@ -4877,14 +4958,20 @@ async function downloadMissingDependencies(missingFiles, onProgress, versionJson
 
     if (versionJson?.assetIndex) {
         const assetIndexInfo = versionJson.assetIndex;
-        const assetIndexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
+        let assetIndexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
+        if (!fs.existsSync(assetIndexPath) && dlExternalAssetsDir) {
+            const exIdx = path.join(dlExternalAssetsDir, 'indexes', `${assetIndexInfo.id}.json`);
+            if (fs.existsSync(exIdx)) assetIndexPath = exIdx;
+        }
 
         if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1))) {
-            const dir = path.dirname(assetIndexPath);
+            const targetPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
+            const dir = path.dirname(targetPath);
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
             try {
-                if (fs.existsSync(assetIndexPath)) fs.unlinkSync(assetIndexPath);
-                await downloadFileWithMirror(assetIndexInfo.url, assetIndexPath);
+                if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+                await downloadFileWithMirror(assetIndexInfo.url, targetPath);
+                assetIndexPath = targetPath;
             } catch (e) {
                 console.error(`[Download] 资源索引下载失败: ${e.message}`);
             }
@@ -4899,14 +4986,18 @@ async function downloadMissingDependencies(missingFiles, onProgress, versionJson
                 for (const [name, info] of Object.entries(assetObjects)) {
                     const hash = info.hash;
                     const subDir = hash.substring(0, 2);
-                    const assetPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
+                    let assetPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
+                    if (!fs.existsSync(assetPath) && dlExternalAssetsDir) {
+                        const exPath = path.join(dlExternalAssetsDir, 'objects', subDir, hash);
+                        if (fs.existsSync(exPath)) assetPath = exPath;
+                    }
                     const assetUrl = `https://resources.download.minecraft.net/${subDir}/${hash}`;
 
                     if (!fs.existsSync(assetPath) && !existingAssetUrls.has(assetUrl)) {
                         allFiles.push({
                             type: 'asset',
                             url: assetUrl,
-                            path: assetPath,
+                            path: path.join(ASSETS_DIR, 'objects', subDir, hash),
                             sha1: hash,
                             size: info.size,
                             name: name
@@ -5298,7 +5389,6 @@ function getInstalledVersions(forceRefresh) {
         if (!fs.existsSync(folder.path)) continue;
         const externalVersions = scanExternalFolder(folder.path);
         for (const ev of externalVersions) {
-            ev.customName = folder.name || null;
             const existingIdx = installed.findIndex(v => v.id === ev.id);
             if (existingIdx >= 0) {
                 ev.id = ev.id + ' [外部]';
@@ -6684,14 +6774,6 @@ function findMainJar(versionJson, versionId, externalVersionDir = null, _visited
         searchPaths.push(path.join(VERSIONS_DIR, versionJson.jar, `${versionJson.jar}.jar`));
     }
 
-    if (versionJson.inheritsFrom) {
-        if (isExternal && externalRoot) {
-            searchPaths.push(path.join(externalRoot, 'versions', versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
-            searchPaths.push(path.join(path.dirname(externalVersionDir), versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
-        }
-        searchPaths.push(path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
-    }
-
     if (isExternal) {
         if (externalRoot) {
             searchPaths.push(path.join(externalRoot, 'versions', actualVersionId, `${actualVersionId}.jar`));
@@ -6702,6 +6784,14 @@ function findMainJar(versionJson, versionId, externalVersionDir = null, _visited
         if (externalRoot && dirName !== actualVersionId) {
             searchPaths.push(path.join(externalRoot, 'versions', dirName, `${dirName}.jar`));
         }
+    }
+
+    if (versionJson.inheritsFrom) {
+        if (isExternal && externalRoot) {
+            searchPaths.push(path.join(externalRoot, 'versions', versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
+            searchPaths.push(path.join(path.dirname(externalVersionDir), versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
+        }
+        searchPaths.push(path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
     }
     searchPaths.push(path.join(VERSIONS_DIR, actualVersionId, `${actualVersionId}.jar`));
 
@@ -7887,14 +7977,16 @@ function injectOfflineSkin(versionJson, account, assetsRoot) {
 
         const assetIndexId = versionJson.assetIndex?.id;
         if (assetIndexId) {
-            const indexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexId}.json`);
+            let indexPath = path.join(assetsRoot, 'indexes', `${assetIndexId}.json`);
+            if (!fs.existsSync(indexPath)) indexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexId}.json`);
             if (fs.existsSync(indexPath)) {
                 const indexData = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
                 const obj = indexData.objects?.[targetPath];
                 if (obj && obj.hash) {
                     const hash = obj.hash;
                     const subDir = hash.substring(0, 2);
-                    const objectPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
+                    let objectPath = path.join(assetsRoot, 'objects', subDir, hash);
+                    if (!fs.existsSync(objectPath)) objectPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
                     if (fs.existsSync(objectPath)) {
                         const backupName = `${assetIndexId}_${hash}`;
                         const backupPath = path.join(SKIN_BACKUP_DIR, backupName);
@@ -7912,7 +8004,8 @@ function injectOfflineSkin(versionJson, account, assetsRoot) {
                 if (altObj && altObj.hash) {
                     const altHash = altObj.hash;
                     const altSub = altHash.substring(0, 2);
-                    const altObjectPath = path.join(ASSETS_DIR, 'objects', altSub, altHash);
+                    let altObjectPath = path.join(assetsRoot, 'objects', altSub, altHash);
+                    if (!fs.existsSync(altObjectPath)) altObjectPath = path.join(ASSETS_DIR, 'objects', altSub, altHash);
                     if (fs.existsSync(altObjectPath)) {
                         const altBackupName = `${assetIndexId}_${altHash}`;
                         const altBackupPath = path.join(SKIN_BACKUP_DIR, altBackupName);
@@ -8682,22 +8775,39 @@ async function launchGame(versionId, settings, account) {
 
     console.log(`[LaunchGame] JSON已解析, mainClass: ${versionJson.mainClass}, inheritsFrom: ${versionJson.inheritsFrom}`);
 
-    const depCheck = await checkDependencies(cleanVersionId, settings, externalVersionDir);
+    let depCheck = await checkDependencies(cleanVersionId, settings, externalVersionDir);
 
     const scanLibsRecursive = (verId, visited = new Set()) => {
         if (visited.has(verId)) return [];
         visited.add(verId);
-        const jsonPath = path.join(VERSIONS_DIR, verId, `${verId}.json`);
+        let jsonPath = path.join(VERSIONS_DIR, verId, `${verId}.json`);
+        if (!fs.existsSync(jsonPath) && externalVersionDir) {
+            const extRoot = findExternalRoot(externalVersionDir);
+            if (extRoot) {
+                const extJson = path.join(extRoot, 'versions', verId, `${verId}.json`);
+                if (fs.existsSync(extJson)) jsonPath = extJson;
+            }
+            if (!fs.existsSync(jsonPath)) {
+                const dirJson = path.join(path.dirname(externalVersionDir), verId, `${verId}.json`);
+                if (fs.existsSync(dirJson)) jsonPath = dirJson;
+            }
+        }
         if (!fs.existsSync(jsonPath)) return [];
         let data;
         try { data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8')); } catch (e) { return []; }
+        const extLibBase = externalVersionDir ? findExternalRoot(externalVersionDir) : null;
         const libs = (data.libraries || []).map(l => {
             if (l.rules && !evaluateRules(l.rules)) return null;
             if (l.natives) return null;
             if (l.downloads?.artifact?.path) {
-                return { name: l.name, path: path.join(LIBRARIES_DIR, l.downloads.artifact.path),
-                    url: l.downloads.artifact.url, sha1: l.downloads.artifact.sha1,
-                    size: l.downloads.artifact.size, maven: null };
+                const relPath = l.downloads.artifact.path;
+                const localPath = path.join(LIBRARIES_DIR, relPath);
+                if (fs.existsSync(localPath)) return { name: l.name, path: localPath, url: l.downloads.artifact.url, sha1: l.downloads.artifact.sha1, size: l.downloads.artifact.size, maven: null };
+                if (extLibBase) {
+                    const extPath = path.join(extLibBase, 'libraries', relPath);
+                    if (fs.existsSync(extPath)) return { name: l.name, path: extPath, url: l.downloads.artifact.url, sha1: l.downloads.artifact.sha1, size: l.downloads.artifact.size, maven: null };
+                }
+                return { name: l.name, path: localPath, url: l.downloads.artifact.url, sha1: l.downloads.artifact.sha1, size: l.downloads.artifact.size, maven: null };
             }
             if (l.name) {
                 const p = l.name.split(':');
@@ -8705,8 +8815,14 @@ async function launchGame(versionId, settings, account) {
                     const gp = p[0].replace(/\./g, path.sep);
                     const cl = p.length >= 4 ? `-${p[3]}` : '';
                     const jn = `${p[1]}-${p[2]}${cl}.jar`;
-                    return { name: l.name, path: path.join(LIBRARIES_DIR, gp, p[1], p[2], jn),
-                        url: l.url || '', sha1: '', size: 0, maven: { group: p[0], artifact: p[1], version: p[2], classifier: p[3] || '' } };
+                    const mavenRelPath = path.join(gp, p[1], p[2], jn);
+                    const localMavenPath = path.join(LIBRARIES_DIR, mavenRelPath);
+                    if (fs.existsSync(localMavenPath)) return { name: l.name, path: localMavenPath, url: l.url || '', sha1: '', size: 0, maven: { group: p[0], artifact: p[1], version: p[2], classifier: p[3] || '' } };
+                    if (extLibBase) {
+                        const extMavenPath = path.join(extLibBase, 'libraries', mavenRelPath);
+                        if (fs.existsSync(extMavenPath)) return { name: l.name, path: extMavenPath, url: l.url || '', sha1: '', size: 0, maven: { group: p[0], artifact: p[1], version: p[2], classifier: p[3] || '' } };
+                    }
+                    return { name: l.name, path: localMavenPath, url: l.url || '', sha1: '', size: 0, maven: { group: p[0], artifact: p[1], version: p[2], classifier: p[3] || '' } };
                 }
             }
             return null;
@@ -8766,7 +8882,14 @@ async function launchGame(versionId, settings, account) {
         for (const chainId of [cleanVersionId, versionJson.inheritsFrom].filter(Boolean)) {
             if (forgeRepaired) break;
             if (!chainId.toLowerCase().includes('forge')) continue;
-            const forgeJsonPath = path.join(VERSIONS_DIR, chainId, `${chainId}.json`);
+            let forgeJsonPath = path.join(VERSIONS_DIR, chainId, `${chainId}.json`);
+            if (!fs.existsSync(forgeJsonPath) && externalVersionDir) {
+                const extRoot = findExternalRoot(externalVersionDir);
+                if (extRoot) {
+                    const extJson = path.join(extRoot, 'versions', chainId, `${chainId}.json`);
+                    if (fs.existsSync(extJson)) forgeJsonPath = extJson;
+                }
+            }
             if (!fs.existsSync(forgeJsonPath)) continue;
             try {
                 const forgeJson = JSON.parse(fs.readFileSync(forgeJsonPath, 'utf-8'));
@@ -8844,21 +8967,42 @@ async function launchGame(versionId, settings, account) {
     {
         let current = cleanVersionId;
         const chainVisited = new Set();
+        const chainSearchBases = [VERSIONS_DIR];
+        if (externalVersionDir) {
+            const extRoot = findExternalRoot(externalVersionDir);
+            if (extRoot) chainSearchBases.unshift(path.join(extRoot, 'versions'));
+            chainSearchBases.unshift(path.join(path.dirname(externalVersionDir), current));
+            const extFolders = loadExternalFolders();
+            for (const f of extFolders) {
+                if (fs.existsSync(path.join(f.path, 'versions'))) chainSearchBases.push(path.join(f.path, 'versions'));
+            }
+        }
         while (current && !chainVisited.has(current)) {
             chainVisited.add(current);
             chainIds.push(current);
-            const vjPath = path.join(VERSIONS_DIR, current, `${current}.json`);
-            if (fs.existsSync(vjPath)) {
-                try {
-                    const vj = JSON.parse(fs.readFileSync(vjPath, 'utf-8'));
-                    current = vj.inheritsFrom || null;
-                } catch (_) { break; }
-            } else { break; }
+            let vjFound = false;
+            for (const base of chainSearchBases) {
+                const vjPath = path.join(base, current, `${current}.json`);
+                if (fs.existsSync(vjPath)) {
+                    try {
+                        const vj = JSON.parse(fs.readFileSync(vjPath, 'utf-8'));
+                        current = vj.inheritsFrom || null;
+                        vjFound = true;
+                        break;
+                    } catch (_) { break; }
+                }
+            }
+            if (!vjFound) break;
         }
     }
     const forgeSafeChain = chainIds.some(id => id.toLowerCase().includes('forge'));
     if (forgeSafeChain) {
         const forgeSafeMissing = [];
+        let externalRootSafe = null;
+        if (externalVersionDir) {
+            externalRootSafe = findExternalRoot(externalVersionDir);
+            if (!externalRootSafe) externalRootSafe = path.dirname(path.dirname(externalVersionDir));
+        }
         for (const lib of (versionJson.libraries || [])) {
             if (!lib.name) continue;
             const fp = lib.name.split(':');
@@ -8869,9 +9013,13 @@ async function launchGame(versionId, settings, account) {
             const isForgeCore = (fp[0] === 'net.minecraftforge' && fp[1] === 'forge' && cl) ||
                                 (fp[0] === 'net.minecraft' && fp[1] === 'client' && (cl === '-srg' || cl === '-extra'));
             if (isForgeCore) {
-                const fp2 = path.join(LIBRARIES_DIR, gp, fp[1], fp[2], jn);
-                if (!fs.existsSync(fp2) || !isJarIntact(fp2)) {
-                    forgeSafeMissing.push({ desc: jn, path: fp2 });
+                const localPath = path.join(LIBRARIES_DIR, gp, fp[1], fp[2], jn);
+                if (externalRootSafe) {
+                    const extPath = path.join(externalRootSafe, 'libraries', gp, fp[1], fp[2], jn);
+                    if (fs.existsSync(extPath) && (!extPath.endsWith('.jar') || isJarIntact(extPath))) continue;
+                }
+                if (!fs.existsSync(localPath) || !isJarIntact(localPath)) {
+                    forgeSafeMissing.push({ desc: jn, path: localPath });
                 }
             }
         }
@@ -8954,59 +9102,90 @@ async function launchGame(versionId, settings, account) {
             versionId
         });
 
-        downloadMissingDependencies(nonForgeCoreMissing, (p) => {
-            if (!launchSessions.has(sessionId)) return;
-            const sess = launchSessions.get(sessionId);
-            if (p.progress !== undefined) sess.progress = p.progress;
-            if (p.file) sess.currentFile = p.file;
-            if (p.current !== undefined) sess.completedFiles = p.current;
-            if (p.total !== undefined) sess.totalFiles = p.total;
-            if (p.speed !== undefined) sess.speed = p.speed;
-            if (p.msg) sess.message = p.msg;
-            if (p.message) sess.message = p.message;
-            if (p.activeDownloads) sess.activeDownloads = p.activeDownloads;
-            if (p.failed !== undefined) sess.failed = p.failed;
-            if (p.status === 'completed' || p.status === 'completed_with_errors') sess.status = 'completed';
-            if (p.status === 'failed') {
-                sess.status = 'failed';
-                sess.message = p.message || p.msg || '下载失败';
-            }
-        }).catch(err => {
-            console.error('[LaunchGame] 异步下载失败:', err.message);
-            if (launchSessions.has(sessionId)) {
+        console.log(`[LaunchGame] 自动下载 ${nonForgeCoreMissing.length} 个缺失文件...`);
+        try {
+            await downloadMissingDependencies(nonForgeCoreMissing, (p) => {
+                if (!launchSessions.has(sessionId)) return;
                 const sess = launchSessions.get(sessionId);
+                if (p.progress !== undefined) sess.progress = p.progress;
+                if (p.file) sess.currentFile = p.file;
+                if (p.current !== undefined) sess.completedFiles = p.current;
+                if (p.total !== undefined) sess.totalFiles = p.total;
+                if (p.speed !== undefined) sess.speed = p.speed;
+                if (p.msg) sess.message = p.msg;
+                if (p.message) sess.message = p.message;
+                if (p.activeDownloads) sess.activeDownloads = p.activeDownloads;
+                if (p.failed !== undefined) sess.failed = p.failed;
+                if (p.status === 'completed' || p.status === 'completed_with_errors') sess.status = 'completed';
+                if (p.status === 'failed') {
+                    sess.status = 'failed';
+                    sess.message = p.message || p.msg || '下载失败';
+                }
+            }, versionJson, null, externalVersionDir);
+            const sess = launchSessions.get(sessionId);
+            if (sess) {
+                sess.status = 'completed';
+                sess.message = '缺失文件下载完成';
+            }
+            console.log(`[LaunchGame] 缺失文件下载完成，重新检查并启动...`);
+        } catch (dlErr) {
+            console.error(`[LaunchGame] 下载缺失文件失败: ${dlErr.message}`);
+            const sess = launchSessions.get(sessionId);
+            if (sess) {
                 sess.status = 'failed';
-                sess.message = '下载失败: ' + err.message;
+                sess.message = '下载失败: ' + dlErr.message;
             }
-        });
+            return {
+                success: false,
+                error: `缺失文件下载失败: ${dlErr.message}`,
+                needDownload: false,
+                depCheck: {
+                    java: depCheck.java,
+                    libraries: { missing: depCheck.libraries.missing.length, total: depCheck.libraries.total },
+                    natives: { missing: depCheck.natives.missing.length },
+                    assets: { missing: depCheck.assets.missing.length, total: depCheck.assets.total },
+                    mainJar: depCheck.mainJar
+                }
+            };
+        }
 
-        return {
-            success: false,
-            needDownload: true,
-            sessionId,
-            missingCount: depCheck.missingFiles.length,
-            depCheck: {
-                java: depCheck.java,
-                libraries: { missing: depCheck.libraries.missing.length, total: depCheck.libraries.total },
-                natives: { missing: depCheck.natives.missing.length },
-                assets: { missing: depCheck.assets.missing.length, total: depCheck.assets.total },
-                mainJar: depCheck.mainJar
-            }
-        };
+        depCheck = await checkDependencies(cleanVersionId, settings, externalVersionDir);
+        const stillMissing = depCheck.missingFiles.filter(f => f.type !== 'forge_core');
+        if (stillMissing.length > 0) {
+            console.log(`[LaunchGame] 下载后仍有 ${stillMissing.length} 个文件缺失`);
+            return {
+                success: false,
+                error: `仍有 ${stillMissing.length} 个文件缺失，无法启动游戏`,
+                needDownload: false,
+                depCheck: {
+                    java: depCheck.java,
+                    libraries: { missing: depCheck.libraries.missing.length, total: depCheck.libraries.total },
+                    natives: { missing: depCheck.natives.missing.length },
+                    assets: { missing: depCheck.assets.missing.length, total: depCheck.assets.total },
+                    mainJar: depCheck.mainJar
+                }
+            };
+        }
+
+        versionJson = resolveVersionJson(cleanVersionId, externalVersionDir);
+        if (!versionJson) {
+            return { success: false, error: `找不到版本 ${cleanVersionId} 的JSON文件（下载后）` };
+        }
     }
 
     return doLaunch(cleanVersionId, versionJson, settings, account, externalVersionDir, versionId);
     } catch (e) {
         console.error(`[LaunchGame] 异常: ${e.message}`);
         console.error(`[LaunchGame] 堆栈: ${e.stack}`);
+        const errDetail = { versionId, error: e.message, stack: e.stack, timestamp: new Date().toISOString() };
+        try {
+            if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+            fs.writeFileSync(path.join(LOGS_DIR, `launch-error-${Date.now()}.json`), JSON.stringify(errDetail, null, 2), 'utf-8');
+        } catch (_) {}
         return {
             success: false,
             error: `启动流程异常: ${e.message}`,
-            details: {
-                versionId,
-                error: e.message,
-                stack: e.stack
-            }
+            details: errDetail
         };
     }
 }
@@ -13495,6 +13674,12 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 }
 
                 const result = await launchGame(versionId, settings, account);
+                if (!result.success) {
+                    try {
+                        if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+                        fs.writeFileSync(path.join(LOGS_DIR, `launch-fail-${Date.now()}.json`), JSON.stringify({ versionId, result, timestamp: new Date().toISOString() }, null, 2), 'utf-8');
+                    } catch (_) {}
+                }
                 if (result.success) {
                     try {
                         const playTimePath = path.join(DATA_DIR, 'play-time.json');
@@ -13531,6 +13716,12 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     if (extV) { lcExternalDir = extV.externalVersionDir; break; }
                 }
                 const depResult = await checkDependencies(lcCleanId, lcSettings, lcExternalDir);
+                if (!depResult.parentVersion.ok || !depResult.forgeCore.ok) {
+                    try {
+                        if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+                        fs.writeFileSync(path.join(LOGS_DIR, `dep-check-${Date.now()}.json`), JSON.stringify({ versionId: lcCleanId, externalDir: lcExternalDir, parentVersion: depResult.parentVersion, forgeCore: { ok: depResult.forgeCore.ok, missingCount: depResult.forgeCore.missing?.length } }, null, 2), 'utf-8');
+                    } catch (_) {}
+                }
                 sendJSON({ success: true, ...depResult });
                 break;
             }
@@ -13614,6 +13805,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                 } else {
                                     session.status = 'launch_failed';
                                     session.message = `启动失败: ${launchResult.error}`;
+                                    try {
+                                        if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+                                        fs.writeFileSync(path.join(LOGS_DIR, `launch-deps-fail-${Date.now()}.json`), JSON.stringify({ versionId: ldVersionId, externalDir: ldExternalDir, launchResult, timestamp: new Date().toISOString() }, null, 2), 'utf-8');
+                                    } catch (_) {}
                                 }
                             }
                         }

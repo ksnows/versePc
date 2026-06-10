@@ -6965,19 +6965,20 @@ async function handleLaunch() {
         if (depCheck.libraries && depCheck.libraries.missing.length > 0) {
             const libMsg = `${depCheck.libraries.missing.length}/${depCheck.libraries.total} 个库文件缺失`;
             setLaunchStep('assets-check', 'warning', libMsg);
-            
-            if (!depCheck.ready && depCheck.missingFiles && depCheck.missingFiles.length > 0) {
-                setLaunchStep('download', 'running', '正在下载缺失文件...');
-                
-                const result = await API.launchGame(versionId);
-                
-                if (result.needDownload && result.sessionId) {
-                    pollLaunchDownload(result.sessionId, versionId, requiredJava);
-                    return;
-                }
-            }
         } else {
             setLaunchStep('assets-check', 'success', '所有资源文件完整');
+        }
+
+        const hasMissing = depCheck.missingFiles && depCheck.missingFiles.length > 0;
+        const assetsMissing = depCheck.assets && depCheck.assets.missing > 0;
+        if (hasMissing || assetsMissing) {
+            const missingCount = (depCheck.missingFiles && depCheck.missingFiles.length) || (depCheck.assets ? depCheck.assets.missing : 0);
+            setLaunchStep('download', 'running', `正在下载 ${missingCount} 个缺失文件...`);
+            const dlResult = await API.launchGame(versionId);
+            if (dlResult.needDownload && dlResult.sessionId) {
+                pollLaunchDownload(dlResult.sessionId, versionId, requiredJava);
+                return;
+            }
         }
 
         setLaunchStep('build-args', 'running', '正在构建启动参数...');
@@ -6987,6 +6988,11 @@ async function handleLaunch() {
         setLaunchStep('launching', 'running', '正在启动 Minecraft...');
         
         const result = await API.launchGame(versionId);
+
+        if (result.needDownload && result.sessionId) {
+            pollLaunchDownload(result.sessionId, versionId, requiredJava);
+            return;
+        }
 
         if (result.success) {
             setLaunchStep('launching', 'success', '游戏进程已创建');
