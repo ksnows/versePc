@@ -1102,20 +1102,31 @@ function reloadServerModule() {
 // GPU 硬件加速回退 - 解决 Windows 11 家庭版黑屏问题
 // ============================================================================
 const disableGpuFile = path.join(app.getPath('userData'), '.disable-gpu');
+const enableGpuFile = path.join(app.getPath('userData'), '.enable-gpu');
 const safeMode = process.argv.includes('--safe-mode') || process.argv.includes('--disable-gpu');
-if (require('fs').existsSync(disableGpuFile) || safeMode) {
+const forceGpu = process.argv.includes('--enable-gpu') || process.argv.includes('--force-gpu');
+
+// 启动器不需要 GPU 加速，默认禁用以确保兼容性
+// 只有用户主动启用 GPU 时才开启
+const shouldDisableGpu = forceGpu
+    ? false
+    : (safeMode || !require('fs').existsSync(enableGpuFile));
+
+if (shouldDisableGpu) {
     app.disableHardwareAcceleration();
     app.commandLine.appendSwitch('disable-gpu');
-    console.log('[GPU] Hardware acceleration disabled' + (safeMode ? ' (safe mode)' : ' (flag file)'));
+    app.commandLine.appendSwitch('use-gl', 'swiftshader');
+    if (safeMode) console.log('[GPU] Hardware acceleration disabled (safe mode)');
+} else {
+    console.log('[GPU] Hardware acceleration enabled by user');
 }
 
 app.on('gpu-info-update', () => {
     try {
         const info = app.getGPUFeatureInfo();
         if (info && info.status === 3) {
-            app.disableHardwareAcceleration();
+            console.log('[GPU] GPU fallen back to software rendering, disabling for next launch');
             require('fs').writeFileSync(disableGpuFile, '1');
-            console.log('[GPU] Hardware acceleration disabled due to GPU error');
         }
     } catch (e) {}
 });
