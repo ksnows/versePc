@@ -1,13 +1,13 @@
 {
-  "version": "1.0.13",
+  "version": "1.0.14",
   "releaseDate": "2026-06-10T00:00:00Z",
-  "releaseName": "VersePC v1.0.13",
-  "releaseNotes": "## 更新内容\n- 新增更新检测弹窗通知，检测到更新自动弹出提示\n- 设置按钮新增红点提示，提醒有可用更新\n- 修复Win11家庭版黑屏问题（GPU硬件加速回退）\n- 修复崩溃后覆盖安装黑屏问题（单实例锁+残留进程清理）\n- 修复运行30分钟后崩溃的问题\n- 修复崩溃后无法重启的问题\n- 修复皮肤上传JSON解析错误\n- 优化AI对话内存管理\n- 更新卡片黑白配色优化",
+  "releaseName": "VersePC v1.0.14",
+  "releaseNotes": "## 更新内容\n- 默认禁用GPU硬件加速，彻底解决Win11黑屏问题\n- 新增更新检测弹窗通知，检测到更新自动弹出提示\n- 设置按钮新增红点提示，提醒有可用更新\n- 修复崩溃后覆盖安装黑屏问题（单实例锁+残留进程清理）\n- 修复运行30分钟后崩溃的问题\n- 修复崩溃后无法重启的问题\n- 修复皮肤上传JSON解析错误\n- 优化AI对话内存管理\n- 更新卡片黑白配色优化",
   "files": {
     "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.0.13/VersePC-Setup-1.0.13.exe",
-      "sha256": "E7E42BA51C20FD5FB120E292AC48DECA870F8DF0DADE35683E814A9AD262FD73",
-      "size": 162784048
+      "url": "https://github.com/doujie081231/versePc/releases/download/v1.0.14/VersePC-Setup-1.0.14.exe",
+      "sha256": "4802EE8DE6318CBF0122426EFF204FAE9E7F742A38B7D8D992031BD68446D0F8",
+      "size": 162784251
     }
   },
   "minSupportedVersion": "1.0.0",
