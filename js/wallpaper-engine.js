@@ -260,6 +260,7 @@ class PanoramaRenderer {
         this.loaded = false;
         this.autoRotation = 0;
         this.ROTATION_SPEED = 0.005;
+        this.mouseFollowEnabled = false;
         this.currentTheme = 'overworld';
         this.init();
     }
@@ -337,14 +338,18 @@ class PanoramaRenderer {
         if (!this.threeRenderer || !this.cube) return;
 
         this.autoRotation += this.ROTATION_SPEED * dt * 0.06;
-
-        const mouseInfluenceY = this.engine.mouseX * 0.4;
-        const mouseInfluenceX = -this.engine.mouseY * 0.2;
-
-        this.cube.rotation.y = this.autoRotation + mouseInfluenceY;
-        this.cube.rotation.x = mouseInfluenceX;
-
+        this.cube.rotation.y = this.autoRotation;
+        if (this.mouseFollowEnabled) {
+            this.cube.rotation.y += this.engine.mouseX * 0.4;
+            this.cube.rotation.x = -this.engine.mouseY * 0.2;
+        } else {
+            this.cube.rotation.x = 0;
+        }
         this.threeRenderer.render(this.threeScene, this.threeCamera);
+    }
+
+    setRotationSpeed(speed) {
+        this.ROTATION_SPEED = speed;
     }
 
     destroy() {
@@ -629,4 +634,10 @@ function setPanoramaTheme(theme) {
 
 function onWallpaperBrightnessChange(callback) {
     if (wallpaperEngine) wallpaperEngine.onBrightnessChange(callback);
+}
+
+function setPanoramaRotationSpeed(speed) {
+    if (wallpaperEngine && wallpaperEngine.renderer instanceof PanoramaRenderer) {
+        wallpaperEngine.renderer.setRotationSpeed(speed);
+    }
 }

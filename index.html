@@ -1885,8 +1885,8 @@
                                     <span class="toolbox-desc">全球最大 MC 社区</span>
                                 </div>
                             </div>
-                            <div class="toolbox-card" onclick="window.electronAPI.openExternal('https://www.mcbbs.net')">
-                                <img src="https://favicon.im/mcbbs.net" alt="" class="toolbox-icon" onerror="this.onerror=null;this.src='https://www.google.com/s2/favicons?domain=mcbbs.net&sz=32'" loading="lazy">
+                            <div class="toolbox-card" onclick="window.electronAPI.openExternal('https://www.mcbbs.co/forum.php')">
+                                <img src="https://favicon.im/mcbbs.co" alt="" class="toolbox-icon" onerror="this.onerror=null;this.src='https://www.google.com/s2/favicons?domain=mcbbs.co&sz=32'" loading="lazy">
                                 <div class="toolbox-info">
                                     <span class="toolbox-name">MCBBS</span>
                                     <span class="toolbox-desc">国内最大 MC 中文论坛</span>
@@ -2739,6 +2739,11 @@
                                         <span class="wallpaper-name">苍白森林</span>
                                     </div>
                                 </div>
+                            </div>
+                            <div class="wallpaper-control-row" id="panoramaSpeedRow" style="display:none;">
+                                <label>转速</label>
+                                <input type="range" min="1" max="20" value="5" step="1" id="panoramaSpeedSlider" oninput="onPanoramaSpeedChange(this.value)" style="flex:1;margin:0 12px;">
+                                <span id="panoramaSpeedLabel" style="min-width:20px;text-align:center;">5</span>
                             </div>
                             <div class="form-group" id="custom-wallpaper-file-group" style="display:none;">
                                 <label id="custom-wallpaper-file-label">选择文件</label>

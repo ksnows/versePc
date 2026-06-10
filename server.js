@@ -2171,7 +2171,7 @@ function handleWSMessage(ws, msg) {
     }
 }
 
-[DATA_DIR, VERSIONS_DIR, LIBRARIES_DIR, ASSETS_DIR, JAVA_DIR, NATIVES_DIR, LOGS_DIR, ICON_CACHE_DIR].forEach(dir => {
+[DATA_DIR, VERSIONS_DIR, LIBRARIES_DIR, ASSETS_DIR, NATIVES_DIR, LOGS_DIR, ICON_CACHE_DIR].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
@@ -3328,7 +3328,7 @@ function saveVersionSettings(versionId, settings) {
             throw new Error('Invalid versionId');
         }
         const versionDir = path.join(VERSIONS_DIR, cleanId);
-        if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true });
+        if (!fs.existsSync(versionDir)) return;
         settingsFile = path.join(versionDir, 'version-settings.json');
     }
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
@@ -5628,11 +5628,13 @@ function parseModJar(jarPath) {
         var entries = zip.getEntries();
         var fabricModJson = null;
         var modsToml = null;
+        var neoForgeModsToml = null;
         for (var i = 0; i < entries.length; i++) {
             var entry = entries[i];
             if (entry.isDirectory) continue;
             var name = entry.entryName;
             if (name === 'fabric.mod.json') fabricModJson = entry;
+            else if (name === 'META-INF/neoforge.mods.toml') neoForgeModsToml = entry;
             else if (name === 'META-INF/mods.toml') modsToml = entry;
         }
 
@@ -5677,16 +5679,33 @@ function parseModJar(jarPath) {
             } catch (e) {}
         }
 
+        var parseTomlMod = function (tomlText) {
+            if (!tomlText) return;
+            var nm = tomlText.match(/displayName\s*=\s*"([^"]+)"/);
+            if (nm && !result.name) result.name = nm[1];
+            var dm = tomlText.match(/description\s*=\s*"""([\s\S]*?)"""/);
+            if (!dm) dm = tomlText.match(/description\s*=\s*"([^"]+)"/);
+            if (dm && !result.desc) result.desc = dm[1].trim();
+            var vm = tomlText.match(/version\s*=\s*"([^"]+)"/);
+            if (vm && result.version === '1.0') result.version = vm[1];
+            var am = tomlText.match(/authors\s*=\s*\[([^\]]+)\]/);
+            if (am && !result.author) {
+                result.author = am[1].split(',').map(function(s){ return s.trim().replace(/^"|"$/g, ''); }).join(', ');
+            } else if (!result.author) {
+                var am2 = tomlText.match(/author\s*=\s*"([^"]+)"/);
+                if (am2) result.author = am2[1];
+            }
+            var mm = tomlText.match(/modId\s*=\s*"([^"]+)"/);
+            if (mm && !result.projectId) result.projectId = mm[1];
+            var lm = tomlText.match(/logoFile\s*=\s*"([^"]+)"/);
+            if (lm && !iconPath) iconPath = lm[1];
+        };
+
+        if (neoForgeModsToml) {
+            try { parseTomlMod(neoForgeModsToml.getData().toString('utf8')); } catch (e) {}
+        }
         if (modsToml) {
-            try {
-                var toml = modsToml.getData().toString('utf8');
-                if (!result.name) { var nm = toml.match(/displayName\s*=\s*"([^"]+)"/); if (nm) result.name = nm[1]; }
-                if (!result.desc) { var dm = toml.match(/description\s*=\s*"([^"]+)"/); if (dm) result.desc = dm[1]; }
-                if (result.version === '1.0') { var vm = toml.match(/version\s*=\s*"([^"]+)"/); if (vm) result.version = vm[1]; }
-                if (!result.author) { var am = toml.match(/author\s*=\s*"([^"]+)"/); if (am) result.author = am[1]; }
-                if (!result.projectId) { var mm = toml.match(/modId\s*=\s*"([^"]+)"/); if (mm) result.projectId = mm[1]; }
-                if (!iconPath) { var lm = toml.match(/logoFile\s*=\s*"([^"]+)"/); if (lm) iconPath = lm[1]; }
-            } catch (e) {}
+            try { parseTomlMod(modsToml.getData().toString('utf8')); } catch (e) {}
         }
 
         if (!iconPath) {
@@ -6713,71 +6732,17 @@ async function autoInstallJava(requiredVersion = 17) {
         return { installed: false, javaPath: suitable.path, version: suitable.version, majorVersion: suitable.majorVersion };
     }
 
-    const componentMap = {
-        8: 'java-runtime-alpha',
-        16: 'java-runtime-gamma',
-        17: 'java-runtime-gamma',
-        21: 'java-runtime-delta'
-    };
-    const component = componentMap[requiredVersion] || 'java-runtime-gamma';
-
     const sessionId = `java-auto-${Date.now()}`;
     javaInstallSessions.set(sessionId, {
-        status: 'pending',
+        status: 'need_manual',
         progress: 0,
-        message: '正在准备Java安装...',
-        component,
+        message: `未找到合适的Java运行环境（需要 Java ${requiredVersion}），请在设置中手动安装或配置Java路径`,
+        component: '',
         source: '',
         speed: 0
     });
 
-    try {
-        const result = await downloadJavaRuntime(component, (progress) => {
-            const session = javaInstallSessions.get(sessionId);
-            if (session) {
-                session.status = 'downloading';
-                session.progress = progress.progress;
-                session.message = `下载�? ${progress.file} (${progress.current}/${progress.total})`;
-                session.source = progress.source || '';
-                session.speed = progress.speed || 0;
-                session.downloadedBytes = progress.downloadedBytes || 0;
-                session.totalBytes = progress.totalBytes || 0;
-            }
-        });
-
-        const session = javaInstallSessions.get(sessionId);
-        if (session) {
-            session.status = 'configuring';
-            session.progress = 95;
-            session.message = '正在配置Java环境变量...';
-        }
-
-        if (result.javaHome) {
-            try {
-                configureJavaEnv(result.javaHome, requiredVersion);
-                console.log(`[Java] autoInstallJava 环境变量配置成功: ${result.javaHome}`);
-            } catch (envErr) {
-                console.warn(`[Java] autoInstallJava 环境变量配置失败(不影响使用): ${envErr.message}`);
-            }
-        }
-
-        if (session) {
-            session.status = 'completed';
-            session.progress = 100;
-            session.message = 'Java运行时安装完成！环境变量已配置。';
-            session.result = result;
-        }
-
-        return { installed: true, javaPath: result.path, version: result.version, component: result.component, source: result.source, sessionId };
-    } catch (e) {
-        const session = javaInstallSessions.get(sessionId);
-        if (session) {
-            session.status = 'failed';
-            session.message = `安装失败: ${e.message}`;
-            session.error = e.message;
-        }
-        throw e;
-    }
+    return { installed: false, needManual: true, message: `未找到合适的Java运行环境（需要 Java ${requiredVersion}），请在设置中手动安装或配置Java路径`, sessionId };
 }
 
 function findMainJar(versionJson, versionId, externalVersionDir = null, _visited = null) {
@@ -8709,23 +8674,6 @@ function applyWindowSettings(gameDir, settings) {
                 optionsContent = 'fullscreen:true\n';
             }
             console.log('[Options] 已设置 fullscreen:true (全屏模式)');
-        }
-
-        if (settings.resolution) {
-            const [w, h] = settings.resolution.split('x');
-            if (w && h) {
-                if (optionsContent.match(/^overrideWidth:/m)) {
-                    optionsContent = optionsContent.replace(/^overrideWidth:.+$/m, `overrideWidth:${w}`);
-                } else {
-                    optionsContent += `\noverrideWidth:${w}`;
-                }
-                if (optionsContent.match(/^overrideHeight:/m)) {
-                    optionsContent = optionsContent.replace(/^overrideHeight:.+$/m, `overrideHeight:${h}`);
-                } else {
-                    optionsContent += `\noverrideHeight:${h}`;
-                }
-                console.log(`[Options] 已设置窗口大小: ${w}x${h}`);
-            }
         }
 
         const dir = path.dirname(optionsPath);
@@ -12433,6 +12381,82 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     }
 
     const mergedJson = resolveVersionJson(versionId);
+
+    if (mergedJson && mergedJson.assetIndex) {
+        progress('assets', '正在下载游戏资源...', 93, [], '');
+        try {
+            const assetIndexInfo = mergedJson.assetIndex;
+            const assetIndexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
+            if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1))) {
+                const idxDir = path.dirname(assetIndexPath);
+                if (!fs.existsSync(idxDir)) fs.mkdirSync(idxDir, { recursive: true });
+                if (fs.existsSync(assetIndexPath)) fs.unlinkSync(assetIndexPath);
+                await downloadFileWithMirror(assetIndexInfo.url, assetIndexPath);
+            }
+            if (fs.existsSync(assetIndexPath)) {
+                const assetIndexData = JSON.parse(fs.readFileSync(assetIndexPath, 'utf-8'));
+                const assetObjects = assetIndexData.objects || {};
+                const assetEntries = Object.entries(assetObjects);
+                let missingAssets = [];
+                for (const [name, info] of assetEntries) {
+                    const hash = info.hash;
+                    const subDir = hash.substring(0, 2);
+                    const assetPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
+                    if (!fs.existsSync(assetPath)) {
+                        missingAssets.push({ name, hash, subDir, size: info.size });
+                    }
+                }
+                if (missingAssets.length > 0) {
+                    console.log(`[mrpack] 资源文件缺失 ${missingAssets.length}/${assetEntries.length} 个，开始下载...`);
+                    const ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, 16);
+                    let assetDone = 0;
+                    const assetTotal = missingAssets.length;
+                    const runAssetBatch = async () => {
+                        while (missingAssets.length > 0) {
+                            if (abortSignal && abortSignal.aborted) break;
+                            const asset = missingAssets.pop();
+                            const targetDir = path.join(ASSETS_DIR, 'objects', asset.subDir);
+                            if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+                            const targetPath = path.join(targetDir, asset.hash);
+                            try {
+                                await downloadFileWithMirror(`https://resources.download.minecraft.net/${asset.subDir}/${asset.hash}`, targetPath);
+                            } catch (e) {
+                                console.warn(`[mrpack] 资源 ${asset.name} 下载失败: ${e.message}`);
+                            }
+                            assetDone++;
+                            if (assetDone % 20 === 0) {
+                                const pct = 93 + Math.round((assetDone / assetTotal) * 4);
+                                progress('assets', `下载资源 (${assetDone}/${assetTotal})`, Math.min(pct, 97), [], '');
+                            }
+                        }
+                    };
+                    const assetPool = [];
+                    for (let i = 0; i < Math.min(ASSET_PARALLEL, assetTotal); i++) assetPool.push(runAssetBatch());
+                    await Promise.all(assetPool);
+                    console.log(`[mrpack] 资源下载完成: ${assetDone}/${assetTotal}`);
+                } else {
+                    console.log(`[mrpack] 所有 ${assetEntries.length} 个资源文件已就绪`);
+                }
+            }
+        } catch (e) {
+            console.warn(`[mrpack] 资源下载异常(非致命): ${e.message}`);
+        }
+    }
+
+    if (mergedJson && mergedJson.inheritsFrom) {
+        const mainJarId = mergedJson.jar || mergedJson.inheritsFrom;
+        const mainJarPath = path.join(VERSIONS_DIR, mainJarId, `${mainJarId}.jar`);
+        if (!fs.existsSync(mainJarPath) && mergedJson.downloads?.client) {
+            progress('assets', '正在下载客户端JAR...', 97, [], '');
+            try {
+                const jarDir = path.dirname(mainJarPath);
+                if (!fs.existsSync(jarDir)) fs.mkdirSync(jarDir, { recursive: true });
+                await downloadFileWithMirror(mergedJson.downloads.client.url, mainJarPath);
+            } catch (e) {
+                console.warn(`[mrpack] 客户端JAR下载失败(非致命): ${e.message}`);
+            }
+        }
+    }
     if (mergedJson && forgeVer) {
         const forgeCoreCheck = [];
         const mergedLibs = mergedJson.libraries || [];
@@ -12892,6 +12916,82 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     }
 
     const cfMergedJson = resolveVersionJson(versionId);
+
+    if (cfMergedJson && cfMergedJson.assetIndex) {
+        progress('assets', '正在下载游戏资源...', 93, [], '');
+        try {
+            const cfAssetIndexInfo = cfMergedJson.assetIndex;
+            const cfAssetIndexPath = path.join(ASSETS_DIR, 'indexes', `${cfAssetIndexInfo.id}.json`);
+            if (!fs.existsSync(cfAssetIndexPath) || (cfAssetIndexInfo.sha1 && !await verifyFileSha1(cfAssetIndexPath, cfAssetIndexInfo.sha1))) {
+                const cfIdxDir = path.dirname(cfAssetIndexPath);
+                if (!fs.existsSync(cfIdxDir)) fs.mkdirSync(cfIdxDir, { recursive: true });
+                if (fs.existsSync(cfAssetIndexPath)) fs.unlinkSync(cfAssetIndexPath);
+                await downloadFileWithMirror(cfAssetIndexInfo.url, cfAssetIndexPath);
+            }
+            if (fs.existsSync(cfAssetIndexPath)) {
+                const cfAssetIndexData = JSON.parse(fs.readFileSync(cfAssetIndexPath, 'utf-8'));
+                const cfAssetObjects = cfAssetIndexData.objects || {};
+                const cfAssetEntries = Object.entries(cfAssetObjects);
+                let cfMissingAssets = [];
+                for (const [name, info] of cfAssetEntries) {
+                    const hash = info.hash;
+                    const subDir = hash.substring(0, 2);
+                    const aPath = path.join(ASSETS_DIR, 'objects', subDir, hash);
+                    if (!fs.existsSync(aPath)) {
+                        cfMissingAssets.push({ name, hash, subDir, size: info.size });
+                    }
+                }
+                if (cfMissingAssets.length > 0) {
+                    console.log(`[CurseForge] 资源文件缺失 ${cfMissingAssets.length}/${cfAssetEntries.length} 个，开始下载...`);
+                    const CF_ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, 16);
+                    let cfAssetDone = 0;
+                    const cfAssetTotal = cfMissingAssets.length;
+                    const runCfAssetBatch = async () => {
+                        while (cfMissingAssets.length > 0) {
+                            if (abortSignal && abortSignal.aborted) break;
+                            const asset = cfMissingAssets.pop();
+                            const targetDir = path.join(ASSETS_DIR, 'objects', asset.subDir);
+                            if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+                            const targetPath = path.join(targetDir, asset.hash);
+                            try {
+                                await downloadFileWithMirror(`https://resources.download.minecraft.net/${asset.subDir}/${asset.hash}`, targetPath);
+                            } catch (e) {
+                                console.warn(`[CurseForge] 资源 ${asset.name} 下载失败: ${e.message}`);
+                            }
+                            cfAssetDone++;
+                            if (cfAssetDone % 20 === 0) {
+                                const pct = 93 + Math.round((cfAssetDone / cfAssetTotal) * 4);
+                                progress('assets', `下载资源 (${cfAssetDone}/${cfAssetTotal})`, Math.min(pct, 97), [], '');
+                            }
+                        }
+                    };
+                    const cfAssetPool = [];
+                    for (let i = 0; i < Math.min(CF_ASSET_PARALLEL, cfAssetTotal); i++) cfAssetPool.push(runCfAssetBatch());
+                    await Promise.all(cfAssetPool);
+                    console.log(`[CurseForge] 资源下载完成: ${cfAssetDone}/${cfAssetTotal}`);
+                } else {
+                    console.log(`[CurseForge] 所有 ${cfAssetEntries.length} 个资源文件已就绪`);
+                }
+            }
+        } catch (e) {
+            console.warn(`[CurseForge] 资源下载异常(非致命): ${e.message}`);
+        }
+    }
+
+    if (cfMergedJson && cfMergedJson.inheritsFrom) {
+        const cfMainJarId = cfMergedJson.jar || cfMergedJson.inheritsFrom;
+        const cfMainJarPath = path.join(VERSIONS_DIR, cfMainJarId, `${cfMainJarId}.jar`);
+        if (!fs.existsSync(cfMainJarPath) && cfMergedJson.downloads?.client) {
+            progress('assets', '正在下载客户端JAR...', 97, [], '');
+            try {
+                const cfJarDir = path.dirname(cfMainJarPath);
+                if (!fs.existsSync(cfJarDir)) fs.mkdirSync(cfJarDir, { recursive: true });
+                await downloadFileWithMirror(cfMergedJson.downloads.client.url, cfMainJarPath);
+            } catch (e) {
+                console.warn(`[CurseForge] 客户端JAR下载失败(非致命): ${e.message}`);
+            }
+        }
+    }
     if (cfMergedJson && (forgeVerCF || neoforgeVerCF)) {
         const cfForgeCoreCheck = [];
         const cfMergedLibs = cfMergedJson.libraries || [];
@@ -13689,9 +13789,16 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             }
 
             case '/api/launch': {
+                if (global._versepc_launching) {
+                    sendJSON({ success: false, error: '正在启动中，请稍候' });
+                    break;
+                }
+                global._versepc_launching = true;
+                setTimeout(() => { global._versepc_launching = false; }, 30000);
+
                 const data = await readBody();
                 const versionId = data.versionId;
-                if (!versionId) { sendError('Missing versionId', 400); break; }
+                if (!versionId) { sendError('Missing versionId', 400); global._versepc_launching = false; break; }
                 const settings = loadSettingsCached();
 
                 try {
@@ -13804,6 +13911,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         console.error('[PlayTime] 记录启动时间失败:', e.message);
                     }
                 }
+                global._versepc_launching = false;
                 sendJSON(result);
                 break;
             }
@@ -16271,57 +16379,17 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             return;
                         }
 
-                        const componentMap = { 8: 'java-runtime-alpha', 16: 'java-runtime-gamma', 17: 'java-runtime-gamma', 21: 'java-runtime-delta', 25: 'java-runtime-epsilon' };
-                        const component = componentMap[requiredVersion] || 'java-runtime-gamma';
-
                         const s = javaInstallSessions.get(aiSessionId);
                         if (s) {
-                            s.status = 'pending';
-                            s.message = `未检测到Java ${requiredVersion}+，正在自动安�?..`;
-                            s.component = component;
-                        }
-
-                        const result = await downloadJavaRuntime(component, (progress) => {
-                            const session = javaInstallSessions.get(aiSessionId);
-                            if (session) {
-                                session.status = 'downloading';
-                                session.progress = progress.progress;
-                                session.message = `下载�? ${progress.file} (${progress.current}/${progress.total})`;
-                                session.source = progress.source || '';
-                                session.speed = progress.speed || 0;
-                                session.downloadedBytes = progress.downloadedBytes || 0;
-                                session.totalBytes = progress.totalBytes || 0;
-                            }
-                        });
-
-                        const session = javaInstallSessions.get(aiSessionId);
-                        if (session) {
-                            session.status = 'configuring';
-                            session.progress = 95;
-                            session.message = '正在配置Java环境变量...';
-                        }
-
-                        if (result.javaHome) {
-                            try {
-                                configureJavaEnv(result.javaHome, requiredVersion);
-                                console.log(`[Java] auto-install 环境变量配置成功: ${result.javaHome}`);
-                            } catch (envErr) {
-                                console.warn(`[Java] auto-install 环境变量配置失败(不影响使用): ${envErr.message}`);
-                            }
-                        }
-
-                        session = javaInstallSessions.get(aiSessionId);
-                        if (session) {
-                            session.status = 'completed';
-                            session.progress = 100;
-                            session.message = 'Java运行时安装完成！环境变量已配置。';
-                            session.result = result;
+                            s.status = 'need_manual';
+                            s.progress = 0;
+                            s.message = `未找到合适的Java运行环境（需要 Java ${requiredVersion}），请在设置中手动安装或配置Java路径`;
                         }
                     } catch (e) {
                         const errSession = javaInstallSessions.get(aiSessionId);
                         if (errSession) {
                             errSession.status = 'failed';
-                            errSession.message = `安装失败: ${e.message}`;
+                            errSession.message = `检测失败: ${e.message}`;
                             errSession.error = e.message;
                         }
                     }
@@ -20000,11 +20068,6 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             defaultPath = path.join(MINECRAFT_DIR, 'mods');
                         }
                     }
-                    
-                    if (!fs.existsSync(defaultPath)) {
-                        fs.mkdirSync(defaultPath, { recursive: true });
-                    }
-                    
                     sendJSON(defaultPath);
                 } catch (e) {
                     sendError(e.message);
@@ -20028,11 +20091,6 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             defaultPath = path.join(DATA_DIR, folderName);
                         }
                     }
-
-                    if (!fs.existsSync(defaultPath)) {
-                        fs.mkdirSync(defaultPath, { recursive: true });
-                    }
-
                     sendJSON(defaultPath);
                 } catch (e) {
                     sendError(e.message);

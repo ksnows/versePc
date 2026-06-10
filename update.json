@@ -1,13 +1,13 @@
 {
-  "version": "1.0.17",
-  "releaseDate": "2026-06-10T00:00:00Z",
-  "releaseName": "VersePC v1.0.17",
-  "releaseNotes": "## 更新内容\n- 修复正版账号详情页皮肤3D模型不显示（优先使用Session Server获取完整皮肤纹理）\n- 修复下载版本进度条卡住/乱跳（参考PCL2平滑进度算法）\n- 修复导入整合包失败（解压重试机制 + isJarIntact宽松化）\n- 安装进度条使用权重加权平滑计算，不再跳跃\n- 下载 stall 期间发送进度通知，前端实时感知\n- 修复Forge版本整合包下载安装失败（读取installer.jar中的version JSON + Forge版本号标准化）",
+  "version": "1.1.0",
+  "releaseDate": "2026-06-11T00:00:00Z",
+  "releaseName": "VersePC v1.1.0",
+  "releaseNotes": "## 更新内容\n- 全景场景改为纯自动旋转，移除鼠标跟随（避免头晕），新增转速自由调节（1-20档）\n- 修复整合包下载后启动提示缺少文件（补全 assets 下载和客户端 JAR 验证）\n- 修复 PCL2 整合包不显示 mod（新增 NeoForge mods.toml 支持）\n- 修复多次快速启动导致崩溃（前端+后端双层防抖锁）\n- Java 缺失时不再自动下载，改为提示用户手动配置\n- 修复游戏窗口大小调节没效果（参考 PCL2，分辨率通过命令行参数传递）\n- 修复 C 盘创建无用文件夹和空文件夹占空间问题\n- 修复 MCBBS 链接打不开（更新为 mcbbs.co）\n- 修复准星设置保存失效（启动器不再覆盖 options.txt 中的准星设置）",
   "files": {
     "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.0.17/VersePC-Setup-1.0.17.exe",
-      "sha256": "06FA5E28724A7C644BA06530B051F99EE7A08A412CA013FCA46E5F41F404497F",
-      "size": 162787135
+      "url": "https://github.com/doujie081231/versePc/releases/download/v1.1.0/VersePC-Setup-1.1.0.exe",
+      "sha256": "c86e5913a341afecc545932effba54f03f9320fe08bcfdaa162e6fdcf84f3449",
+      "size": 162787862
     }
   },
   "minSupportedVersion": "1.0.0",

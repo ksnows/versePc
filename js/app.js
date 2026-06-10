@@ -1342,6 +1342,15 @@ async function init() {
                 if (themeEl) selectPanoramaTheme(themeEl);
             }
 
+            const savedPanoramaSpeed = await window.electronAPI?.store?.get('versepc_panorama_speed');
+            if (savedPanoramaSpeed) {
+                const slider = document.getElementById('panoramaSpeedSlider');
+                if (slider) slider.value = savedPanoramaSpeed;
+                const label = document.getElementById('panoramaSpeedLabel');
+                if (label) label.textContent = savedPanoramaSpeed;
+                if (typeof setPanoramaRotationSpeed === 'function') setPanoramaRotationSpeed(savedPanoramaSpeed * 0.001);
+            }
+
             const savedCustomImage = await window.electronAPI.store.get('versepc_custom_image');
             if (savedCustomImage) {
                 const nameEl = document.getElementById('custom-wallpaper-file-name');
@@ -6850,8 +6859,15 @@ async function selectThirdPartyProfile(profileId, profileName) {
 // 游戏启动流程 - 检查依赖、显示启动模态框、处理进度
 // ============================================================================
 async function handleLaunch() {
+    if (window._versepc_launching) {
+        if (typeof showToast === 'function') showToast('正在启动中，请稍候...', 'info');
+        return;
+    }
+    window._versepc_launching = true;
+    setTimeout(() => { window._versepc_launching = false; }, 30000);
+
     const versionId = launchVersionCustomSelect ? launchVersionCustomSelect.getValue() : '';
-    if (!versionId) { showToast('请选择游戏版本', 'error'); return; }
+    if (!versionId) { showToast('请选择游戏版本', 'error'); window._versepc_launching = false; return; }
 
     _cachedLastLaunchVersion = versionId;
     try { await window.electronAPI.store.set('versepc_last_launch_version', versionId); } catch (_) {}
@@ -6881,7 +6897,7 @@ async function handleLaunch() {
         
         if (!depCheck.java || !depCheck.java.ok) {
             const requiredVer = requiredJava;
-            setLaunchStep('java-check', 'running', `Java ${requiredVer}+ 未找到，正在自动安装...`);
+            setLaunchStep('java-check', 'running', `Java ${requiredVer}+ 未找到，正在检测...`);
             try {
                 const javaInstallRes = await API.autoInstallJava(requiredVer);
                 if (javaInstallRes.success && javaInstallRes.sessionId) {
@@ -6893,42 +6909,53 @@ async function handleLaunch() {
                             const st = await API.getJavaInstallStatus(sessionId);
                             if (st && st.status) {
                                 javaStatus = st.status;
-                                setLaunchStep('java-check', 'running', st.message || `正在安装 Java ${requiredVer}+...`);
+                                setLaunchStep('java-check', 'running', st.message || `正在检测 Java ${requiredVer}+...`);
                             }
                         } catch (_) { javaStatus = 'failed'; }
                     }
                     if (javaStatus === 'completed') {
-                        setLaunchStep('java-check', 'success', `Java ${requiredVer}+ 安装完成，重新检测...`);
+                        setLaunchStep('java-check', 'success', `Java ${requiredVer}+ 已找到，重新检测...`);
                         const reCheck = await API.launchCheck(versionId);
                         if (reCheck.java && reCheck.java.ok) {
-                            depCheck = reCheck; // 使用重新检查的结果继续后续流程
+                            depCheck = reCheck;
                             setLaunchStep('java-check', 'success', reCheck.java.message || `Java ${reCheck.java.version} ✓`);
                         } else {
-                            setLaunchStep('java-check', 'error', 'Java 安装后仍无法检测，请检查设置');
-                            showLaunchError(`Java 自动安装完成，但仍未检测到。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
+                            setLaunchStep('java-check', 'error', 'Java 检测失败，请检查设置');
+                            showLaunchError(`Java 检测完成，但仍未找到合适的版本。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
                             launchBtn.disabled = false;
                             homeLaunchBtn.disabled = false;
+                            window._versepc_launching = false;
                             return;
                         }
-                    } else {
-                        setLaunchStep('java-check', 'error', `Java ${requiredVer}+ 自动安装失败`);
-                        showLaunchError(`Java ${requiredVer}+ 自动安装失败。<br>错误: ${javaStatus}<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
+                    } else if (javaStatus === 'need_manual') {
+                        setLaunchStep('java-check', 'error', `未找到 Java ${requiredVer}+，请手动配置`);
+                        showLaunchError(`未找到合适的Java运行环境（需要 Java ${requiredVer}+），请在设置中手动安装或配置Java路径。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
                         launchBtn.disabled = false;
                         homeLaunchBtn.disabled = false;
+                        window._versepc_launching = false;
+                        return;
+                    } else {
+                        setLaunchStep('java-check', 'error', `Java ${requiredVer}+ 检测失败`);
+                        showLaunchError(`Java ${requiredVer}+ 检测失败。<br>错误: ${javaStatus}<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
+                        launchBtn.disabled = false;
+                        homeLaunchBtn.disabled = false;
+                        window._versepc_launching = false;
                         return;
                     }
                 } else {
                     setLaunchStep('java-check', 'error', `需要Java ${requiredVer}或更高版本`);
-                    showLaunchError(`需要安装Java ${requiredVer}或更高版本。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
+                    showLaunchError(`需要安装Java ${requiredVer}或更高版本，请手动安装或配置。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
                     launchBtn.disabled = false;
                     homeLaunchBtn.disabled = false;
+                    window._versepc_launching = false;
                     return;
                 }
             } catch (e) {
-                setLaunchStep('java-check', 'error', `Java ${requiredVer}+ 安装失败: ${e.message}`);
-                showLaunchError(`Java 自动安装失败: ${e.message}<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
+                setLaunchStep('java-check', 'error', `Java ${requiredVer}+ 检测失败: ${e.message}`);
+                showLaunchError(`Java 检测失败: ${e.message}<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
                 launchBtn.disabled = false;
                 homeLaunchBtn.disabled = false;
+                window._versepc_launching = false;
                 return;
             }
         }
@@ -6949,6 +6976,7 @@ async function handleLaunch() {
                 showLaunchError(depCheck.mainJar.message);
                 launchBtn.disabled = false;
                 homeLaunchBtn.disabled = false;
+                window._versepc_launching = false;
                 return;
             }
         } else {
@@ -6965,6 +6993,7 @@ async function handleLaunch() {
             );
             launchBtn.disabled = false;
             homeLaunchBtn.disabled = false;
+            window._versepc_launching = false;
             return;
         }
 
@@ -6989,6 +7018,7 @@ async function handleLaunch() {
             const dlResult = await API.launchGame(versionId);
             if (dlResult.needDownload && dlResult.sessionId) {
                 pollLaunchDownload(dlResult.sessionId, versionId, requiredJava);
+                window._versepc_launching = false;
                 return;
             }
         }
@@ -7003,6 +7033,7 @@ async function handleLaunch() {
 
         if (result.needDownload && result.sessionId) {
             pollLaunchDownload(result.sessionId, versionId, requiredJava);
+            window._versepc_launching = false;
             return;
         }
 
@@ -7022,12 +7053,14 @@ async function handleLaunch() {
                 closeLaunchModal('fade');
                 launchBtn.disabled = false;
                 homeLaunchBtn.disabled = false;
+                window._versepc_launching = false;
             }, 2000);
         } else {
             setLaunchStep('launching', 'error', result.error || '启动失败');
             showLaunchError(result.error || '启动失败', result.details || result);
             launchBtn.disabled = false;
             homeLaunchBtn.disabled = false;
+            window._versepc_launching = false;
         }
     } catch (e) {
         console.error('[Launch] 启动异常:', e);
@@ -7039,6 +7072,7 @@ async function handleLaunch() {
         showLaunchError(e.message || '启动请求失败', { error: e.message, stack: e.stack });
         launchBtn.disabled = false;
         homeLaunchBtn.disabled = false;
+        window._versepc_launching = false;
     }
 }
 
@@ -7846,40 +7880,14 @@ function showJavaInstallModal(requiredVersion) {
                     </div>
                     <div class="java-install-text">
                         <p class="java-install-title">未检测到 Java ${requiredVersion}+</p>
-                        <p class="java-install-desc">Minecraft 需要 Java 运行环境才能启动。点击下方按钮自动下载并安装。</p>
-                    </div>
-                </div>
-                <div class="java-install-sources">
-                    <p class="java-sources-label">下载源：</p>
-                    <div class="java-source-list" id="java-source-list">
-                        <div class="java-source-item active" data-source="auto">
-                            <span class="java-source-dot"></span>
-                            <span class="java-source-name">自动选择</span>
-                            <span class="java-source-desc">依次尝试所有下载源</span>
-                        </div>
-                    </div>
-                </div>
-                <div id="java-install-progress" style="display:none;margin-top:16px;">
-                    <div class="java-progress-header">
-                        <span id="java-progress-status" class="java-progress-status">准备中...</span>
-                        <span id="java-progress-source" class="java-progress-source"></span>
-                    </div>
-                    <div class="progress-bar-container java-progress-bar">
-                        <div class="progress-bar" id="java-install-progress-bar" style="width:0%"></div>
-                    </div>
-                    <div class="java-progress-details">
-                        <span id="java-progress-text" class="java-progress-text"></span>
-                        <span id="java-progress-speed" class="java-progress-speed"></span>
-                    </div>
-                    <div class="java-progress-size">
-                        <span id="java-progress-size-text"></span>
+                        <p class="java-install-desc">Minecraft 需要 Java 运行环境才能启动。请前往 Java 管理页面手动安装或配置 Java 路径。</p>
                     </div>
                 </div>
             </div>
             <div class="modal-footer" id="java-install-footer">
-                <button class="btn btn-secondary" onclick="closeJavaInstallModal()">稍后安装</button>
-                <button class="btn btn-primary" id="java-install-btn" onclick="startJavaAutoInstall(${requiredVersion})">
-                    <span>自动安装 Java ${requiredVersion}</span>
+                <button class="btn btn-secondary" onclick="closeJavaInstallModal()">稍后处理</button>
+                <button class="btn btn-primary" onclick="closeJavaInstallModal();navigateToPage('java')">
+                    <span>前往 Java 管理</span>
                 </button>
             </div>
         </div>
@@ -7890,8 +7898,6 @@ function showJavaInstallModal(requiredVersion) {
         const modal = document.getElementById('java-install-modal');
         if (modal) modal.classList.add('modal-visible');
     });
-
-    loadJavaDownloadSources();
 }
 
 async function loadJavaDownloadSources() {
@@ -7939,11 +7945,11 @@ async function startJavaAutoInstall(requiredVersion) {
         if (result.success && result.sessionId) {
             pollJavaInstallProgress(result.sessionId, requiredVersion);
         } else {
-            showToast('Java安装请求失败', 'error');
+            showToast('Java检测请求失败', 'error');
             if (installBtn) installBtn.disabled = false;
         }
     } catch (e) {
-        showToast('Java安装请求失败: ' + e.message, 'error');
+        showToast('Java检测请求失败: ' + e.message, 'error');
         if (installBtn) installBtn.disabled = false;
     }
 }
@@ -7973,7 +7979,8 @@ function pollJavaInstallProgress(sessionId, requiredVersion) {
                     'downloading': '📥 下载中...',
                     'configuring': '⚙️ 配置环境变量...',
                     'completed': '✅ 安装完成',
-                    'failed': '❌ 安装失败'
+                    'failed': '❌ 安装失败',
+                    'need_manual': '⚠️ 需要手动配置'
                 };
                 progressStatus.textContent = statusMap[status.status] || status.message;
             }
@@ -8011,6 +8018,11 @@ function pollJavaInstallProgress(sessionId, requiredVersion) {
                 clearInterval(javaInstallPollTimer);
                 javaInstallPollTimer = null;
                 showToast(status.message || 'Java安装失败', 'error');
+                if (installBtn) installBtn.disabled = false;
+            } else if (status.status === 'need_manual') {
+                clearInterval(javaInstallPollTimer);
+                javaInstallPollTimer = null;
+                showToast(status.message || '未找到合适的Java运行环境，请在设置中手动安装或配置', 'warning');
                 if (installBtn) installBtn.disabled = false;
             }
         } catch (e) {
@@ -9798,6 +9810,8 @@ async function selectWallpaper(element) {
     document.getElementById('wallpaper-opacity-group').style.display = isCustom ? '' : 'none';
     document.getElementById('wallpaper-blur-group').style.display = isCustom ? '' : 'none';
     document.getElementById('panorama-theme-group').style.display = isPanorama ? '' : 'none';
+    const speedRow = document.getElementById('panoramaSpeedRow');
+    if (speedRow) speedRow.style.display = isPanorama ? '' : 'none';
 
     if (isCustom) {
         const fileLabel = document.getElementById('custom-wallpaper-file-label');
@@ -9981,6 +9995,14 @@ function selectPanoramaTheme(element) {
     const theme = element.dataset.theme;
     if (typeof setPanoramaTheme === 'function') setPanoramaTheme(theme);
     window.electronAPI?.store?.set('versepc_panorama_theme', theme).catch(() => {});
+}
+
+function onPanoramaSpeedChange(value) {
+    const speed = value * 0.001;
+    if (typeof setPanoramaRotationSpeed === 'function') setPanoramaRotationSpeed(speed);
+    window.electronAPI?.store?.set('versepc_panorama_speed', parseInt(value));
+    const label = document.getElementById('panoramaSpeedLabel');
+    if (label) label.textContent = value;
 }
 
 function aiToggleApiKeyVisibility() {
