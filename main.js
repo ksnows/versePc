@@ -276,6 +276,19 @@ function createWindow() {
     // 使用 versepc:// 协议加载首页
     mainWindow.loadURL('versepc://app/index.html');
 
+    // GPU 黑屏检测：8秒内页面未渲染则标记下次禁用GPU
+    const _gpuWatchdog = setTimeout(() => {
+        try {
+            mainWindow.webContents.executeJavaScript('document.body.children.length').then(len => {
+                if (len === 0) {
+                    console.log('[GPU] Page not rendered in 8s, flagging GPU disable for next launch');
+                    require('fs').writeFileSync(disableGpuFile, '1');
+                }
+            }).catch(() => {});
+        } catch (e) {}
+    }, 8000);
+    mainWindow.webContents.once('did-finish-load', () => clearTimeout(_gpuWatchdog));
+
     // 窗口关闭时清理引用
     mainWindow.on('closed', () => {
         if (serverModuleCache && serverModuleCache.setMainWindow) {
@@ -1069,6 +1082,28 @@ function reloadServerModule() {
         return false;
     }
 }
+
+// ============================================================================
+// GPU 硬件加速回退 - 解决 Windows 11 家庭版黑屏问题
+// ============================================================================
+const disableGpuFile = path.join(app.getPath('userData'), '.disable-gpu');
+const safeMode = process.argv.includes('--safe-mode') || process.argv.includes('--disable-gpu');
+if (require('fs').existsSync(disableGpuFile) || safeMode) {
+    app.disableHardwareAcceleration();
+    app.commandLine.appendSwitch('disable-gpu');
+    console.log('[GPU] Hardware acceleration disabled' + (safeMode ? ' (safe mode)' : ' (flag file)'));
+}
+
+app.on('gpu-info-update', () => {
+    try {
+        const info = app.getGPUFeatureInfo();
+        if (info && info.status === 3) {
+            app.disableHardwareAcceleration();
+            require('fs').writeFileSync(disableGpuFile, '1');
+            console.log('[GPU] Hardware acceleration disabled due to GPU error');
+        }
+    } catch (e) {}
+});
 
 // ============================================================================
 // 应用就绪 - Electron 启动完成后的初始化流程
