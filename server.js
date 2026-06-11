@@ -45,6 +45,15 @@ const crypto = require('crypto');
 const { execSync, exec, spawn } = require('child_process');
 const os = require('os');
 const zlib = require('zlib');
+
+function fetchWithProtocol(targetUrl, options = {}) {
+    const mod = targetUrl.startsWith('https') ? https : http;
+    return new Promise((resolve, reject) => {
+        const req = mod.get(targetUrl, options, resolve);
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    });
+}
 const net = require('net');
 const dns = require('dns');
 const { EventEmitter } = require('events');
@@ -551,11 +560,7 @@ async function fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, store
 
     if (storedSkinUrl) {
         try {
-            const skinRes = await new Promise((resolve, reject) => {
-                const req = https.get(storedSkinUrl, { timeout: 5000 }, resolve);
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-            });
+            const skinRes = await fetchWithProtocol(storedSkinUrl, { timeout: 8000 });
             if (skinRes.statusCode === 200) {
                 const chunks = [];
                 for await (const chunk of skinRes) chunks.push(chunk);
@@ -563,18 +568,14 @@ async function fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, store
                 avatarContentType = skinRes.headers['content-type'] || 'image/png';
                 isFullSkin = true;
             } else { skinRes.resume(); }
-        } catch (e) {}
+        } catch (e) { console.log('[Avatar] storedSkinUrl失败: ' + e.message); }
     }
 
     if (!avatarData && !avatarServerUrl) {
         const serviceResults = await Promise.allSettled(
             AVATAR_SERVICES.map(async (serviceFn) => {
                 const tryUrl = serviceFn(cleanUuid);
-                const checkRes = await new Promise((resolve, reject) => {
-                    const req = https.get(tryUrl, { timeout: 4000 }, resolve);
-                    req.on('error', reject);
-                    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                });
+                const checkRes = await fetchWithProtocol(tryUrl, { timeout: 4000 });
                 if (checkRes.statusCode === 200) {
                     const chunks = [];
                     for await (const chunk of checkRes) chunks.push(chunk);
@@ -595,19 +596,13 @@ async function fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, store
         console.log('[Avatar] 外置认证，跳过公共Avatar服务，直连 ' + avatarServerUrl);
     }
 
-    if (!avatarData && !avatarServerUrl) return null;
-
     if (!avatarData && avatarServerUrl && avatarUsername) {
         try {
             let skinRoot = cleanServerUrl(avatarServerUrl);
             if (skinRoot.endsWith('/api/yggdrasil')) skinRoot = skinRoot.replace('/api/yggdrasil', '');
             const skinUrl = skinRoot + '/skin/' + encodeURIComponent(avatarUsername) + '.png';
             console.log('[Avatar] 传统API: ' + skinUrl);
-            const skinRes = await new Promise((resolve, reject) => {
-                const req = https.get(skinUrl, { timeout: 10000 }, resolve);
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-            });
+            const skinRes = await fetchWithProtocol(skinUrl, { timeout: 10000 });
             if (skinRes.statusCode === 200) {
                 const chunks = [];
                 for await (const chunk of skinRes) chunks.push(chunk);
@@ -629,11 +624,7 @@ async function fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, store
                     const skinHash = cslData.skins.slim || cslData.skins.default || cslData.skins.steve;
                     if (skinHash) {
                         const textureUrl = cslRoot + '/textures/' + skinHash;
-                        const textureRes = await new Promise((resolve, reject) => {
-                            const req = https.get(textureUrl, { timeout: 10000 }, resolve);
-                            req.on('error', reject);
-                            req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                        });
+                        const textureRes = await fetchWithProtocol(textureUrl, { timeout: 10000 });
                         if (textureRes.statusCode === 200) {
                             const chunks = [];
                             for await (const chunk of textureRes) chunks.push(chunk);
@@ -650,11 +641,7 @@ async function fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, store
         const skinTextureUrl = await fetchSkinFromSessionServer(cleanUuid, avatarServerUrl);
         if (skinTextureUrl) {
             try {
-                const texRes = await new Promise((resolve, reject) => {
-                    const req = https.get(skinTextureUrl, { timeout: 10000 }, resolve);
-                    req.on('error', reject);
-                    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                });
+                const texRes = await fetchWithProtocol(skinTextureUrl, { timeout: 10000 });
                 if (texRes.statusCode === 200) {
                     const chunks = [];
                     for await (const chunk of texRes) chunks.push(chunk);
@@ -672,17 +659,23 @@ async function fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, store
             avatarContentType = 'image/png';
             console.log('[Avatar] sharp裁剪全皮肤为头像成功');
         } else {
-            console.warn('[Avatar] sharp裁剪失败，使用默认头像');
-            avatarData = null;
+            console.warn('[Avatar] sharp裁剪失败，保留完整皮肤供前端裁剪');
+            isFullSkin = true;
         }
     }
 
     if (!avatarData) return null;
-    return { data: avatarData, contentType: avatarContentType };
+    return { data: avatarData, contentType: avatarContentType, isFullSkin };
 }
 
 function refreshAvatarCache(cacheKey, cleanUuid, avatarServerUrl, avatarUsername) {
-    fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername).then(result => {
+    let storedSkinUrl = '';
+    try {
+        const accounts = loadAccounts();
+        const acc = accounts.find(a => (a.uuid || '').replace(/-/g, '') === cleanUuid);
+        if (acc && acc.skinUrl) storedSkinUrl = acc.skinUrl;
+    } catch (e) {}
+    fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, storedSkinUrl).then(result => {
         if (result) {
             AVATAR_CACHE.set(cacheKey, { data: result.data, contentType: result.contentType, time: Date.now() });
             console.log('[Avatar] 后台刷新成功: ' + cacheKey);
@@ -698,47 +691,35 @@ async function fetchAvatarDataFull(cleanUuid, avatarServerUrl, avatarUsername, s
 
     if (storedSkinUrl) {
         try {
-            const skinRes = await new Promise((resolve, reject) => {
-                const req = https.get(storedSkinUrl, { timeout: 5000 }, resolve);
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-            });
+            const skinRes = await fetchWithProtocol(storedSkinUrl, { timeout: 8000 });
             if (skinRes.statusCode === 200) {
                 const chunks = [];
                 for await (const chunk of skinRes) chunks.push(chunk);
                 avatarData = Buffer.concat(chunks);
                 avatarContentType = skinRes.headers['content-type'] || 'image/png';
             } else { skinRes.resume(); }
-        } catch (e) {}
+        } catch (e) { console.log('[AvatarFull] storedSkinUrl失败: ' + e.message); }
     }
 
     if (!avatarData && !avatarServerUrl) {
         const skinTextureUrl = await fetchSkinFromSessionServer(cleanUuid, null);
         if (skinTextureUrl) {
             try {
-                const texRes = await new Promise((resolve, reject) => {
-                    const req = https.get(skinTextureUrl, { timeout: 5000 }, resolve);
-                    req.on('error', reject);
-                    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                });
+                const texRes = await fetchWithProtocol(skinTextureUrl, { timeout: 10000 });
                 if (texRes.statusCode === 200) {
                     const texChunks = [];
                     for await (const chunk of texRes) texChunks.push(chunk);
                     avatarData = Buffer.concat(texChunks);
                     avatarContentType = texRes.headers['content-type'] || 'image/png';
                 } else { texRes.resume(); }
-            } catch (e) {}
+            } catch (e) { console.log('[AvatarFull] SessionServer失败: ' + e.message); }
         }
     }
     if (!avatarData && !avatarServerUrl) {
         const serviceResults = await Promise.allSettled(
             AVATAR_SERVICES.map(async (serviceFn) => {
                 const tryUrl = serviceFn(cleanUuid);
-                const checkRes = await new Promise((resolve, reject) => {
-                    const req = https.get(tryUrl, { timeout: 4000 }, resolve);
-                    req.on('error', reject);
-                    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                });
+                const checkRes = await fetchWithProtocol(tryUrl, { timeout: 4000 });
                 if (checkRes.statusCode === 200) {
                     const chunks = [];
                     for await (const chunk of checkRes) chunks.push(chunk);
@@ -761,11 +742,7 @@ async function fetchAvatarDataFull(cleanUuid, avatarServerUrl, avatarUsername, s
             let skinRoot = cleanServerUrl(avatarServerUrl);
             if (skinRoot.endsWith('/api/yggdrasil')) skinRoot = skinRoot.replace('/api/yggdrasil', '');
             const skinUrl = skinRoot + '/skin/' + encodeURIComponent(avatarUsername) + '.png';
-            const skinRes = await new Promise((resolve, reject) => {
-                const req = https.get(skinUrl, { timeout: 5000 }, resolve);
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-            });
+            const skinRes = await fetchWithProtocol(skinUrl, { timeout: 10000 });
             if (skinRes.statusCode === 200) {
                 const chunks = [];
                 for await (const chunk of skinRes) chunks.push(chunk);
@@ -779,22 +756,14 @@ async function fetchAvatarDataFull(cleanUuid, avatarServerUrl, avatarUsername, s
             let cslRoot = cleanServerUrl(avatarServerUrl);
             if (cslRoot.endsWith('/api/yggdrasil')) cslRoot = cslRoot.replace('/api/yggdrasil', '');
             const cslUrl = cslRoot + '/csl/' + encodeURIComponent(avatarUsername) + '.json';
-            const cslRes = await new Promise((resolve, reject) => {
-                const req = https.get(cslUrl, { timeout: 4000 }, resolve);
-                req.on('error', reject);
-                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-            });
+            const cslRes = await fetchWithProtocol(cslUrl, { timeout: 4000 });
             if (cslRes.statusCode === 200) {
                 const cslChunks = [];
                 for await (const chunk of cslRes) cslChunks.push(chunk);
                 const cslData = JSON.parse(Buffer.concat(cslChunks).toString('utf8'));
                 const skinEntry = cslData.skins && cslData.skins.find(s => s.type === 'skin' || s.type === 'default');
                 if (skinEntry && skinEntry.url) {
-                    const texRes = await new Promise((resolve, reject) => {
-                        const req = https.get(skinEntry.url, { timeout: 5000 }, resolve);
-                        req.on('error', reject);
-                        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                    });
+                    const texRes = await fetchWithProtocol(skinEntry.url, { timeout: 5000 });
                     if (texRes.statusCode === 200) {
                         const texChunks = [];
                         for await (const chunk of texRes) texChunks.push(chunk);
@@ -809,11 +778,7 @@ async function fetchAvatarDataFull(cleanUuid, avatarServerUrl, avatarUsername, s
         const skinTextureUrl = await fetchSkinFromSessionServer(cleanUuid, avatarServerUrl);
         if (skinTextureUrl) {
             try {
-                const texRes = await new Promise((resolve, reject) => {
-                    const req = https.get(skinTextureUrl, { timeout: 5000 }, resolve);
-                    req.on('error', reject);
-                    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-                });
+                const texRes = await fetchWithProtocol(skinTextureUrl, { timeout: 5000 });
                 if (texRes.statusCode === 200) {
                     const texChunks = [];
                     for await (const chunk of texRes) texChunks.push(chunk);
@@ -1401,17 +1366,25 @@ async function startTerracotta() {
     }
 
     const binPath = getTerracottaBinaryPath();
+    const binCwd = path.dirname(binPath);
+    if (!fs.existsSync(binCwd)) {
+        fs.mkdirSync(binCwd, { recursive: true });
+    }
     const tmpDir = path.join(os.tmpdir(), `versepc-terracotta-${Date.now()}`);
     fs.mkdirSync(tmpDir, { recursive: true });
     terracottaPortFilePath = path.join(tmpDir, 'http');
 
     console.log(`[Terracotta] Starting: ${binPath} --hmcl ${terracottaPortFilePath}`);
 
-    terracottaProcess = spawn(binPath, ['--hmcl', terracottaPortFilePath], {
-        cwd: TERRACOTTA_DIR,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
-    });
+    try {
+        terracottaProcess = spawn(binPath, ['--hmcl', terracottaPortFilePath], {
+            cwd: binCwd,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true
+        });
+    } catch (spawnErr) {
+        throw new Error('陶瓦联机组件启动失败: ' + spawnErr.message);
+    }
 
     terracottaProcess.stdout.on('data', (data) => {
         const line = data.toString().trim();
@@ -1820,7 +1793,7 @@ async function discoverUPnPGateway() {
         }
     }
 
-    throw new Error('UPnP gateway not found. Please check: 1) Router UPnP is enabled 2) Windows SSDP Discovery service is not blocking 3) Firewall allows UDP port 1900');
+    throw new Error('未检测到UPnP网关。请检查: 1) 路由器已开启UPnP功能 2) Windows SSDP发现服务未被禁用 3) 防火墙允许UDP 1900端口');
 }
 
 function _ssdpSearch(searchType, maxRetries) {
@@ -3230,10 +3203,14 @@ function detectVersionInfo(data, dirName) {
     const isOptiFine = versionIdLower.includes('optifine') || librariesStr.includes('optifine:optifine');
     const isLiteLoader = versionIdLower.includes('liteloader') || librariesStr.includes('liteloader');
 
-    const bareMcPattern = /^\d+\.\d+(\.\d+)?$/;
+    const bareMcPattern = /^\d+\.\d+(\.\d+)?(-\d+)?$/;
     const loaderIdPattern = /^(?:fabric-loader-\d|quilt-loader-\d|\d+\.\d+(?:\.\d+)?-(?:forge|neoforge)-\d)/;
     const versionId = data.id || dirName;
-    const isModpack = !bareMcPattern.test(versionId) && !loaderIdPattern.test(versionId);
+    const hasNoLoaderFlags = !isFabric && !isForge && !isNeoForge && !isOptiFine && !isLiteLoader;
+    const isContentVanilla = hasNoLoaderFlags && !isBootStrap && !hasForgeGameArg && !hasNeoForgeGameArg &&
+        (mainClassLower.includes('net.minecraft.client.main') || mainClassLower === '') &&
+        !librariesStr.includes('net.minecraftforge') && !librariesStr.includes('net.fabricmc') && !librariesStr.includes('net.neoforge');
+    const isModpack = !bareMcPattern.test(versionId) && !loaderIdPattern.test(versionId) && !isContentVanilla;
 
     if (isModpack) {
         let loaderType = '';
@@ -3250,6 +3227,8 @@ function detectVersionInfo(data, dirName) {
                     if (parentInfo.isForge) { loaderType = 'Forge'; resolvedIsForge = true; }
                     else if (parentInfo.isFabric) { loaderType = 'Fabric'; resolvedIsFabric = true; }
                     else if (parentInfo.isNeoForge) { loaderType = 'NeoForge'; resolvedIsNeoForge = true; }
+                    if (parentInfo.isOptiFine) resolvedIsOptiFine = true;
+                    if (parentInfo.isLiteLoader) resolvedIsLiteLoader = true;
                 } catch (_) {}
             }
         }
@@ -3901,7 +3880,7 @@ async function downloadFileChunked(url, destPath, options = {}) {
                 }
                 if (ra < retries) {
                     console.warn(`[MultiThread] Retry ${ra + 1}/${retries}`);
-                    for (let i = 0; i < 16; i++) { try { fs.unlinkSync(`${destPath}.c${i}`); } catch (e) {} }
+                    for (let i = 0; i < 64; i++) { try { fs.unlinkSync(`${destPath}.c${i}`); } catch (e) {} }
                     try { fs.unlinkSync(destPath); } catch (e) {}
                     await new Promise(r => setTimeout(r, Math.min(1000 * (ra + 1), 5000) + Math.floor(Math.random() * 500)));
                 } else throw err;
@@ -3996,6 +3975,7 @@ async function _dlSingle(urlStr, destPath, options = {}) {
                         ws.close();
                         if (settled) return;
                         if (sha1) { const a = await calculateSHA1(destPath); if (a !== sha1) { clean(); if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); } else { doReject(new Error(`SHA1 mismatch: ${path.basename(destPath)}`)); } return; } }
+                        if (tSz > 0 && dl !== tSz) { clean(); if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); } else { doReject(new Error(`Size mismatch: ${path.basename(destPath)} expected=${tSz} got=${dl}`)); } return; }
                         doResolve({ size: dl, path: destPath });
                     });
                     ws.on('error', (e) => {
@@ -4055,7 +4035,7 @@ function isJarIntact(filePath) {
         for (let i = buf.length - 22; i >= 0; i--) {
             if (buf.readUInt32LE(i) === 0x06054B50) return true;
         }
-        return stat.size < 1024;
+        return false;
     } catch (e) {
         return false;
     }
@@ -10312,7 +10292,7 @@ async function verifyImportLibs(versionId, progress, abortSignal) {
                 libPath = path.join(LIBRARIES_DIR, gp, p[1], p[2], jn);
             }
         }
-        if (libPath && !fs.existsSync(libPath)) {
+        if (libPath && (!libPath.endsWith('.jar') ? !fs.existsSync(libPath) : !isJarIntact(libPath))) {
             libMissing++;
             let dlUrl = lib.downloads?.artifact?.url || '';
             if (!dlUrl && lib.name) {
@@ -10454,6 +10434,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null) {
 
             const forgeLibTasks = [];
             for (const lib of (versionJsonData.libraries || [])) {
+                if (lib.rules && !evaluateRules(lib.rules)) continue;
                 const parts = lib.name ? lib.name.split(':') : [];
                 let libPath = null;
                 if (lib.downloads?.artifact?.path) {
@@ -10881,6 +10862,7 @@ async function mergeFabricLoaderToVersion(versionId, gameVersion, loaderVersion,
     console.log(`[Fabric] 开始下载库文件...`);
 
     const libsToDownload = (versionJson.libraries || []).filter(lib => {
+        if (lib.rules && !evaluateRules(lib.rules)) return false;
         if (!lib.downloads?.artifact?.path) return false;
         const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
         return !fs.existsSync(libPath);
@@ -10985,6 +10967,7 @@ async function mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion) {
         }
 
         for (const lib of (currentJson.libraries || [])) {
+            if (lib.rules && !evaluateRules(lib.rules)) continue;
             if (lib.downloads?.artifact?.path) {
                 const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
                 if (!fs.existsSync(libPath) && lib.downloads.artifact.url) {
@@ -12269,8 +12252,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         if (abortSignal && abortSignal.aborted) { inFlight--; updateOverall(); return; }
         const downloads = fileEntry.downloads || [];
         if (!downloads.length) {
-            if (modFiles[index]) { modFiles[index].status = 'completed'; modFiles[index].progress = 100; }
-            okCount++; inFlight--; updateOverall();
+            if (modFiles[index]) { modFiles[index].status = 'failed'; modFiles[index].error = '无可用下载链接'; }
+            failCount++; inFlight--; updateOverall();
             return;
         }
         const fileName = path.basename(fileEntry.path || (downloads[0] || 'unknown'));
@@ -12302,7 +12285,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                         if (downloaded || (abortSignal && abortSignal.aborted)) break;
                         const perTryAbort = new AbortController();
                         const perTryTimeout = setTimeout(() => { try { perTryAbort.abort(); } catch (_) {} },
-                            round === 0 ? 120000 : 180000);
+                            Math.max(120000, getModTimeout(fileSize) + 30000));
                         if (abortSignal) {
                             abortSignal.addEventListener('abort', () => { try { perTryAbort.abort(); } catch (_) {} }, { once: true });
                         }
@@ -12895,7 +12878,9 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                         cfDownloaded = true;
                     } else {
                         const perTryAbort = new AbortController();
-                        const perTryTimeout = setTimeout(() => { try { perTryAbort.abort(); } catch (_) {} }, 180000);
+                        const cfTimeout = getCfModTimeout(fileInfo?.data?.fileLength || fileSize || 0);
+                        const perTryTimeout = setTimeout(() => { try { perTryAbort.abort(); } catch (_) {} },
+                            Math.max(120000, cfTimeout + 30000));
                         if (abortSignal) {
                             abortSignal.addEventListener('abort', () => { try { perTryAbort.abort(); } catch (_) {} }, { once: true });
                         }
@@ -12935,6 +12920,8 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                     }
                 } else {
                     console.warn(`[CurseForge] 无法获取下载URL: ${projectID}:${fileID}`);
+                    if (cfModFiles[index]) { cfModFiles[index].status = 'failed'; cfModFiles[index].error = 'CurseForge 未提供下载链接'; }
+                    break;
                 }
             } catch (e) {
                 if (abortSignal && abortSignal.aborted) break;
@@ -13920,6 +13907,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                 }
                                 console.log(`[Launch] 使用启动设置窗口大小: ${settings.resolution}`);
                             }
+                            if (typeof lsData.fullscreen === 'boolean') {
+                                settings.fullscreen = lsData.fullscreen;
+                                console.log(`[Launch] 使用启动设置全屏模式: ${settings.fullscreen}`);
+                            }
                         }
                     }
                 } catch (e) {
@@ -13976,6 +13967,17 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                         account.refreshToken = msRefreshTokenNew;
                                         account.tokenExpiresAt = refreshNow.getTime() + (msTokenResult.expires_in || 3600) * 1000;
                                         account.lastRefreshed = refreshNow.toISOString();
+                                        try {
+                                            const refreshProfile = await fetchJSONWithAuth('https://api.minecraftservices.com/minecraft/profile', mcResult.access_token);
+                                            if (refreshProfile && refreshProfile.skins && Array.isArray(refreshProfile.skins)) {
+                                                const activeSkin = refreshProfile.skins.find(s => s.state === 'ACTIVE');
+                                                if (activeSkin) {
+                                                    account.skinUrl = activeSkin.url;
+                                                    account.skinModel = activeSkin.variant === 'SLIM' ? 'slim' : 'default';
+                                                }
+                                            }
+                                            if (refreshProfile && refreshProfile.name) account.username = refreshProfile.name;
+                                        } catch (pfErr) { console.warn(`[Launch] 刷新皮肤信息失败: ${pfErr.message}`); }
                                         const accts = loadAccounts();
                                         const idx = accts.findIndex(a => a.id === account.id);
                                         if (idx >= 0) { accts[idx] = { ...accts[idx], ...account }; saveAccounts(accts); }
@@ -14721,12 +14723,12 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (!imVersionId) { sendError('Missing versionId', 400); break; }
                 try {
                     const modsDir = getVersionModsDir(imVersionId);
-                    if (!modsDir) { sendJSON({ mods: [], total: 0 }); break; }
+                    if (!modsDir) { sendJSON([]); break; }
                     const mods = [];
                     if (fs.existsSync(modsDir)) {
                         const MAX_MODS = 200;
                         const allFiles = await fs.promises.readdir(modsDir);
-                        const jarFiles = allFiles.filter(f => (f.endsWith('.jar') || f.endsWith('.zip'))).slice(0, MAX_MODS);
+                        const jarFiles = allFiles.filter(f => (f.endsWith('.jar') || f.endsWith('.zip') || f.endsWith('.jar.disabled') || f.endsWith('.zip.disabled'))).slice(0, MAX_MODS);
                         for (let i = 0; i < jarFiles.length; i++) {
                             const f = jarFiles[i];
                             const isDisabled = f.endsWith('.disabled');
@@ -16139,6 +16141,13 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     account.tokenExpiresAt = now.getTime() + (msTokenResult.expires_in || 3600) * 1000;
                     account.lastRefreshed = now.toISOString();
                     account.username = profileResult.name || account.username;
+                    if (profileResult.skins && Array.isArray(profileResult.skins)) {
+                        const activeSkin = profileResult.skins.find(s => s.state === 'ACTIVE');
+                        if (activeSkin) {
+                            account.skinUrl = activeSkin.url;
+                            account.skinModel = activeSkin.variant === 'SLIM' ? 'slim' : 'default';
+                        }
+                    }
                     saveAccounts(accounts);
 
                     sendJSON({ success: true, account });
@@ -16688,7 +16697,14 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 try {
                     const metadataUrl = 'https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml';
                     console.log('[Forge] Fetching metadata from:', metadataUrl);
-                    const metadataXml = await fetchText(metadataUrl);
+                    let metadataXml = null;
+                    for (const tryUrl of getMirrorUrls(metadataUrl)) {
+                        try {
+                            metadataXml = await fetchText(tryUrl);
+                            if (metadataXml) { console.log('[Forge] Got metadata from:', tryUrl); break; }
+                        } catch (e) { console.log('[Forge] Metadata fetch failed from:', tryUrl, e.message); }
+                    }
+                    if (!metadataXml) throw new Error('所有Forge元数据源均不可用');
                     console.log('[Forge] Got metadata, length:', metadataXml?.length || 0);
                     const versions = [];
                     
@@ -16832,11 +16848,12 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const cacheKey = `${cleanUuid}:${avatarServerUrl}:${avatarUsername}`;
                 const cached = AVATAR_CACHE.get(cacheKey);
 
-                const serveImage = (data, contentType) => {
+                const serveImage = (data, contentType, fullSkin) => {
                     res.writeHead(200, {
                         'Content-Type': contentType || 'image/png',
                         'Cache-Control': 'public, max-age=86400',
-                        'X-Avatar-Cache': cached ? 'hit' : 'miss'
+                        'X-Avatar-Cache': cached ? 'hit' : 'miss',
+                        ...(fullSkin ? { 'X-Is-Full-Skin': 'true' } : {})
                     });
                     res.end(data);
                 };
@@ -16893,7 +16910,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const result = await fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, storedSkinUrl);
                     if (result) {
                         AVATAR_CACHE.set(cacheKey, { data: result.data, contentType: result.contentType, time: Date.now() });
-                        serveImage(result.data, result.contentType);
+                        serveImage(result.data, result.contentType, result.isFullSkin);
                     } else {
                         const defaultHead = await getSteveHeadLocal();
                         if (defaultHead) {
@@ -18677,14 +18694,20 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         const jsonPath = path.join(ofVersionDir, `${ofVersionId}.json`);
                         fs.writeFileSync(jsonPath, JSON.stringify(ofVersionJson, null, 2));
                     } else {
+                        const ofLibName = `optifine:OptiFine:${ofGameVer2}_${ofType}`;
+                        const ofLibPathRel = `optifine/OptiFine/${ofGameVer2}_${ofType}/OptiFine-${ofGameVer2}_${ofType}.jar`;
+                        const ofLibPath = path.join(LIBRARIES_DIR, ofLibPathRel);
+                        if (!fs.existsSync(path.dirname(ofLibPath))) fs.mkdirSync(path.dirname(ofLibPath), { recursive: true });
+                        fs.copyFileSync(ofInstallerPath, ofLibPath);
                         const fallbackJson = {
                             id: ofVersionId, inheritsFrom: ofGameVer2,
                             mainClass: 'net.minecraft.client.main.Main', type: 'release',
-                            libraries: [], arguments: { game: [], jvm: [] }
+                            libraries: [{
+                                name: ofLibName,
+                                downloads: { artifact: { path: ofLibPathRel } }
+                            }],
+                            arguments: { game: [], jvm: [] }
                         };
-                        const ofLibPath = path.join(LIBRARIES_DIR, 'optifine', 'OptiFine', `${ofGameVer2}_${ofType}`, `OptiFine-${ofGameVer2}_${ofType}.jar`);
-                        if (!fs.existsSync(path.dirname(ofLibPath))) fs.mkdirSync(path.dirname(ofLibPath), { recursive: true });
-                        fs.copyFileSync(ofInstallerPath, ofLibPath);
                         const jsonPath = path.join(ofVersionDir, `${ofVersionId}.json`);
                         fs.writeFileSync(jsonPath, JSON.stringify(fallbackJson, null, 2));
                     }

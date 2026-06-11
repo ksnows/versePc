@@ -446,6 +446,8 @@ function createWindow() {
             windowMode: isWindowMode,
             maximized: mainWindow.isMaximized()
         });
+
+        // mainWindow.webContents.openDevTools({ mode: 'detach' });
     });
 
     // 外部链接在系统浏览器中打开
@@ -485,21 +487,14 @@ function createWindow() {
                 { role: 'zoomOut', label: '缩小' },
                 { type: 'separator' },
                 { role: 'togglefullscreen', label: '全屏' },
-                { type: 'separator' }
-                // {
-                //     label: '开发者工具',
-                //     accelerator: 'F12',
-                //     click: () => {
-                //         mainWindow?.webContents.toggleDevTools();
-                //     }
-                // },
-                // {
-                //     label: '开发者工具 (备选)',
-                //     accelerator: 'CmdOrCtrl+Shift+I',
-                //     click: () => {
-                //         mainWindow?.webContents.toggleDevTools();
-                //     }
-                // }
+                { type: 'separator' },
+                {
+                    label: '开发者工具',
+                    accelerator: 'CmdOrCtrl+Shift+I',
+                    click: () => {
+                        mainWindow?.webContents.toggleDevTools();
+                    }
+                }
             ]
         }
     ];

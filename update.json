@@ -1,13 +1,13 @@
 {
-  "version": "1.1.01",
+  "version": "1.1.11",
   "releaseDate": "2026-06-11T00:00:00Z",
-  "releaseName": "VersePC v1.1.01",
-  "releaseNotes": "## 更新内容\n- 修复陶瓦联机 500 错误（Terracotta 下载源已失效，更新为官方仓库 burningtnt/Terracotta）\n- 陶瓦组件现在以 tar.gz 压缩包方式分发，启动器自动解压安装\n- 修复陶瓦进程启动失败时需等待 30 秒才报错（进程异常立即反馈）\n- 修复陶瓦状态转换失败后僵尸进程未清理\n- 修复前端 API 错误信息丢失（现在正确显示服务器返回的错误原因）",
+  "releaseName": "VersePC v1.1.11",
+  "releaseNotes": "## 更新内容\n- 修复微软头像初次加载不显示的问题（后台重试检测与刷新）\n- 修复 3D 皮肤预览错误时的用户提示\n- 移除第三方皮肤源回退Steve头像\n- 修复第三方整合包下载不完整问题：字节计数校验、JAR完整性检查、超时优化\n- 修复空下载错误状态标记\n- CurseForge 无效下载链接快速失败\n- 修复整合包导入校验逻辑\n- 修复 MC 全景壁纸全屏缩放空白区域\n- 安装程序新增进程检测与关闭选项\n- 开发者工具快捷键 Ctrl+Shift+I",
   "files": {
     "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.1.01/VersePC-Setup-1.1.1.exe",
-      "sha256": "50EED1DAD7135A671C714D3D91307248C8AE9ACBEFEFB1755140A992B450D777",
-      "size": 162788885
+      "url": "https://github.com/doujie081231/versePc/releases/download/v1.1.11/VersePC-Setup-1.1.11.exe",
+      "sha256": "3C73164BFB55788DF9274B9C5A430A7584E54081609FD20DC809634441CC8AF9",
+      "size": 162790187
     }
   },
   "minSupportedVersion": "1.0.0",

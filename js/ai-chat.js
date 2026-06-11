@@ -7483,6 +7483,8 @@ Call attempt_completion when all operations are done and verified.
             models.push({ id: m.modelId, name: m.modelName || m.modelId, provider: m.providerName || m.providerKey || '未知', free: m.free, providerKey: m.providerKey });
         }
         if (!models.length) {
+            this._currentSettingsTab = 'providers';
+            this.toggleSettings();
             return;
         }
         const grouped = {};

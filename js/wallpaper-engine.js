@@ -306,7 +306,7 @@ class PanoramaRenderer {
             this.threeCamera.position.set(0, 0, 0);
 
             this.threeRenderer = new THREE.WebGLRenderer({ canvas: glCanvas, alpha: false, antialias: true });
-            this.threeRenderer.setSize(glCanvas.clientWidth, glCanvas.clientHeight);
+            this.threeRenderer.setSize(glCanvas.clientWidth, glCanvas.clientHeight, false);
             this.threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             this.threeRenderer.setClearColor(0x0a0a0a);
 
@@ -329,27 +329,22 @@ class PanoramaRenderer {
         if (!this.threeRenderer) return;
         const glCanvas = this.engine.glCanvas;
         if (!glCanvas) return;
-        this.threeRenderer.setSize(glCanvas.clientWidth, glCanvas.clientHeight);
+        this.threeRenderer.setSize(glCanvas.clientWidth, glCanvas.clientHeight, false);
         this.threeCamera.aspect = glCanvas.clientWidth / glCanvas.clientHeight;
         this.threeCamera.updateProjectionMatrix();
     }
 
     render(dt, timestamp) {
         if (!this.threeRenderer || !this.cube) return;
-
-        this.autoRotation += this.ROTATION_SPEED * dt * 0.06;
+        const clampedDt = Math.min(dt, 100);
+        this.autoRotation += this.ROTATION_SPEED * clampedDt * 0.001;
         this.cube.rotation.y = this.autoRotation;
-        if (this.mouseFollowEnabled) {
-            this.cube.rotation.y += this.engine.mouseX * 0.4;
-            this.cube.rotation.x = -this.engine.mouseY * 0.2;
-        } else {
-            this.cube.rotation.x = 0;
-        }
+        this.cube.rotation.x = 0;
         this.threeRenderer.render(this.threeScene, this.threeCamera);
     }
 
     setRotationSpeed(speed) {
-        this.ROTATION_SPEED = speed;
+        this.ROTATION_SPEED = speed * 0.15;
     }
 
     destroy() {

@@ -5778,7 +5778,8 @@ async function portmapDoCreate() {
             if (result.upnp && result.upnp.success) {
                 addPortmapLog('UPnP 端口映射成功');
             } else if (result.upnp) {
-                addPortmapLog('UPnP 端口映射失败: ' + (result.upnp.error || '未知'));
+                addPortmapLog('端口映射失败: ' + (result.upnp.error || '未知'));
+                addPortmapLog('提示: UPnP不可用不影响局域网联机，但远程联机需要路由器开启UPnP或手动设置端口转发');
             }
             addPortmapLog('公网IP: ' + (result.publicIP || '未检测到'));
             addPortmapLog('连接地址: ' + (result.connectInfo || '未获取'));
@@ -6269,7 +6270,7 @@ async function loadAccounts() {
                         this.style.display = 'none';
                         const accItem = avatarDiv.closest('.account-item');
                         const accType = accItem?.querySelector('.account-item-type')?.textContent;
-                        if (accType === '外置登录') {
+                        if (true) {
                             const origSrc = this.src.split('&_=')[0];
                             setTimeout(() => {
                                 const retryImg = document.createElement('img');
@@ -6328,7 +6329,7 @@ async function loadAccounts() {
                 };
                 img.onerror = function() {
                     img.style.display = 'none';
-                    if (selectedAccount.type === 'thirdparty' && selectedAccount.serverUrl) {
+                    if (true) {
                         setTimeout(() => {
                             const retryImg = document.createElement('img');
                             retryImg.src = accSkinUrl.split('&_=')[0] + '&_=' + Date.now();
@@ -6343,6 +6344,42 @@ async function loadAccounts() {
                     }
                 };
                 homeAvatar.appendChild(img);
+                if (selectedAccount.type === 'microsoft' || selectedAccount.type === 'thirdparty') {
+                    const baseUrl = accSkinUrl.split('&_=')[0];
+                    const scheduleRetry = (delay, attempt) => {
+                        setTimeout(async () => {
+                            try {
+                                const probe = await fetch(baseUrl + '&_=' + Date.now(), { method: 'HEAD' });
+                                if (probe.headers.get('X-Avatar-Fallback') === 'true' && attempt < 5) {
+                                    scheduleRetry(Math.min(delay * 1.5, 30000), attempt + 1);
+                                    return;
+                                }
+                                if (probe.ok) {
+                                    const retryImg = document.createElement('img');
+                                    retryImg.src = baseUrl + '&_=' + Date.now();
+                                    retryImg.className = 'account-avatar-img';
+                                    retryImg.width = 64;
+                                    retryImg.height = 64;
+                                    retryImg.onload = function() {
+                                        homeAvatar.innerHTML = '';
+                                        homeAvatar.appendChild(retryImg);
+                                        try {
+                                            const canvas = document.createElement('canvas');
+                                            canvas.width = 64; canvas.height = 64;
+                                            const ctx = canvas.getContext('2d');
+                                            ctx.drawImage(retryImg, 0, 0, 64, 64);
+                                            const dataUrl = canvas.toDataURL('image/png');
+                                            if (dataUrl && dataUrl.length > 100) {
+                                                localStorage.setItem('cachedAvatarData', dataUrl);
+                                            }
+                                        } catch(e) {}
+                                    };
+                                }
+                            } catch(e) {}
+                        }, delay);
+                    };
+                    scheduleRetry(4000, 0);
+                }
             }
             
             document.getElementById('launch-player-name').textContent = selectedAccount.username;
@@ -6355,7 +6392,7 @@ async function loadAccounts() {
                 img2.className = 'account-avatar-img';
                 img2.onerror = function() {
                     img2.style.display = 'none';
-                    if (selectedAccount.type === 'thirdparty' && selectedAccount.serverUrl) {
+                    if (true) {
                         setTimeout(() => {
                             const retryImg2 = document.createElement('img');
                             retryImg2.src = accSkinUrl.split('&_=')[0] + '&_=' + Date.now();
@@ -6481,7 +6518,7 @@ async function initSkinViewer(skinUrl) {
         _skinViewer.nameTag = _currentDetailAccount ? _currentDetailAccount.username : null;
     } catch (e) {
         console.error('[SkinViewer] init error:', e);
-        container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#999;font-size:14px;">3D渲染初始化失败</div>';
+        container.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-secondary);font-size:14px;gap:8px;"><span style="font-size:32px;">👤</span><span>皮肤加载失败</span><span style="font-size:12px;color:var(--text-tertiary);">请检查网络连接或重新登录</span></div>';
     }
 }
 
@@ -6801,6 +6838,52 @@ async function verifyThirdPartyServer(url) {
         }
     } catch (e) {
         infoDiv.style.display = 'none';
+    }
+}
+
+function cropSkinHeadCanvas(imgElement, outputSize = 64) {
+    try {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const sw = imgElement.naturalWidth || imgElement.width;
+        const sh = imgElement.naturalHeight || imgElement.height;
+        if (sw < 64 || sh < 32) return null;
+        const scale = sw / 64;
+        canvas.width = outputSize;
+        canvas.height = outputSize;
+        ctx.imageSmoothingEnabled = false;
+        const headX = Math.round(8 * scale), headY = Math.round(8 * scale), headDim = Math.round(8 * scale);
+        ctx.drawImage(imgElement, headX, headY, headDim, headDim, 0, 0, outputSize, outputSize);
+        if (sh >= 64) {
+            const hatX = Math.round(40 * scale), hatY = Math.round(8 * scale);
+            const hatCanvas = document.createElement('canvas');
+            hatCanvas.width = outputSize;
+            hatCanvas.height = outputSize;
+            const hatCtx = hatCanvas.getContext('2d');
+            hatCtx.imageSmoothingEnabled = false;
+            hatCtx.drawImage(imgElement, hatX, hatY, headDim, headDim, 0, 0, outputSize, outputSize);
+            const hatData = hatCtx.getImageData(0, 0, outputSize, outputSize);
+            const faceData = ctx.getImageData(0, 0, outputSize, outputSize);
+            for (let i = 0; i < hatData.data.length; i += 4) {
+                const ha = hatData.data[i + 3] / 255;
+                if (ha > 0) {
+                    const fa = faceData.data[i + 3] / 255;
+                    const outA = ha + fa * (1 - ha);
+                    if (outA > 0) {
+                        const invA = 1 / outA;
+                        faceData.data[i]     = Math.round((hatData.data[i] * ha + faceData.data[i] * fa * (1 - ha)) * invA);
+                        faceData.data[i + 1] = Math.round((hatData.data[i+1] * ha + faceData.data[i+1] * fa * (1 - ha)) * invA);
+                        faceData.data[i + 2] = Math.round((hatData.data[i+2] * ha + faceData.data[i+2] * fa * (1 - ha)) * invA);
+                        faceData.data[i + 3] = Math.round(outA * 255);
+                    }
+                }
+            }
+            ctx.putImageData(faceData, 0, 0);
+        }
+        return canvas.toDataURL('image/png');
+    } catch (e) {
+        console.error('[cropSkinHeadCanvas] error:', e);
+        return null;
     }
 }
 
@@ -9612,6 +9695,7 @@ async function saveLaunchSettings() {
         launcherVisibility: document.getElementById('launcher-visibility')?.value,
         processPriority: document.getElementById('process-priority')?.value,
         windowSize: windowSize,
+        fullscreen: document.getElementById('launch-fullscreen')?.checked || false,
         gameJava: document.getElementById('game-java-select')?.value,
         memoryMode: document.querySelector('input[name="globalMemoryMode"]:checked')?.value,
         memoryValue: document.getElementById('memory-slider')?.value,
@@ -9675,6 +9759,7 @@ async function resetLaunchSettings() {
     document.getElementById('launcher-visibility').value = 'keep';
     document.getElementById('process-priority').value = 'normal';
     document.getElementById('window-size').value = 'default';
+    document.getElementById('launch-fullscreen').checked = false;
     document.getElementById('game-java-select').value = 'auto';
     document.querySelector('input[name="globalMemoryMode"][value="auto"]').checked = true;
     document.getElementById('memory-slider').value = 4096;
@@ -9745,6 +9830,7 @@ async function loadLaunchSettings() {
                     if (customDiv) customDiv.style.display = 'none';
                 }
             }
+            if (settings.fullscreen !== undefined) document.getElementById('launch-fullscreen').checked = !!settings.fullscreen;
             if (settings.gameJava) document.getElementById('game-java-select').value = settings.gameJava;
             if (settings.memoryMode) {
                 document.querySelector(`input[name="globalMemoryMode"][value="${settings.memoryMode}"]`).checked = true;
