@@ -4374,7 +4374,24 @@ function selectJavaForVersion(versionId, settings, versionJson = null) {
     return chosen.path;
 }
 
+const _depCheckCache = new Map();
+const _DEP_CHECK_CACHE_TTL = 30000;
+
+function invalidateDepCheckCache(versionId) {
+    for (const key of _depCheckCache.keys()) {
+        if (key.startsWith(versionId + ':')) {
+            _depCheckCache.delete(key);
+        }
+    }
+}
+
 async function checkDependencies(versionId, settings, externalVersionDir = null) {
+    const _cacheKey = versionId + ':' + JSON.stringify(settings || {});
+    const _cached = _depCheckCache.get(_cacheKey);
+    if (_cached && (Date.now() - _cached.ts) < _DEP_CHECK_CACHE_TTL) {
+        console.log(`[DepCheck] 命中缓存，跳过重复扫描: ${versionId}`);
+        return _cached.result;
+    }
     console.log(`[DepCheck] 开始检查版本 ${versionId} 的依赖`);
     
     let externalAssetsDir = null;
@@ -4934,7 +4951,13 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
 
         if (result.forgeCore.missing.length > 0) {
             result.forgeCore.ok = false;
-            result.forgeCore.message = `${result.forgeCore.missing.length} 个Forge核心库文件缺失，请使用版本设置的"文件修复"功能或重新安装Forge版本`;
+            const missingNames = result.forgeCore.missing.map(m => m.desc || m.name).join('、');
+            result.forgeCore.message = `${result.forgeCore.missing.length} 个Forge核心库文件缺失(${missingNames})，无法启动游戏。\n` +
+                `修复建议:\n` +
+                `1) 前往"版本设置 → 文件修复"自动修复缺失文件\n` +
+                `2) 重新安装该Forge版本(版本设置 → 删除后重新安装)\n` +
+                `3) 检查杀毒软件是否将Forge核心库文件误删并加入白名单\n` +
+                `4) 如果使用自定义游戏目录,确认libraries文件夹完整`;
             for (const m of result.forgeCore.missing) {
                 const existingEntry = result.missingFiles.find(f => f.path === m.path);
                 if (!existingEntry) {
@@ -5032,6 +5055,12 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
     result.ready = result.java.ok && result.versionJson.ok && result.mainJar.ok
         && result.libraries.ok && result.natives.ok && result.parentVersion.ok
         && result.assets.ok && result.forgeCore.ok;
+
+    _depCheckCache.set(_cacheKey, { result, ts: Date.now() });
+    if (_depCheckCache.size > 50) {
+        const oldest = _depCheckCache.keys().next().value;
+        _depCheckCache.delete(oldest);
+    }
 
     return result;
 }
@@ -7802,6 +7831,64 @@ function buildClasspath(versionJson, versionId, externalVersionDir = null) {
         foundCount++;
     }
 
+    const CORE_JAR_MARKERS = ['fmlcore', 'javafmllanguage', 'mclanguage', 'lowcodelanguage'];
+    const hasAnyForgeCoreInCp = CORE_JAR_MARKERS.some(name => classpath.some(cp => cp.includes(name)));
+
+    if (!hasAnyForgeCoreInCp && forgeExtraJars.length === 0) {
+        const _gArgs = versionJson.arguments?.game || [];
+        const _mainCls = versionJson.mainClass || '';
+        const _isForge = _gArgs.some(a => typeof a === 'string' && a === 'forgeclient') ||
+            _mainCls.toLowerCase().includes('bootstraplauncher');
+
+        if (_isForge) {
+            let _fv = '', _mv = '';
+            const _fvi = _gArgs.findIndex(a => typeof a === 'string' && a === '--fml.forgeVersion');
+            const _mvi = _gArgs.findIndex(a => typeof a === 'string' && a === '--fml.mcVersion');
+            if (_fvi >= 0 && _fvi + 1 < _gArgs.length) _fv = _gArgs[_fvi + 1];
+            if (_mvi >= 0 && _mvi + 1 < _gArgs.length) _mv = _gArgs[_mvi + 1];
+            if (!_mv && versionJson.clientVersion) _mv = versionJson.clientVersion;
+
+            if (!_fv || !_mv) {
+                const _fl = libraries.find(l => l.name && (l.name.startsWith('net.minecraftforge:fmlloader:') || l.name.startsWith('net.minecraftforge:forge:')));
+                if (_fl) {
+                    const _p = _fl.name.split(':');
+                    if (_p.length >= 3) {
+                        const _di = _p[2].lastIndexOf('-');
+                        if (_di > 0) { _mv = _p[2].substring(0, _di); _fv = _p[2].substring(_di + 1); }
+                    }
+                }
+            }
+
+            if (_fv && _mv) {
+                const _vs = `${_mv}-${_fv}`;
+                const _pfx = 'net/minecraftforge';
+                const _coreArtifacts = [
+                    { dir: `${_pfx}/fmlcore/${_vs}`, file: `fmlcore-${_vs}.jar`, name: 'fmlcore' },
+                    { dir: `${_pfx}/javafmllanguage/${_vs}`, file: `javafmllanguage-${_vs}.jar`, name: 'javafmllanguage' },
+                    { dir: `${_pfx}/mclanguage/${_vs}`, file: `mclanguage-${_vs}.jar`, name: 'mclanguage' },
+                    { dir: `${_pfx}/lowcodelanguage/${_vs}`, file: `lowcodelanguage-${_vs}.jar`, name: 'lowcodelanguage' },
+                ];
+                const _missingNames = [];
+                for (const artifact of _coreArtifacts) {
+                    let found = false;
+                    for (const base of searchBases) {
+                        if (!base) continue;
+                        if (fs.existsSync(path.join(base, artifact.dir, artifact.file))) { found = true; break; }
+                    }
+                    if (!found) {
+                        const placeholderPath = path.join(searchBases[searchBases.length - 1] || LIBRARIES_DIR, artifact.dir, artifact.file);
+                        classpath.push(placeholderPath);
+                        _missingNames.push(artifact.name);
+                        missingCount++;
+                    }
+                }
+                if (_missingNames.length > 0) {
+                    console.warn(`[Classpath] Forge核心库缺失(已加入占位路径): ${_missingNames.join(', ')} — 文件不存在于磁盘, JVM启动后Forge引导程序可能报Invalid paths argument`);
+                }
+            }
+        }
+    }
+
     if (missingList.length > 0) {
         console.warn(`[Classpath] 缺失库 (${missingList.length}): ${missingList.slice(0, 20).join(', ')}`);
     }
@@ -9014,10 +9101,74 @@ async function launchGame(versionId, settings, account) {
         }
 
         if (!forgeRepaired) {
+            const forgeSearchDirs = [];
+            if (externalVersionDir) {
+                const extRoot = findExternalRoot(externalVersionDir);
+                if (extRoot) forgeSearchDirs.push(path.join(extRoot, 'libraries'));
+            }
+            forgeSearchDirs.push(LIBRARIES_DIR);
+            const homeLib = path.join(os.homedir(), 'AppData', 'Roaming', '.minecraft', 'libraries');
+            if (fs.existsSync(homeLib) && !forgeSearchDirs.includes(homeLib)) forgeSearchDirs.push(homeLib);
+
+            let deepCopied = 0;
+            for (const m of (depCheck.forgeCore.missing || [])) {
+                if (fs.existsSync(m.path)) continue;
+                const basename = path.basename(m.path);
+                const parentDir = path.dirname(m.path);
+                const grandParent = path.dirname(parentDir);
+                const verDirName = path.basename(parentDir);
+                const libType = path.basename(grandParent);
+                const libGroup = path.basename(path.dirname(grandParent));
+
+                for (const searchDir of forgeSearchDirs) {
+                    if (!fs.existsSync(searchDir)) continue;
+                    try {
+                        const typeDir = path.join(searchDir, libGroup, libType);
+                        if (!fs.existsSync(typeDir)) continue;
+                        const versionDirs = fs.readdirSync(typeDir).filter(d => {
+                            try { return fs.statSync(path.join(typeDir, d)).isDirectory(); } catch (_) { return false; }
+                        });
+                        for (const vd of versionDirs) {
+                            const candidatePath = path.join(typeDir, vd, basename);
+                            if (fs.existsSync(candidatePath)) {
+                                try {
+                                    if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+                                    fs.copyFileSync(candidatePath, m.path);
+                                    if (fs.existsSync(m.path) && (!m.path.endsWith('.jar') || isJarIntact(m.path))) {
+                                        deepCopied++;
+                                        console.log(`[LaunchGame] 深度搜索修复: ${basename} (来源: ${candidatePath})`);
+                                    } else {
+                                        try { fs.unlinkSync(m.path); } catch (_) {}
+                                    }
+                                } catch (_) {}
+                                break;
+                            }
+                        }
+                        if (fs.existsSync(m.path)) break;
+                    } catch (_) {}
+                }
+            }
+            if (deepCopied > 0) {
+                const stillMissing = (depCheck.forgeCore.missing || []).filter(m => !fs.existsSync(m.path));
+                if (stillMissing.length === 0) {
+                    console.log(`[LaunchGame] 深度搜索修复成功!`);
+                    forgeRepaired = true;
+                }
+            }
+        }
+
+        if (!forgeRepaired) {
+            const missingDetail = (depCheck.forgeCore.missing || [])
+                .map(m => `  - ${m.desc || m.name}: ${path.basename(m.path)}`)
+                .join('\n');
             const forgeErrorMsg = `Forge 核心库文件缺失 (${depCheck.forgeCore.missing.length}个)，无法启动游戏。\n` +
-                `缺失文件:\n${forgeMissing}\n\n` +
-                `请前往"版本设置 → 文件修复"功能修复此问题，或重新安装该 Forge 版本。`;
+                `缺失文件:\n${missingDetail}\n\n` +
+                `修复建议:\n` +
+                `1) 前往"版本设置 → 文件修复"自动修复\n` +
+                `2) 重新安装该Forge版本\n` +
+                `3) 检查杀毒软件是否将Forge文件拦截并加入白名单`;
             console.error(`[LaunchGame] Forge核心库缺失，自动修复失败，拒绝启动`);
+            console.error(`[LaunchGame] 修复建议: 1)文件修复 2)重新安装Forge 3)检查杀毒白名单`);
             return {
                 success: false,
                 error: forgeErrorMsg,
@@ -9162,6 +9313,17 @@ async function launchGame(versionId, settings, account) {
 
     const nonForgeCoreMissing = depCheck.missingFiles.filter(f => f.type !== 'forge_core');
     if (nonForgeCoreMissing.length > 0) {
+        const _LAUNCH_CORE_PREFIXES = ['net.minecraftforge', 'cpw.mods', 'net.minecraft'];
+        const criticalMissing = nonForgeCoreMissing.filter(f => f.type === 'main_jar' || f.type === 'parent_version' || f.type === 'native' || f.type === 'asset' || f.type === 'asset_index');
+        const nonCoreLibMissing = nonForgeCoreMissing.filter(f => f.type === 'library' && f.name && !_LAUNCH_CORE_PREFIXES.some(p => f.name.split(':')[0].startsWith(p)));
+        const coreLibMissing = nonForgeCoreMissing.filter(f => f.type === 'library' && f.name && _LAUNCH_CORE_PREFIXES.some(p => f.name.split(':')[0].startsWith(p)));
+
+        if (criticalMissing.length === 0 && coreLibMissing.length === 0 && nonCoreLibMissing.length > 0) {
+            console.log(`[LaunchGame] 跳过非核心库自动下载 (${nonCoreLibMissing.length}个)，直接尝试启动`);
+            for (const f of nonCoreLibMissing) {
+                console.log(`[LaunchGame] 非核心库缺失(不影响启动): ${f.name || f.path}`);
+            }
+        } else {
         const sessionId = `launch-${Date.now()}`;
         launchSessions.set(sessionId, {
             status: 'downloading',
@@ -9200,6 +9362,7 @@ async function launchGame(versionId, settings, account) {
                 sess.message = '缺失文件下载完成';
             }
             console.log(`[LaunchGame] 缺失文件下载完成，重新检查并启动...`);
+            invalidateDepCheckCache(cleanVersionId);
         } catch (dlErr) {
             console.error(`[LaunchGame] 下载缺失文件失败: ${dlErr.message}`);
             const sess = launchSessions.get(sessionId);
@@ -9242,6 +9405,7 @@ async function launchGame(versionId, settings, account) {
         versionJson = resolveVersionJson(cleanVersionId, externalVersionDir);
         if (!versionJson) {
             return { success: false, error: `找不到版本 ${cleanVersionId} 的JSON文件（下载后）` };
+        }
         }
     }
 
@@ -9586,12 +9750,12 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                             code,
                             isCrash: true,
                             reason: 'Forge核心库文件缺失（Invalid paths argument）',
-                            suggestion: 'Forge安装不完整，请前往版本设置使用"文件修复"功能，或重新安装该Forge版本'
+                            suggestion: 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单'
                         };
                     }
                     if (analysis.isCrash && recentLogs.includes('Invalid paths argument')) {
                         analysis.reason = 'Forge核心库文件缺失（Invalid paths argument）';
-                        analysis.suggestion = 'Forge安装不完整，请前往版本设置使用"文件修复"功能，或重新安装该Forge版本';
+                        analysis.suggestion = 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单';
                     }
                     instanceInfo.logBuffer.push(`[VersePC] 游戏进程退出(session:${sessionId}),代码:${code}`);
                     gameLogBuffer.push(`[VersePC] 游戏进程退出 (session: ${sessionId})，代码: ${code}`);
@@ -9739,12 +9903,12 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                     code,
                     isCrash: true,
                     reason: 'Forge核心库文件缺失（Invalid paths argument）',
-                    suggestion: 'Forge安装不完整，请前往版本设置使用"文件修复"功能，或重新安装该Forge版本'
+                    suggestion: 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单'
                 };
             }
             if (analysis.isCrash && recentLogs.includes('Invalid paths argument')) {
                 analysis.reason = 'Forge核心库文件缺失（Invalid paths argument）';
-                analysis.suggestion = 'Forge安装不完整，请前往版本设置使用"文件修复"功能，或重新安装该Forge版本';
+                analysis.suggestion = 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单';
             }
             instanceInfo.logBuffer.push(`[VersePC] 游戏进程退出(session:${sessionId}),代码:${code}`);
             gameLogBuffer.push(`[VersePC] 游戏进程退出 (session: ${sessionId})，代码: ${code}`);
@@ -12303,6 +12467,14 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         progress('version-config', '正在创建版本配置...', 14);
 
         if (loaderVersionId) {
+            let loaderMainClass = '';
+            try {
+                const lvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
+                if (fs.existsSync(lvJsonPath)) {
+                    const lvJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
+                    loaderMainClass = lvJson.mainClass || '';
+                }
+            } catch (_lvErr) {}
             const versionJson = {
                 id: versionId,
                 inheritsFrom: loaderVersionId,
@@ -12310,8 +12482,9 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 time: new Date().toISOString(),
                 releaseTime: new Date().toISOString()
             };
+            if (loaderMainClass) versionJson.mainClass = loaderMainClass;
             fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
-            console.log(`[mrpack] 创建版本JSON: ${versionId}.json (继承 ${loaderVersionId})`);
+            console.log(`[mrpack] 创建版本JSON: ${versionId}.json (继承 ${loaderVersionId}, mainClass: ${loaderMainClass || '未设置'})`);
         } else {
             const versionJson = {
                 id: versionId,
@@ -12930,6 +13103,14 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         progress('version-config', '正在创建版本配置...', 14);
 
         if (loaderVersionId) {
+            let cfLoaderMainClass = '';
+            try {
+                const cfLvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
+                if (fs.existsSync(cfLvJsonPath)) {
+                    const cfLvJson = JSON.parse(fs.readFileSync(cfLvJsonPath, 'utf-8'));
+                    cfLoaderMainClass = cfLvJson.mainClass || '';
+                }
+            } catch (_cfLvErr) {}
             const versionJson = {
                 id: versionId,
                 inheritsFrom: loaderVersionId,
@@ -12937,8 +13118,9 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                 time: new Date().toISOString(),
                 releaseTime: new Date().toISOString()
             };
+            if (cfLoaderMainClass) versionJson.mainClass = cfLoaderMainClass;
             fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
-            console.log(`[CurseForge] 创建版本JSON: ${versionId}.json (继承 ${loaderVersionId})`);
+            console.log(`[CurseForge] 创建版本JSON: ${versionId}.json (继承 ${loaderVersionId}, mainClass: ${cfLoaderMainClass || '未设置'})`);
         } else {
             const versionJson = {
                 id: versionId,
@@ -14307,6 +14489,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         } else {
                             session.status = 'completed';
                             session.message = `下载完成: ${result.completed} 个成功, ${result.failed} 个失败`;
+                            invalidateDepCheckCache(ldCleanId);
 
                             if (result.failed === 0) {
                                 const versionJson = resolveVersionJson(ldVersionId, ldExternalDir);
@@ -20848,7 +21031,7 @@ function analyzeExitCode(code, versionId) {
                     analysis.suggestion = '请更新显卡驱动或检查OpenGL支持';
                 } else if (content.includes('Invalid paths argument') || content.includes('contained no existing paths')) {
                     analysis.reason = 'Forge核心库文件缺失（Invalid paths argument）';
-                    analysis.suggestion = 'Forge安装不完整，请前往版本设置使用"文件修复"功能，或重新安装该Forge版本';
+                    analysis.suggestion = 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单';
                 }
                 analysis.crashLogFile = path.join(dir, files[0]);
                 break;

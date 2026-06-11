@@ -1598,6 +1598,9 @@ Take action now. Do not explain your limitations.`
             res.on('error', (err) => { console.error('[Engine] SSE stream error:', err.message); finish('error'); });
         });
 
+        if (!fullContent && fullReasoning) {
+            fullContent = fullReasoning;
+        }
         if (fullContent) {
             this._send({ type: 'say', say: SayType.TEXT, text: fullContent, partial: false });
         }
@@ -1730,6 +1733,9 @@ Take action now. Do not explain your limitations.`
             }
         }
 
+        if (!fullContent && fullReasoning) {
+            fullContent = fullReasoning;
+        }
         if (fullContent) {
             this._send({ type: 'say', say: SayType.TEXT, text: fullContent, partial: false });
         }
@@ -1829,6 +1835,9 @@ Take action now. Do not explain your limitations.`
             res.on('error', (err) => { console.error('[Engine] SSE stream error:', err.message); finish('error'); });
         });
 
+        if (!fullContent && fullReasoning) {
+            fullContent = fullReasoning;
+        }
         if (fullContent) {
             this._send({ type: 'say', say: SayType.TEXT, text: fullContent, partial: false });
         }

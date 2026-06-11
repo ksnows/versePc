@@ -7023,67 +7023,12 @@ async function handleLaunch() {
         
         if (!depCheck.java || !depCheck.java.ok) {
             const requiredVer = requiredJava;
-            setLaunchStep('java-check', 'running', `Java ${requiredVer}+ 未找到，正在检测...`);
-            try {
-                const javaInstallRes = await API.autoInstallJava(requiredVer);
-                if (javaInstallRes.success && javaInstallRes.sessionId) {
-                    const sessionId = javaInstallRes.sessionId;
-                    let javaStatus = 'detecting';
-                    while (javaStatus === 'detecting' || javaStatus === 'downloading' || javaStatus === 'configuring') {
-                        await new Promise(r => setTimeout(r, 1500));
-                        try {
-                            const st = await API.getJavaInstallStatus(sessionId);
-                            if (st && st.status) {
-                                javaStatus = st.status;
-                                setLaunchStep('java-check', 'running', st.message || `正在检测 Java ${requiredVer}+...`);
-                            }
-                        } catch (_) { javaStatus = 'failed'; }
-                    }
-                    if (javaStatus === 'completed') {
-                        setLaunchStep('java-check', 'success', `Java ${requiredVer}+ 已找到，重新检测...`);
-                        const reCheck = await API.launchCheck(versionId);
-                        if (reCheck.java && reCheck.java.ok) {
-                            depCheck = reCheck;
-                            setLaunchStep('java-check', 'success', reCheck.java.message || `Java ${reCheck.java.version} ✓`);
-                        } else {
-                            setLaunchStep('java-check', 'error', 'Java 检测失败，请检查设置');
-                            showLaunchError(`Java 检测完成，但仍未找到合适的版本。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
-                            launchBtn.disabled = false;
-                            homeLaunchBtn.disabled = false;
-                            window._versepc_launching = false;
-                            return;
-                        }
-                    } else if (javaStatus === 'need_manual') {
-                        setLaunchStep('java-check', 'error', `未找到 Java ${requiredVer}+，请手动配置`);
-                        showLaunchError(`未找到合适的Java运行环境（需要 Java ${requiredVer}+），请在设置中手动安装或配置Java路径。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
-                        launchBtn.disabled = false;
-                        homeLaunchBtn.disabled = false;
-                        window._versepc_launching = false;
-                        return;
-                    } else {
-                        setLaunchStep('java-check', 'error', `Java ${requiredVer}+ 检测失败`);
-                        showLaunchError(`Java ${requiredVer}+ 检测失败。<br>错误: ${javaStatus}<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
-                        launchBtn.disabled = false;
-                        homeLaunchBtn.disabled = false;
-                        window._versepc_launching = false;
-                        return;
-                    }
-                } else {
-                    setLaunchStep('java-check', 'error', `需要Java ${requiredVer}或更高版本`);
-                    showLaunchError(`需要安装Java ${requiredVer}或更高版本，请手动安装或配置。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
-                    launchBtn.disabled = false;
-                    homeLaunchBtn.disabled = false;
-                    window._versepc_launching = false;
-                    return;
-                }
-            } catch (e) {
-                setLaunchStep('java-check', 'error', `Java ${requiredVer}+ 检测失败: ${e.message}`);
-                showLaunchError(`Java 检测失败: ${e.message}<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
-                launchBtn.disabled = false;
-                homeLaunchBtn.disabled = false;
-                window._versepc_launching = false;
-                return;
-            }
+            setLaunchStep('java-check', 'error', `未找到 Java ${requiredVer}+`);
+            showLaunchError(`未找到合适的Java运行环境（需要 Java ${requiredVer}+），请前往 Java 管理页面安装或配置。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
+            launchBtn.disabled = false;
+            homeLaunchBtn.disabled = false;
+            window._versepc_launching = false;
+            return;
         }
         
         setLaunchStep('java-check', 'success', depCheck.java.message || `Java ${depCheck.java.version} ✓`);
@@ -8805,9 +8750,13 @@ async function showVersionSelectDialog() {
 
 let currentSettingsVersionId = null;
 let currentVersionSettings = null;
+let _modMgrSettingsLoaded = false;
+let _exportTreeLoaded = false;
 
 async function openVersionSettings(versionId, versionName) {
     currentSettingsVersionId = versionId;
+    _modMgrSettingsLoaded = false;
+    _exportTreeLoaded = false;
     document.getElementById('vset-title').textContent = '版本设置 - ' + (versionName || versionId);
     document.getElementById('export-name').value = versionName || versionId;
 
@@ -8836,8 +8785,6 @@ async function openVersionSettings(versionId, versionName) {
     navigateToPage('version-settings');
     document.querySelector('.content-area').classList.add('no-scroll');
     switchVSetTab('overview');
-    loadInstalledModsForSettings();
-    loadExportTreeData();
     loadVersionSettingsUI();
 }
 
@@ -8961,8 +8908,12 @@ function switchVSetTab(tabName) {
         } else {
             if (modHeader) modHeader.style.display = '';
             if (modActions) modActions.style.display = '';
-            loadInstalledModsForSettings();
+            if (!_modMgrSettingsLoaded) {
+                loadInstalledModsForSettings();
+            }
         }
+    } else if (tabName === 'export' && !_exportTreeLoaded) {
+        loadExportTreeData();
     }
 }
 
@@ -9322,8 +9273,13 @@ document.getElementById('vset-game-args')?.addEventListener('change', function()
 
 async function loadInstalledModsForSettings() {
     if (!currentSettingsVersionId) return;
+    const container = document.getElementById('modmgr-mod-list');
+    if (container) {
+        container.innerHTML = '<p class="empty-text" style="padding:30px 0;text-align:center;color:var(--text-muted)">加载中...</p>';
+    }
     try {
         const mods = await API.getVersionMods(currentSettingsVersionId);
+        _modMgrSettingsLoaded = true;
         renderModMgrList(mods || []);
     } catch (e) {
         console.error('[ModMgr] Load error:', e);
@@ -9344,22 +9300,33 @@ function renderModMgrList(mods) {
         return;
     }
 
-    container.innerHTML = mods.map(m => {
-        const iconUrl = m.icon || '';
-        const desc = (m.description || '').substring(0, 60);
-        const verStr = m.version || '';
-        const author = m.author || '';
-        const projectId = m.projectId || m.slug || '';
-        const isDisabled = m.disabled || false;
-        const fileName = m.fileName || m.name || '';
-        const toggleLabel = isDisabled ? '启用' : '禁用';
-        const toggleClass = isDisabled ? 'btn-primary' : 'btn-secondary';
-        const nameStyle = isDisabled ? 'opacity:0.5;text-decoration:line-through;' : '';
-        const iconHtml = iconUrl
-            ? `<div class="modmgr-icon"><img src="${iconUrl}" alt="" loading="lazy" onerror="this.style.display='none';this.parentElement.classList.add('modmgr-icon--fallback')"></div>`
-            : '<div class="modmgr-icon modmgr-icon--fallback"></div>';
-        return `<div class="modmgr-item${isDisabled ? ' mod-disabled' : ''}" data-name="${escapeHtml(m.name || '')}" data-desc="${escapeHtml(desc)}">
-            ${iconHtml}
+    const BATCH_SIZE = 30;
+    const total = mods.length;
+    container.innerHTML = '';
+
+    function renderBatch(start) {
+        const fragment = document.createDocumentFragment();
+        const end = Math.min(start + BATCH_SIZE, total);
+        for (let i = start; i < end; i++) {
+            const m = mods[i];
+            const iconUrl = m.icon || '';
+            const desc = (m.description || '').substring(0, 60);
+            const verStr = m.version || '';
+            const author = m.author || '';
+            const projectId = m.projectId || m.slug || '';
+            const isDisabled = m.disabled || false;
+            const fileName = m.fileName || m.name || '';
+            const toggleLabel = isDisabled ? '启用' : '禁用';
+            const toggleClass = isDisabled ? 'btn-primary' : 'btn-secondary';
+            const nameStyle = isDisabled ? 'opacity:0.5;text-decoration:line-through;' : '';
+            const iconHtml = iconUrl
+                ? `<div class="modmgr-icon"><img src="${iconUrl}" alt="" loading="lazy" onerror="this.style.display='none';this.parentElement.classList.add('modmgr-icon--fallback')"></div>`
+                : '<div class="modmgr-icon modmgr-icon--fallback"></div>';
+            const wrapper = document.createElement('div');
+            wrapper.className = `modmgr-item${isDisabled ? ' mod-disabled' : ''}`;
+            wrapper.dataset.name = m.name || '';
+            wrapper.dataset.desc = desc;
+            wrapper.innerHTML = `${iconHtml}
             <div class="modmgr-info">
                 <div class="modmgr-name" style="${nameStyle}">${escapeHtml(formatModNameWithChinese(m.id || m.fileName, m.name))}${isDisabled ? ' (已禁用)' : ''}</div>
                 <div class="modmgr-meta">${author ? escapeHtml(author) : ''}${verStr ? ' | ' + escapeHtml(verStr) : ''}</div>
@@ -9369,10 +9336,16 @@ function renderModMgrList(mods) {
                 <button class="btn ${toggleClass} btn-sm" onclick="event.stopPropagation();toggleModInManager('${escapeOnclick(fileName)}',${!isDisabled})">${toggleLabel}</button>
                 ${projectId ? `<button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();previewMod('${escapeOnclick(projectId)}')">预览</button>` : ''}
                 <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();removeModFromManager('${escapeOnclick(fileName)}')">移除</button>
-            </div>
-        </div>`;
-    }).join('');
+            </div>`;
+            fragment.appendChild(wrapper);
+        }
+        container.appendChild(fragment);
+        if (end < total) {
+            requestAnimationFrame(() => renderBatch(end));
+        }
+    }
 
+    renderBatch(0);
     if (countAll) countAll.textContent = mods.length;
     if (countUpdate) countUpdate.textContent = '0';
 }
@@ -9508,6 +9481,7 @@ async function loadExportTreeData() {
 
     try {
         const data = await API.getVersionExportInfo(currentSettingsVersionId);
+        _exportTreeLoaded = true;
 
         if (data.gameDesc) {
             const el = document.getElementById('export-game-desc');

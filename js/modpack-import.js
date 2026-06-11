@@ -63,14 +63,9 @@
             return;
         }
 
-        let filePath = '';
-        if (window.electronAPI && window.electronAPI.getDroppedFilePath) {
-            filePath = window.electronAPI.getDroppedFilePath(file);
-        }
-        if (!filePath && file.path) filePath = file.path;
-
+        let filePath = file.path || '';
         if (!filePath) {
-            if (typeof showToast === 'function') showToast('无法获取文件路径', 'error');
+            if (typeof showToast === 'function') showToast('无法获取文件路径，请通过文件选择按钮导入', 'error');
             return;
         }
 
