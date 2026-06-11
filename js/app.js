@@ -2374,13 +2374,13 @@ function navigateToPage(pageName) {
         _pageTransitionLock = true;
         console.log(`[PERF-NAV] transition start: ${currentPage.id} → page-${pageName}`);
         const _navT0 = performance.now();
-        currentPage.style.animation = 'pageOut 0.12s var(--ease-out-expo) forwards';
-        setTimeout(() => {
+        currentPage.style.animation = '';
+        requestAnimationFrame(() => {
             currentPage.classList.remove('active');
             currentPage.style.animation = '';
             target.classList.add('active');
             target.scrollTop = 0;
-            target.style.animation = 'pageIn 0.35s var(--ease-out-expo) backwards';
+            target.style.animation = 'pageIn 0.18s var(--ease-out-expo) backwards';
             console.log(`[PERF-NAV] page swap ${(performance.now()-_navT0).toFixed(1)}ms`);
             setTimeout(() => {
                 _pageTransitionLock = false;
@@ -2391,12 +2391,12 @@ function navigateToPage(pageName) {
                 } else {
                     _pendingPageTransition = null;
                 }
-            }, 50);
-        }, 100);
+            }, 80);
+        });
     } else if (!currentPage) {
         target.classList.add('active');
         target.scrollTop = 0;
-        target.style.animation = 'pageIn 0.35s var(--ease-out-expo) backwards';
+        target.style.animation = 'pageIn 0.18s var(--ease-out-expo) backwards';
     }
     
     if (isDetailPage) {
