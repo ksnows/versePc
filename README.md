@@ -1,6 +1,7 @@
-﻿<p align="center">
+<div align="center">
   <img src="img/icon.png" alt="VersePC Logo" width="120">
-</p>
+  <h1>VersePC</h1>
+</div>
 # VersePC - Minecraft Launcher
 
 <p align="center">
