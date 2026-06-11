@@ -1,13 +1,13 @@
 {
-  "version": "1.1.0",
+  "version": "1.1.01",
   "releaseDate": "2026-06-11T00:00:00Z",
-  "releaseName": "VersePC v1.1.0",
-  "releaseNotes": "## 更新内容\n- 全景场景改为纯自动旋转，移除鼠标跟随（避免头晕），新增转速自由调节（1-20档）\n- 修复整合包导入后 Mod 下载错误（内建 CurseForge API Key 兜底）\n- 修复整合包下载后启动提示缺少文件（补全 assets 下载和客户端 JAR 验证）\n- 修复不显示 NeoForge 整合包的 Mod 列表（新增 neoforge.mods.toml 解析支持）\n- 修复多次快速启动导致崩溃（前端+后端双层防抖锁）\n- Java 缺失时不再自动下载，改为提示用户手动配置\n- 修复游戏窗口大小调节没效果（分辨率通过命令行参数传递）\n- 修复 Forge 库下载进度条卡住（改为每个文件实时更新进度）\n- 修复 C 盘创建无用文件夹和空文件夹占空间问题\n- 修复 MCBBS 链接打不开（更新为 mcbbs.co）\n- 修复正版登录头像不显示（补全 session server 回退）\n- 修复 3D 皮肤模型缩放问题（调整视角和缩放参数）\n- 修复细胳膊（slim）皮肤模型未正确识别（自动从 session server 检测）\n- 修复陶瓦联机 500 错误（更新 Terracotta 下载源为 burningtnt/Terracotta，支持 tar.gz 解压）\n- 修复陶瓦进程启动失败时需等待 30 秒才报错（进程异常立即反馈）\n- 修复陶瓦状态转换失败后僵尸进程未清理\n- 修复前端 API 错误信息丢失（现在正确显示服务器返回的错误原因）",
+  "releaseName": "VersePC v1.1.01",
+  "releaseNotes": "## 更新内容\n- 修复陶瓦联机 500 错误（Terracotta 下载源已失效，更新为官方仓库 burningtnt/Terracotta）\n- 陶瓦组件现在以 tar.gz 压缩包方式分发，启动器自动解压安装\n- 修复陶瓦进程启动失败时需等待 30 秒才报错（进程异常立即反馈）\n- 修复陶瓦状态转换失败后僵尸进程未清理\n- 修复前端 API 错误信息丢失（现在正确显示服务器返回的错误原因）",
   "files": {
     "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.1.0/VersePC-Setup-1.1.0.exe",
-      "sha256": "D1D73BA49A7818D31A654536ACD99420A0728E3010E4C5EC254F7A9333966FD7",
-      "size": 162788533
+      "url": "https://github.com/doujie081231/versePc/releases/download/v1.1.01/VersePC-Setup-1.1.1.exe",
+      "sha256": "50EED1DAD7135A671C714D3D91307248C8AE9ACBEFEFB1755140A992B450D777",
+      "size": 162788885
     }
   },
   "minSupportedVersion": "1.0.0",
