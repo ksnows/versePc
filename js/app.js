@@ -6777,7 +6777,7 @@ async function startMsAuth() {
                         else if (pollResult.isRateLimit) errMsg = `⏳ 请求过于频繁，请等待 ${pollResult.retryAfter || 5} 秒后重试`;
                         else if (pollResult.xerr) errMsg = `❌ Xbox认证失败 (${pollResult.xerr})`;
                         document.getElementById('msauth-status-text').textContent = errMsg;
-                        if (pollResult.needPurchase || pollResult.needCreateProfile) {
+                        if (pollResult.needPurchase || pollResult.needCreateProfile || pollResult.errorCode === 'invalid_grant') {
                             clearInterval(msAuthPollInterval);
                             msAuthPollInterval = null;
                         }
@@ -6810,15 +6810,8 @@ function copyMsCode() {
 }
 
 async function reopenMsAuthPage() {
-    const url = document.getElementById('msauth-url').href;
-    if (url && url !== '#') {
-        try {
-            await window.electronAPI?.openExternal?.(url);
-            showToast('已打开浏览器', 'success');
-        } catch (e) {
-            showToast('无法打开浏览器', 'error');
-        }
-    }
+    if (msAuthPollInterval) { clearInterval(msAuthPollInterval); msAuthPollInterval = null; }
+    startMsAuth();
 }
 
 function closeThirdPartyModal() {

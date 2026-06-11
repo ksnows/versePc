@@ -15910,7 +15910,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     });
 
                     if (msTokenResult.error) {
-                        sendJSON({ success: false, pending: msTokenResult.error === 'authorization_pending', error: msTokenResult.error_description || msTokenResult.error });
+                        sendJSON({ success: false, pending: msTokenResult.error === 'authorization_pending', error: msTokenResult.error_description || msTokenResult.error, errorCode: msTokenResult.error });
                         break;
                     }
 
