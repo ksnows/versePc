@@ -1161,23 +1161,10 @@ app.commandLine.appendSwitch('high-dpi-support', '1');
 app.commandLine.appendSwitch('enable-use-zoom-for-dsf', 'true');
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 
-function shouldUseHighPerformanceGpu() {
-    try {
-        const saved = loadStore()['versepc_launch_settings'];
-        if (!saved) return true;
-        const settings = JSON.parse(saved);
-        return settings.useHighPerformanceGPU !== false;
-    } catch (e) {
-        return true;
-    }
-}
-
-// 默认使用系统 GPU 合成，提升高 DPI 清晰度和页面动画流畅度。
-// 安全模式或上次检测到 GPU 异常时再回退到软件渲染。
-const useHighPerformanceGpu = shouldUseHighPerformanceGpu();
+// 启动器默认禁用 GPU 硬件加速以确保兼容性，只有用户主动启用时才开启
 const shouldDisableGpu = forceGpu
     ? false
-    : (safeMode || !useHighPerformanceGpu || require('fs').existsSync(disableGpuFile));
+    : (safeMode || !require('fs').existsSync(enableGpuFile));
 
 if (shouldDisableGpu) {
     app.disableHardwareAcceleration();
