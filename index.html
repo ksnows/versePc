@@ -2459,6 +2459,15 @@
                                 </select>
                             </div>
                             <div class="form-group">
+                                <label>游戏目录</label>
+                                <p class="hint" style="margin-bottom:8px;margin-top:0">非隔离模式下游戏数据（存档、模组等）的存放位置，默认为启动器数据目录</p>
+                                <div style="display:flex;gap:8px;align-items:center">
+                                    <input type="text" id="setting-game-dir" class="text-input" style="flex:1" placeholder="默认（启动器数据目录）">
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="browseGameDir()">浏览</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="resetGameDir()">重置</button>
+                                </div>
+                            </div>
+                            <div class="form-group">
                                 <label>游戏窗口标题</label>
                                 <input type="text" id="launch-window-title" class="text-input" placeholder="默认">
                             </div>

@@ -6472,6 +6472,7 @@ async function deleteAccount(accountId) {
 
 let _currentDetailAccount = null;
 let _skinViewer = null;
+let _skinResizeObserver = null;
 let _currentSkinBg = 'white';
 
 function showAccountDetail(accountId) {
@@ -6508,6 +6509,10 @@ function showAccountList() {
 }
 
 function destroySkinViewer() {
+    if (_skinResizeObserver) {
+        try { _skinResizeObserver.disconnect(); } catch (e) {}
+        _skinResizeObserver = null;
+    }
     if (_skinViewer) {
         try { _skinViewer.dispose(); } catch (e) {}
         _skinViewer = null;
@@ -6530,7 +6535,7 @@ async function initSkinViewer(skinUrl) {
             } catch (e) {}
         }
         if (_currentDetailAccount) _currentDetailAccount._resolvedSkinModel = skinModel;
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await new Promise(r => setTimeout(r, 100));
         const cw = container.clientWidth || 360;
         const ch = container.clientHeight || 420;
         _skinViewer = new skinview3d.SkinViewer({
@@ -6550,6 +6555,14 @@ async function initSkinViewer(skinUrl) {
         _skinViewer.globalLight.intensity = 2.5;
         _skinViewer.background = _currentSkinBg === 'black' ? 0x000000 : 0xffffff;
         _skinViewer.nameTag = _currentDetailAccount ? _currentDetailAccount.username : null;
+        _skinResizeObserver = new ResizeObserver(() => {
+            if (_skinViewer && container) {
+                const w = container.clientWidth;
+                const h = container.clientHeight;
+                if (w > 0 && h > 0) _skinViewer.setSize(w, h);
+            }
+        });
+        _skinResizeObserver.observe(container);
     } catch (e) {
         console.error('[SkinViewer] init error:', e);
         container.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--text-secondary);font-size:14px;gap:8px;"><span style="font-size:32px;">👤</span><span>皮肤加载失败</span><span style="font-size:12px;color:var(--text-tertiary);">请检查网络连接或重新登录</span></div>';
@@ -8387,6 +8400,28 @@ async function importModpackFromFile() {
     }
 }
 
+document.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
+document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const name = (file.name || '').toLowerCase();
+    if (name.endsWith('.mrpack') || name.endsWith('.cursemodpack') || (name.endsWith('.zip') && file.path)) {
+        if (file.path) {
+            showToast('正在导入整合包...', 'info');
+            window.electronAPI.importModpack(file.path, '').then(result => {
+                if (result && result.success) {
+                    showToast(`整合包 "${result.name || '未知'}" 导入成功！`, 'success');
+                } else {
+                    showToast(`导入失败: ${result?.error || '未知错误'}`, 'error');
+                }
+            }).catch(err => showToast('导入失败: ' + (err.message || ''), 'error'));
+        }
+    }
+});
+
 function loadResourcePage(type) {
     const state = resourceState[type];
     state.offset = 0;
@@ -9724,6 +9759,8 @@ async function saveLaunchSettings() {
 
     try {
         await window.electronAPI.store.set('versepc_launch_settings', JSON.stringify(settings));
+        const gameDirVal = document.getElementById('setting-game-dir')?.value || '';
+        await API.saveSettings({ gameDir: gameDirVal });
         showToast('启动设置已保存', 'success');
         
         // 应用窗口大小到启动器窗口
@@ -9760,11 +9797,27 @@ function applyLauncherWindowSize(windowSize) {
     }
 }
 
+async function browseGameDir() {
+    try {
+        const result = await window.electronAPI.showOpenDialog({ properties: ['openDirectory'] });
+        if (result && result.filePaths && result.filePaths.length > 0) {
+            document.getElementById('setting-game-dir').value = result.filePaths[0];
+        }
+    } catch (e) {
+        console.error('Browse game dir error:', e);
+    }
+}
+
+function resetGameDir() {
+    document.getElementById('setting-game-dir').value = '';
+}
+
 async function resetLaunchSettings() {
     const confirmed = await showConfirmDialog('重置设置', '确定要重置启动设置为默认值吗?', '重置', '取消');
     if (!confirmed) return;
 
     document.getElementById('launch-version-isolation').value = 'all';
+    document.getElementById('setting-game-dir').value = '';
     document.getElementById('launch-window-title').value = '';
     document.getElementById('launch-custom-info').value = 'VersePC';
     document.getElementById('launcher-visibility').value = 'keep';
@@ -9787,6 +9840,7 @@ async function resetLaunchSettings() {
 
     toggleMemoryMode();
     updateMemoryDisplay();
+    try { await API.saveSettings({ gameDir: '' }); } catch (e) {}
     showToast('启动设置已重置', 'success');
 }
 
@@ -9865,6 +9919,13 @@ async function loadLaunchSettings() {
 
         updateSystemMemoryInfo();
         checkCdsStatus();
+        try {
+            const serverSettings = await API.getSettings();
+            if (serverSettings && serverSettings.gameDir && serverSettings.gameDir !== '') {
+                const gameDirInput = document.getElementById('setting-game-dir');
+                if (gameDirInput) gameDirInput.value = serverSettings.gameDir;
+            }
+        } catch (e) {}
     } catch (e) {
         console.error('[Settings] Load launch settings error:', e);
     }

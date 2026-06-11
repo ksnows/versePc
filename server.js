@@ -2550,7 +2550,7 @@ function saveVersions(versionsData) {
     fs.writeFileSync(VERSIONS_DATA_FILE, JSON.stringify(versionsData, null, 2));
 }
 
-function cleanupVersionChain(versionId) {
+function findVersionChain(versionId) {
     const toDelete = [versionId];
     const dvJsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
     if (fs.existsSync(dvJsonPath)) {
@@ -2588,15 +2588,28 @@ function cleanupVersionChain(versionId) {
             }
         } catch (e) {}
     }
+    return toDelete;
+}
+
+function cleanupVersionChain(versionId) {
+    const toDelete = findVersionChain(versionId);
     for (const id of toDelete) {
-        try {
-            const dir = path.join(VERSIONS_DIR, id);
-            if (fs.existsSync(dir)) {
-                fs.rmSync(dir, { recursive: true, force: true });
-                console.log(`[Cleanup] Deleted version: ${id}`);
+        let deleted = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const dir = path.join(VERSIONS_DIR, id);
+                if (fs.existsSync(dir)) {
+                    fs.rmSync(dir, { recursive: true, force: true });
+                    console.log(`[Cleanup] Deleted version: ${id}`);
+                }
+                deleted = true;
+                break;
+            } catch (e) {
+                console.error(`[Cleanup] Failed to delete ${id} (attempt ${attempt}):`, e.message);
+                if (attempt < 3) {
+                    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500); } catch (_e) {}
+                }
             }
-        } catch (e) {
-            console.error(`[Cleanup] Failed to delete ${id}:`, e.message);
         }
     }
     return toDelete;
@@ -8126,7 +8139,7 @@ function injectOfflineSkin(versionJson, account, assetsRoot) {
     const backups = [];
     try {
         if (!account || account.type !== 'offline' || !account.skinFile) return backups;
-        const skinPath = path.join(__dirname, 'img', account.skinFile);
+        const skinPath = path.join(DATA_DIR, 'img', account.skinFile);
         if (!fs.existsSync(skinPath)) return backups;
         const skinBuf = fs.readFileSync(skinPath);
         if (!skinBuf || skinBuf.length < 64) return backups;
@@ -12242,6 +12255,18 @@ async function importModpackFromPath(filePath, onProgress, targetVersion = '', a
         return { success: false, error: e.message };
     }
 
+    const fileStat = fs.statSync(filePath);
+    if (fileStat.size < 1024) {
+        return { success: false, error: '文件太小（' + fileStat.size + ' 字节），可能下载不完整' };
+    }
+    const fd = fs.openSync(filePath, 'r');
+    const magicBuf = Buffer.alloc(4);
+    fs.readSync(fd, magicBuf, 0, 4, 0);
+    fs.closeSync(fd);
+    if (magicBuf[0] !== 0x50 || magicBuf[1] !== 0x4B || magicBuf[2] !== 0x03 || magicBuf[3] !== 0x04) {
+        return { success: false, error: '文件格式无效（不是有效的 ZIP 文件），可能下载损坏' };
+    }
+
     let zip;
     try { zip = new AdmZip(filePath); } catch (e) {
         return { success: false, error: '无法读取 ZIP 文件: ' + e.message };
@@ -12540,10 +12565,22 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         }
     }
 
+    const targetLoaders = new Set();
+    if (fabricVer) targetLoaders.add('fabric');
+    if (forgeVer) targetLoaders.add('forge');
+    if (neoforgeVer) targetLoaders.add('neoforge');
+    console.log(`[mrpack] 目标加载器: [${[...targetLoaders].join(', ')}]`);
+    let skippedByLoader = 0;
     const filesList = (manifest.files || []).filter(f => {
         if (f.env && f.env.client === 'unsupported') return false;
+        if (targetLoaders.size > 0 && Array.isArray(f.loaders) && f.loaders.length > 0) {
+            const fileLoaders = f.loaders.map(l => (l || '').toLowerCase());
+            const compatible = [...targetLoaders].some(tl => fileLoaders.includes(tl));
+            if (!compatible) { skippedByLoader++; return false; }
+        }
         return true;
     });
+    if (skippedByLoader > 0) console.log(`[mrpack] 已跳过 ${skippedByLoader} 个不兼容的模组`);
     const modsDir = path.join(versionDir, 'mods');
     ensureDir(path.join(modsDir, 'dummy.txt'));
 
@@ -14657,20 +14694,39 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         }
                     }
                     let targetPath;
-                    const gameDir = getVersionGameDir(vofVersionId);
-                    if (gameDir) {
+                    if (externalVersionDir) {
                         switch (vofFolderType) {
-                            case 'version': targetPath = gameDir; break;
-                            case 'saves': targetPath = path.join(gameDir, 'saves'); break;
-                            case 'mods': targetPath = path.join(gameDir, 'mods'); break;
-                            default: targetPath = gameDir; break;
+                            case 'version': targetPath = externalVersionDir; break;
+                            case 'saves': targetPath = path.join(externalVersionDir, 'saves'); break;
+                            case 'mods': targetPath = path.join(externalVersionDir, 'mods'); break;
+                            default: targetPath = externalVersionDir; break;
                         }
                     } else {
-                        targetPath = path.join(VERSIONS_DIR, cleanVofId);
+                        const gameDir = getVersionGameDir(vofVersionId);
+                        if (gameDir) {
+                            switch (vofFolderType) {
+                                case 'version': targetPath = gameDir; break;
+                                case 'saves': targetPath = path.join(gameDir, 'saves'); break;
+                                case 'mods': targetPath = path.join(gameDir, 'mods'); break;
+                                default: targetPath = gameDir; break;
+                            }
+                        } else {
+                            targetPath = path.join(VERSIONS_DIR, cleanVofId);
+                        }
                     }
                     if (!fs.existsSync(targetPath)) { fs.mkdirSync(targetPath, { recursive: true }); }
                     const resolvedTarget = path.resolve(targetPath);
-                    if (!resolvedTarget.startsWith(path.resolve(VERSIONS_DIR)) && !resolvedTarget.startsWith(path.resolve(DATA_DIR))) {
+                    const allowedPrefixes = [
+                        path.resolve(VERSIONS_DIR),
+                        path.resolve(DATA_DIR)
+                    ];
+                    for (const folder of extFolders) {
+                        if (folder.path) allowedPrefixes.push(path.resolve(folder.path));
+                    }
+                    const settings = loadSettingsCached();
+                    if (settings.gameDir) allowedPrefixes.push(path.resolve(settings.gameDir));
+                    const isAllowed = allowedPrefixes.some(pfx => resolvedTarget.startsWith(pfx));
+                    if (!isAllowed) {
                         sendJSON({ success: false, error: '不允许访问该路径' }); break;
                     }
                     require('electron').shell.openPath(resolvedTarget);
@@ -14871,11 +14927,11 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const { versionId: dvId } = body6;
                 if (!dvId) { sendError('Missing versionId', 400); break; }
                 try {
-                    const toDelete = cleanupVersionChain(dvId);
-                    
+                    const toDelete = findVersionChain(dvId);
                     let versionsData = loadVersions();
                     versionsData = versionsData.filter(v => !toDelete.includes(v.id));
                     saveVersions(versionsData);
+                    cleanupVersionChain(dvId);
                     sendJSON({ success: true, deleted: toDelete });
                 } catch (e) { sendJSON({ success: false, error: e.message }); }
                 break;
@@ -17259,7 +17315,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         const accounts = loadAccounts();
                         const acc = accounts.find(a => (a.uuid || '').replace(/-/g, '') === cleanUuid);
                         if (acc && acc.skinFile) {
-                            const skinPath = path.join(__dirname, 'img', acc.skinFile);
+                            const skinPath = path.join(DATA_DIR, 'img', acc.skinFile);
                             if (fs.existsSync(skinPath)) {
                                 const skinBuf = fs.readFileSync(skinPath);
                                 offlineHead = await cropSkinToHeadWithSharp(skinBuf);
@@ -17444,7 +17500,8 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             }
                         }
                         const fileName = `custom_${accountId}_${Date.now()}.png`;
-                        const filePath = path.join(__dirname, 'img', fileName);
+                        const filePath = path.join(DATA_DIR, 'img', fileName);
+                        ensureDir(filePath);
                         fs.writeFileSync(filePath, skinBuf);
                         acc.skinFile = fileName;
                         acc.skinModel = model === 'slim' ? 'slim' : 'default';
@@ -17497,7 +17554,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         if (acc && acc.skinFile) stSkinFile = acc.skinFile;
                     } catch (e) {}
                     if (stSkinFile) {
-                        const skinPath = path.join(__dirname, 'img', stSkinFile);
+                        const skinPath = path.join(DATA_DIR, 'img', stSkinFile);
                         if (fs.existsSync(skinPath)) {
                             const data = fs.readFileSync(skinPath);
                             AVATAR_CACHE.set(stCacheKey, { data, contentType: 'image/png', time: Date.now() });
@@ -18205,6 +18262,29 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 break;
             }
 
+            function isModAlreadyInstalled(modsDir, depFileName, depProjectId) {
+                if (!modsDir || !fs.existsSync(modsDir)) return false;
+                const exactPath = path.join(modsDir, depFileName);
+                if (fs.existsSync(exactPath)) return true;
+                const disabledPath = exactPath + '.disabled';
+                if (fs.existsSync(disabledPath)) return true;
+                try {
+                    const existingFiles = fs.readdirSync(modsDir).filter(f => f.endsWith('.jar') || f.endsWith('.jar.disabled'));
+                    const baseName = depFileName.replace(/[-_]\d+\.\d+\.\d+[\w.\-]*\.jar$/i, '').replace(/\.jar$/i, '').toLowerCase();
+                    for (const f of existingFiles) {
+                        const fLower = f.toLowerCase();
+                        if (baseName.length >= 5 && fLower.includes(baseName)) return true;
+                    }
+                    if (depProjectId) {
+                        const slug = depProjectId.toLowerCase();
+                        for (const f of existingFiles) {
+                            if (f.toLowerCase().includes(slug)) return true;
+                        }
+                    }
+                } catch (e) {}
+                return false;
+            }
+
             case '/api/mods/download-version': {
                 const dvData = await readBody();
                 const dvVersionId = dvData.versionId;
@@ -18317,7 +18397,9 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                         const depFile = depVersionData.files.find(f => f.primary) || depVersionData.files[0];
                                         const depName = depFile.filename;
                                         const depDest = path.join(destDir, depName);
-                                        if (!fs.existsSync(depDest)) {
+                                        if (isModAlreadyInstalled(destDir, depName, dep.project_id)) {
+                                            console.log(`[ModDownload] 前置依赖已安装，跳过下载: ${depName} (project: ${dep.project_id})`);
+                                        } else {
                                             depDownloads.push({ url: depFile.url, fileName: depName, dest: depDest, size: depFile.size || 0 });
                                         }
                                     }
