@@ -69,7 +69,7 @@ extract-tool-css.js
 scripts/
 hs_err_pid*.log
 sse-debug.log
-ai-config.js
+ai-config.local.js
 build-installer.js
 editor-preload.cjs
 editor.html
