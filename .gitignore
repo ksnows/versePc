@@ -45,6 +45,7 @@ versepc-promo/
 tools/activation/
 docs/
 .trae/
+!.trae/skills/
 do_replace.ps1
 push-api.ps1
 generate_docs.js
