@@ -1421,9 +1421,14 @@ function setupNavigation() {
 
         toggle.addEventListener('click', (e) => {
             e.stopPropagation();
-            const isOpen = group.classList.contains('open');
             document.querySelectorAll('.nav-submenu-group').forEach(g => g.classList.remove('open'));
-            if (!isOpen) group.classList.add('open');
+            group.classList.add('open');
+
+            const firstSubBtn = group.querySelector('.nav-sub-btn[data-page]');
+            const firstPage = firstSubBtn?.dataset.page;
+            if (firstPage) {
+                navigateToPage(firstPage);
+            }
         });
 
         group.querySelectorAll('.nav-sub-btn').forEach(btn => {
