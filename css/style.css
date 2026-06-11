@@ -1,4 +1,4 @@
-﻿/**
+/**
  * VersePC - Minecraft Launcher
  * Copyright (c) 2026 豆杰. All Rights Reserved.
  *
@@ -2355,13 +2355,11 @@ body {
 .dark-theme .acct-detail-title {
     color: var(--text-primary);
 }
-.dark-theme .acct-detail-back-btn,
 .dark-theme .acct-detail-back-btn {
     background: var(--bg-tertiary);
     border-color: var(--border);
     color: var(--text-secondary);
 }
-.dark-theme .acct-detail-back-btn:hover,
 .dark-theme .acct-detail-back-btn:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
