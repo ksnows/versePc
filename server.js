@@ -3892,7 +3892,7 @@ async function downloadFileChunked(url, destPath, options = {}) {
                         rs.on('error', reject);
                         rs.pipe(ws, { end: false });
                     };
-                    ws.on('finish', resolve);
+                    ws.on('finish', () => { ws.close(); resolve(); });
                     ws.on('error', reject);
                     writeNext();
                 });
@@ -20095,27 +20095,19 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                         }
                                     }
 
-                                    await new Promise(r => setTimeout(r, 300));
-
-                                    let importResult = null;
-                                    for (let attempt = 1; attempt <= 2; attempt++) {
-                                        importResult = await importModpackFromPath(destPath, (p) => {
-                                            const s = modDownloadSessions.get(sessionId);
-                                            if (s) {
-                                                if (s.status === 'cancelled') return;
-                                                const np = 45 + Math.round(p.progress * 0.55);
-                                                s.progress = Math.max(s.progress || 0, np);
-                                                s.message = p.message || '安装中...';
-                                                s.phase = p.stage || 'install';
-                                                s.currentFile = p.currentFile || '';
-                                                if (p.files && p.files.length > 0) s.files = p.files;
-                                                if (p.stageHistory && p.stageHistory.length > 0) s.stageHistory = p.stageHistory;
-                                            }
-                                        }, rdType === 'modpack' ? '' : targetVersionId, abortController.signal);
-                                        if (importResult.success || attempt >= 2) break;
-                                        console.warn(`[Modpack] 整合包导入第${attempt}次失败: ${importResult.error}, 正在重试...`);
-                                        await new Promise(r => setTimeout(r, 1000));
-                                    }
+                                    const importResult = await importModpackFromPath(destPath, (p) => {
+                                        const s = modDownloadSessions.get(sessionId);
+                                        if (s) {
+                                            if (s.status === 'cancelled') return;
+                                            const np = 45 + Math.round(p.progress * 0.55);
+                                            s.progress = Math.max(s.progress || 0, np);
+                                            s.message = p.message || '安装中...';
+                                            s.phase = p.stage || 'install';
+                                            s.currentFile = p.currentFile || '';
+                                            if (p.files && p.files.length > 0) s.files = p.files;
+                                            if (p.stageHistory && p.stageHistory.length > 0) s.stageHistory = p.stageHistory;
+                                        }
+                                    }, rdType === 'modpack' ? '' : targetVersionId, abortController.signal);
 
                                     const s = modDownloadSessions.get(sessionId);
                                     if (s && s.status === 'cancelled') {
@@ -21809,6 +21801,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             }
 
             case '/api/create-shortcut': {
+                if (process.platform !== 'win32') {
+                    sendJSON({ success: false, error: '创建快捷方式仅支持 Windows 系统' });
+                    break;
+                }
                 const scBody = await readBody();
                 const shortcutType = scBody.type || 'desktop';
                 const shortcutVersion = scBody.versionId || '';
