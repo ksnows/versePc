@@ -2329,7 +2329,8 @@ async function applyPerformanceOptimizations(pid) {
     }
 
     try {
-        const psScript = `
+        if (process.platform === 'win32') {
+            const psScript = `
 $proc = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
 if ($proc) {
     $cpu = Get-CimInstance Win32_Processor
@@ -2347,16 +2348,17 @@ if ($proc) {
     } catch {}
 }
 `.trim();
-        const tmpScript = path.join(os.tmpdir(), `versepc_perf_${pid}.ps1`);
-        fs.writeFileSync(tmpScript, psScript, 'utf8');
-        exec(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpScript}"`, { timeout: 10000 }, (err) => {
-            try { fs.unlinkSync(tmpScript); } catch (e) {}
-            if (err) {
-                console.log(`[Perf] CPU亲和性设置失败: ${err.message}`);
-            } else {
-                console.log(`[Perf] CPU亲和性和I/O优先级已优化 for PID ${pid}`);
-            }
-        });
+            const tmpScript = path.join(os.tmpdir(), `versepc_perf_${pid}.ps1`);
+            fs.writeFileSync(tmpScript, psScript, 'utf8');
+            exec(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpScript}"`, { timeout: 10000 }, (err) => {
+                try { fs.unlinkSync(tmpScript); } catch (e) {}
+                if (err) {
+                    console.log(`[Perf] CPU亲和性设置失败: ${err.message}`);
+                } else {
+                    console.log(`[Perf] CPU亲和性和I/O优先级已优化 for PID ${pid}`);
+                }
+            });
+        }
     } catch (e) {
         console.log(`[Perf] 性能优化脚本执行失败: ${e.message}`);
     }
@@ -6690,7 +6692,7 @@ async function downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorInd
         
         try {
             const settings = loadSettingsCached();
-            const javaExeWin = path.join(targetPath, 'bin', process.platform === 'win32' ? 'javaw.exe' : 'java');
+            const javaExeWin = path.join(targetPath, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
             if (!settings.javaPath || !fs.existsSync(settings.javaPath)) {
                 settings.javaPath = javaExeWin;
                 saveSettings(settings);
@@ -9043,6 +9045,10 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
         }
     }
 
+    if (process.platform === 'darwin') {
+        jvmArgs.unshift('-XstartOnFirstThread');
+    }
+
     // 始终使用我们自己的完整 classpath（用系统分隔符 join），跳过 JSON 自带的残缺 classpath
     const cpSeparator = process.platform === 'win32' ? ';' : ':';
     const classpathStr = Array.isArray(classpath) ? classpath.join(cpSeparator) : classpath;
@@ -9878,10 +9884,6 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
     }
     console.log(`[Launch] Java路径: ${javaPath}`);
 
-    if (process.platform === 'win32' && !javaPath.endsWith('javaw.exe') && fs.existsSync(javaPath.replace('java.exe', 'javaw.exe'))) {
-        javaPath = javaPath.replace('java.exe', 'javaw.exe');
-    }
-
     let gameDir;
     if (externalVersionDir) {
         gameDir = externalVersionDir;
@@ -10027,6 +10029,11 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
             stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...process.env }
         };
+
+        if (process.platform === 'linux' && nativesDir) {
+            const existingLdPath = spawnOptions.env.LD_LIBRARY_PATH || '';
+            spawnOptions.env.LD_LIBRARY_PATH = [nativesDir, existingLdPath].filter(Boolean).join(':');
+        }
 
         try {
             const debugCmd = [javaPath, ...args].map(a => {
@@ -11660,10 +11667,10 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                         if (suitable.length > 0) {
                             procJavaPath = suitable[0].path;
                         } else {
-                            procJavaPath = process.platform === 'win32' ? 'javaw' : 'java';
+                            procJavaPath = 'java';
                         }
                     } catch (e) {
-                        procJavaPath = process.platform === 'win32' ? 'javaw' : 'java';
+                        procJavaPath = 'java';
                     }
 
                     console.log(`[Forge] Processor[${pi}] 执行: ${procMainClass}`);
@@ -15677,6 +15684,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             }
 
             case '/api/version/export-script': {
+                if (process.platform !== 'win32') {
+                    sendJSON({ success: false, error: '启动脚本导出仅支持 Windows 系统' });
+                    break;
+                }
                 const body4 = await readBody();
                 const { versionId: esId } = body4;
                 if (!esId) { sendError('Missing versionId', 400); break; }
@@ -20084,19 +20095,27 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                         }
                                     }
 
-                                    const importResult = await importModpackFromPath(destPath, (p) => {
-                                        const s = modDownloadSessions.get(sessionId);
-                                        if (s) {
-                                            if (s.status === 'cancelled') return;
-                                            const np = 45 + Math.round(p.progress * 0.55);
-                                            s.progress = Math.max(s.progress || 0, np);
-                                            s.message = p.message || '安装中...';
-                                            s.phase = p.stage || 'install';
-                                            s.currentFile = p.currentFile || '';
-                                            if (p.files && p.files.length > 0) s.files = p.files;
-                                            if (p.stageHistory && p.stageHistory.length > 0) s.stageHistory = p.stageHistory;
-                                        }
-                                    }, rdType === 'modpack' ? '' : targetVersionId, abortController.signal);
+                                    await new Promise(r => setTimeout(r, 300));
+
+                                    let importResult = null;
+                                    for (let attempt = 1; attempt <= 2; attempt++) {
+                                        importResult = await importModpackFromPath(destPath, (p) => {
+                                            const s = modDownloadSessions.get(sessionId);
+                                            if (s) {
+                                                if (s.status === 'cancelled') return;
+                                                const np = 45 + Math.round(p.progress * 0.55);
+                                                s.progress = Math.max(s.progress || 0, np);
+                                                s.message = p.message || '安装中...';
+                                                s.phase = p.stage || 'install';
+                                                s.currentFile = p.currentFile || '';
+                                                if (p.files && p.files.length > 0) s.files = p.files;
+                                                if (p.stageHistory && p.stageHistory.length > 0) s.stageHistory = p.stageHistory;
+                                            }
+                                        }, rdType === 'modpack' ? '' : targetVersionId, abortController.signal);
+                                        if (importResult.success || attempt >= 2) break;
+                                        console.warn(`[Modpack] 整合包导入第${attempt}次失败: ${importResult.error}, 正在重试...`);
+                                        await new Promise(r => setTimeout(r, 1000));
+                                    }
 
                                     const s = modDownloadSessions.get(sessionId);
                                     if (s && s.status === 'cancelled') {
@@ -21395,67 +21414,69 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         }
                     }
 
-                    try {
-                        const currentPath = execSync(
-                            `powershell -Command "[Environment]::GetEnvironmentVariable('Path', 'Machine')"`,
-                            { encoding: 'utf8', timeout: 10000, windowsHide: true }
-                        ).trim();
-                        const javaBinDir = path.join(javaHome, 'bin');
-                        const normalizedJavaBin = javaBinDir.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
-                        const pathEntries = currentPath.split(';').filter(p => {
-                            const normalized = p.trim().toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
-                            return normalized !== normalizedJavaBin && p.trim() !== '';
-                        });
-                        const newPath = pathEntries.join(';');
-                        if (newPath !== currentPath) {
-                            execSync(
-                                `powershell -Command "[Environment]::SetEnvironmentVariable('Path', '${newPath.replace(/'/g, "''")}', 'Machine')"`,
-                                { encoding: 'utf8', timeout: 15000, windowsHide: true }
-                            );
-                            console.log(`[Java] 已从系统PATH移除: ${javaBinDir}`);
+                    if (process.platform === 'win32') {
+                        try {
+                            const currentPath = execSync(
+                                `powershell -Command "[Environment]::GetEnvironmentVariable('Path', 'Machine')"`,
+                                { encoding: 'utf8', timeout: 10000, windowsHide: true }
+                            ).trim();
+                            const javaBinDir = path.join(javaHome, 'bin');
+                            const normalizedJavaBin = javaBinDir.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+                            const pathEntries = currentPath.split(';').filter(p => {
+                                const normalized = p.trim().toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+                                return normalized !== normalizedJavaBin && p.trim() !== '';
+                            });
+                            const newPath = pathEntries.join(';');
+                            if (newPath !== currentPath) {
+                                execSync(
+                                    `powershell -Command "[Environment]::SetEnvironmentVariable('Path', '${newPath.replace(/'/g, "''")}', 'Machine')"`,
+                                    { encoding: 'utf8', timeout: 15000, windowsHide: true }
+                                );
+                                console.log(`[Java] 已从系统PATH移除: ${javaBinDir}`);
+                            }
+                        } catch (envErr) {
+                            console.warn(`[Java] 从系统PATH移除失败(不影响): ${envErr.message}`);
                         }
-                    } catch (envErr) {
-                        console.warn(`[Java] 从系统PATH移除失败(不影响): ${envErr.message}`);
-                    }
 
-                    try {
-                        const currentUserPath = execSync(
-                            `powershell -Command "[Environment]::GetEnvironmentVariable('Path', 'User')"`,
-                            { encoding: 'utf8', timeout: 10000, windowsHide: true }
-                        ).trim();
-                        const javaBinDir = path.join(javaHome, 'bin');
-                        const normalizedJavaBin = javaBinDir.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
-                        const userPathEntries = currentUserPath.split(';').filter(p => {
-                            const normalized = p.trim().toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
-                            return normalized !== normalizedJavaBin && p.trim() !== '';
-                        });
-                        const newUserPath = userPathEntries.join(';');
-                        if (newUserPath !== currentUserPath) {
-                            execSync(
-                                `powershell -Command "[Environment]::SetEnvironmentVariable('Path', '${newUserPath.replace(/'/g, "''")}', 'User')"`,
-                                { encoding: 'utf8', timeout: 15000, windowsHide: true }
-                            );
-                            console.log(`[Java] 已从用户PATH移除: ${javaBinDir}`);
+                        try {
+                            const currentUserPath = execSync(
+                                `powershell -Command "[Environment]::GetEnvironmentVariable('Path', 'User')"`,
+                                { encoding: 'utf8', timeout: 10000, windowsHide: true }
+                            ).trim();
+                            const javaBinDir = path.join(javaHome, 'bin');
+                            const normalizedJavaBin = javaBinDir.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+                            const userPathEntries = currentUserPath.split(';').filter(p => {
+                                const normalized = p.trim().toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+                                return normalized !== normalizedJavaBin && p.trim() !== '';
+                            });
+                            const newUserPath = userPathEntries.join(';');
+                            if (newUserPath !== currentUserPath) {
+                                execSync(
+                                    `powershell -Command "[Environment]::SetEnvironmentVariable('Path', '${newUserPath.replace(/'/g, "''")}', 'User')"`,
+                                    { encoding: 'utf8', timeout: 15000, windowsHide: true }
+                                );
+                                console.log(`[Java] 已从用户PATH移除: ${javaBinDir}`);
+                            }
+                        } catch (envErr) {
+                            console.warn(`[Java] 从用户PATH移除失败(不影响): ${envErr.message}`);
                         }
-                    } catch (envErr) {
-                        console.warn(`[Java] 从用户PATH移除失败(不影响): ${envErr.message}`);
-                    }
 
-                    try {
-                        const currentJavaHome = execSync(
-                            `powershell -Command "[Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')"`,
-                            { encoding: 'utf8', timeout: 10000, windowsHide: true }
-                        ).trim();
-                        const normalizedCurrentJavaHome = currentJavaHome.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
-                        if (normalizedCurrentJavaHome === normalizedJavaHome) {
-                            execSync(
-                                `powershell -Command "[Environment]::SetEnvironmentVariable('JAVA_HOME', $null, 'Machine')"`,
-                                { encoding: 'utf8', timeout: 15000, windowsHide: true }
-                            );
-                            console.log(`[Java] 已清除JAVA_HOME环境变量`);
+                        try {
+                            const currentJavaHome = execSync(
+                                `powershell -Command "[Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')"`,
+                                { encoding: 'utf8', timeout: 10000, windowsHide: true }
+                            ).trim();
+                            const normalizedCurrentJavaHome = currentJavaHome.toLowerCase().replace(/\\/g, '/').replace(/\/$/, '');
+                            if (normalizedCurrentJavaHome === normalizedJavaHome) {
+                                execSync(
+                                    `powershell -Command "[Environment]::SetEnvironmentVariable('JAVA_HOME', $null, 'Machine')"`,
+                                    { encoding: 'utf8', timeout: 15000, windowsHide: true }
+                                );
+                                console.log(`[Java] 已清除JAVA_HOME环境变量`);
+                            }
+                        } catch (envErr) {
+                            console.warn(`[Java] 清除JAVA_HOME失败(不影响): ${envErr.message}`);
                         }
-                    } catch (envErr) {
-                        console.warn(`[Java] 清除JAVA_HOME失败(不影响): ${envErr.message}`);
                     }
 
                     fs.rmSync(javaHome, { recursive: true, force: true });

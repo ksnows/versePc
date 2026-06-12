@@ -104,7 +104,7 @@ const dlManager = {
         if (percent) percent.textContent = Math.round(t.progress) + '%';
         const statusEl = taskEl.querySelector('.dl-task-status');
         if (statusEl) {
-            statusEl.textContent = t.status === 'completed' ? '下载完成' : t.status === 'failed' ? '下载失败' : (t.message || '下载中...');
+            statusEl.textContent = t.status === 'completed' ? (t.message || '下载完成') : t.status === 'failed' ? (t.message || '下载失败') : (t.message || '下载中...');
         }
         let detailEl = taskEl.querySelector('.dl-task-detail');
         const hasStageData = t.type === 'modpack' && t.stageHistory && t.stageHistory.length > 0;
@@ -254,7 +254,7 @@ const dlManager = {
                 ? '<img src="' + t.iconUrl + '" alt="" class="dl-task-icon-img" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\'"><div class="dl-task-icon-fallback dl-task-icon-svg" style="display:none">' + (svgIcons[t.type] || svgIcons.other) + '</div>'
                 : svgIcons[t.type] || svgIcons.other;
             const fillClass = t.status === 'completed' ? 'dl-task-progress-fill--completed' : t.status === 'failed' ? 'dl-task-progress-fill--failed' : '';
-            const statusText = t.status === 'completed' ? '下载完成' : t.status === 'failed' ? '下载失败' : (t.message || '下载中...');
+            const statusText = t.status === 'completed' ? (t.message || '下载完成') : t.status === 'failed' ? (t.message || '下载失败') : (t.message || '下载中...');
             const isExpandable = t.type !== 'mod';
             const expandedClass = t.expanded && isExpandable ? 'dl-task--expanded' : '';
             let detailHtml = '';
@@ -4732,23 +4732,26 @@ function showModpackInstallModal(fileName, sessionId) {
 
 function getDownloadStageText(data) {
     if (!data) return '准备中...';
+    if (data.status === 'completed') return '安装完成';
+    if (data.status === 'failed') return data.message || '安装失败';
+    if (data.status === 'cancelled') return '已取消';
     if (data.phase === 'base' && data.message && data.message !== '正在准备基础版本...') return data.message;
     const phaseMap = {
         'download':        '下载整合包文件...',
         'read':            '正在读取整合包...',
         'base':            '正在准备基础版本...',
         'loader-install':  '正在安装模组加载器...',
+        'loader-upgrade':  '正在升级模组加载器...',
         'version-config':  '正在创建版本配置...',
         'loader':          '模组加载器就绪',
         'download-mods':   '下载整合包模组...',
         'overrides':       '解压整合包配置...',
+        'verify':          '正在验证整合包完整性...',
         'install':         '安装整合包内容...',
         'importing':       '正在安装整合包...',
     };
     if (data.phase && phaseMap[data.phase]) return phaseMap[data.phase];
     if (data.phase === 'install') return '安装整合包内容...';
-    if (data.status === 'completed') return '安装完成';
-    if (data.status === 'failed') return '安装失败';
     return data.message || '处理中...';
 }
 
