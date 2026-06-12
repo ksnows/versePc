@@ -10984,6 +10984,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadMachineId();
     updateActivationStatus();
     setTimeout(checkAnnouncementPopup, 2000);
+
+    if (window.electronAPI?.platform && window.electronAPI.platform !== 'win32') {
+        document.querySelectorAll('.win-only').forEach(el => el.style.display = 'none');
+    }
 });
 
 document.addEventListener('keydown', (e) => {

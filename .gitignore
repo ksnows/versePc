@@ -80,7 +80,8 @@ agent-engine.js.bak
 sse-server.js.bak
 META-INF/
 forge-installer-wrapper/
-.github/
+.github/*
+!.github/workflows/
 *技术报告*
 *鉴别材料*
 *诊断报告*

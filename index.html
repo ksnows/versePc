@@ -630,7 +630,7 @@
                             <div class="vset-section">
                                 <div class="vset-section-title">高级管理</div>
                                 <div class="vset-btn-group">
-                                    <button class="btn btn-secondary btn-sm" onclick="exportLaunchScript()">导出启动脚本</button>
+                                    <button class="btn btn-secondary btn-sm win-only" onclick="exportLaunchScript()">导出启动脚本</button>
                                     <button class="btn btn-secondary btn-sm" onclick="repairFiles()">补全文件</button>
                                     <button class="btn btn-danger btn-sm" onclick="deleteCurrentVersion()">删除版本</button>
                                 </div>
@@ -3013,7 +3013,7 @@
                                         </div>
                                         <div id="memory-detail-text" style="font-size: 12px; color: var(--text-tertiary); margin-top: 4px;">正在获取...</div>
                                     </div>
-                                    <button class="btn btn-primary" id="memory-optimize-btn" onclick="doMemoryOptimize()">内存优化</button>
+                                    <button class="btn btn-primary win-only" id="memory-optimize-btn" onclick="doMemoryOptimize()">内存优化</button>
                                 </div>
                             </div>
                         </div>
@@ -3106,7 +3106,7 @@
                                     安装并重启
                                 </button>
                                 <button class="btn btn-secondary" onclick="showUpdateAnnouncement()">查看更新公告</button>
-                                <button class="btn btn-secondary" onclick="createDesktopShortcut()">创建桌面快捷方式</button>
+                                <button class="btn btn-secondary win-only" onclick="createDesktopShortcut()">创建桌面快捷方式</button>
                             </div>
                         </div>
 

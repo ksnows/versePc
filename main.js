@@ -941,18 +941,27 @@ const terminalSessions = new Map();
 const pendingVersionSelections = new Map();
 
 function createTerminalSession(id, cols, rows) {
-    const shell = process.env.COMSPEC || 'cmd.exe';
-    const pwsh = 'powershell.exe';
+    const isWin = process.platform === 'win32';
+    const shell = isWin ? (process.env.COMSPEC || 'cmd.exe') : (process.env.SHELL || '/bin/bash');
+    const homeDir = process.env[isWin ? 'USERPROFILE' : 'HOME'] || (isWin ? 'C:\\' : '/');
     let child;
-    try {
-        child = require('child_process').spawn(pwsh, ['-NoLogo', '-NoExit'], {
-            cwd: process.env.USERPROFILE || process.env.HOME || 'C:\\',
-            env: { ...process.env, TERM: 'xterm-256color' },
-            stdio: ['pipe', 'pipe', 'pipe']
-        });
-    } catch (e) {
-        child = require('child_process').spawn(shell, [], {
-            cwd: process.env.USERPROFILE || process.env.HOME || 'C:\\',
+    if (isWin) {
+        try {
+            child = require('child_process').spawn('powershell.exe', ['-NoLogo', '-NoExit'], {
+                cwd: homeDir,
+                env: { ...process.env, TERM: 'xterm-256color' },
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+        } catch (e) {
+            child = require('child_process').spawn(shell, [], {
+                cwd: homeDir,
+                env: { ...process.env, TERM: 'xterm-256color' },
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+        }
+    } else {
+        child = require('child_process').spawn(shell, ['--login'], {
+            cwd: homeDir,
             env: { ...process.env, TERM: 'xterm-256color' },
             stdio: ['pipe', 'pipe', 'pipe']
         });
@@ -1044,6 +1053,9 @@ ipcMain.handle('get-memory-info', async () => {
 });
 
 ipcMain.handle('memory-optimize', async () => {
+    if (process.platform !== 'win32') {
+        return { success: false, error: '内存优化功能仅支持 Windows 系统' };
+    }
     return new Promise((resolve) => {
         const scriptSrc = path.join(__dirname, 'scripts', 'memopt.ps1');
         let scriptPath;
@@ -1212,23 +1224,25 @@ app.whenReady().then(async () => {
         console.log('VersePC starting...');
 
         // 启动时清理可能残留的旧进程（崩溃后重启的情况）
-        try {
-            const { execSync } = require('child_process');
-            const myPid = process.pid;
-            const pids = execSync(
-                `wmic process where "name='VersePC.exe' and ProcessId!=${myPid}" get ProcessId /format:value 2>nul`,
-                { encoding: 'utf8', timeout: 5000 }
-            );
-            const oldPids = pids.match(/ProcessId=(\d+)/g);
-            if (oldPids) {
-                for (const m of oldPids) {
-                    const pid = parseInt(m.split('=')[1]);
-                    if (pid && pid !== myPid) {
-                        try { process.kill(pid); console.log('[App] Killed zombie process:', pid); } catch (e) {}
+        if (process.platform === 'win32') {
+            try {
+                const { execSync } = require('child_process');
+                const myPid = process.pid;
+                const pids = execSync(
+                    `wmic process where "name='VersePC.exe' and ProcessId!=${myPid}" get ProcessId /format:value 2>nul`,
+                    { encoding: 'utf8', timeout: 5000 }
+                );
+                const oldPids = pids.match(/ProcessId=(\d+)/g);
+                if (oldPids) {
+                    for (const m of oldPids) {
+                        const pid = parseInt(m.split('=')[1]);
+                        if (pid && pid !== myPid) {
+                            try { process.kill(pid); console.log('[App] Killed zombie process:', pid); } catch (e) {}
+                        }
                     }
                 }
-            }
-        } catch (e) {}
+            } catch (e) {}
+        }
 
         // 清理可能残留的 SSE 端口
         try {
@@ -5187,7 +5201,8 @@ ${JSON.stringify(toTranslate, null, 2)}`;
                                 }
                             });
                             global._bashSession.cwd = workDir;
-                            return JSON.stringify({ output: `后台进程已启动 (PID: ${pid})。使用 bash(command="taskkill /PID ${pid} /F") 停止。`, pid, background: true });
+                            const killCmd = isWin ? `taskkill /PID ${pid} /F` : `kill ${pid}`;
+                            return JSON.stringify({ output: `后台进程已启动 (PID: ${pid})。使用 bash(command="${killCmd}") 停止。`, pid, background: true });
                         } catch (e) {
                             return JSON.stringify({ error: `启动后台进程失败: ${String(e)}` });
                         }
