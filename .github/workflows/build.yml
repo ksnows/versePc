@@ -20,87 +20,149 @@ on:
         default: true
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: 
-          - ${{ fromJSON(inputs.build_win && '["windows-latest"]' || '[]') }}
-          - ${{ fromJSON(inputs.build_mac && '["macos-latest"]' || '[]') }}
-          - ${{ fromJSON(inputs.build_linux && '["ubuntu-latest"]' || '[]') }}
-
+  build-win:
+    if: ${{ inputs.build_win != false }}
+    runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
-      - name: Build application
-        run: npm run build
+      - name: Generate integrity
+        run: node generate-integrity.js
+
+      - name: Build Windows
+        run: npx electron-builder --win --publish never
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-build
-          path: dist/
+          name: windows-x64
+          path: dist/*.exe
+          if-no-files-found: error
+
+  build-mac:
+    if: ${{ inputs.build_mac != false }}
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate integrity
+        run: node generate-integrity.js
+
+      - name: Build macOS
+        run: npx electron-builder --mac --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-x64
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+
+  build-linux:
+    if: ${{ inputs.build_linux != false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libvips-dev
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate integrity
+        run: node generate-integrity.js
+
+      - name: Build Linux
+        run: npx electron-builder --linux --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-win, build-mac, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.zip" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) -exec cp {} release/ \;
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: |
-            dist/*.exe
-            dist/*.dmg
-            dist/*.deb
-            dist/*.rpm
-            dist/*.AppImage
-            dist/*.zip
+          files: release/*
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
       - name: Update update.json
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
-          $exePath = Get-ChildItem -Path dist -Filter "VersePC-Setup-*.exe" | Select-Object -First 1
-          if (-not $exePath) {
-            Write-Error "Installer exe not found in dist/"
-            exit 1
-          }
-          $hash = (Get-FileHash -Path $exePath.FullName -Algorithm SHA256).Hash.ToLower()
-          $size = $exePath.Length
-          $releaseDate = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-          $updateJson = @{
-            version = $version
-            releaseDate = $releaseDate
-            releaseName = "VersePC v$version"
-            releaseNotes = ""
-            files = @{
-              "win-x64" = @{
-                url = "https://github.com/doujie081231/versePc/releases/download/v$version/VersePC-Setup-$version.exe"
-                sha256 = $hash
-                size = $size
+          VERSION="${GITHUB_REF_NAME#v}"
+          EXE=$(find release -name "VersePC-Setup-*.exe" | head -1)
+          if [ -z "$EXE" ]; then
+            echo "Installer exe not found, skipping update.json"
+            exit 0
+          fi
+          HASH=$(sha256sum "$EXE" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$EXE")
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > update.json <<EOF
+          {
+            "version": "$VERSION",
+            "releaseDate": "$DATE",
+            "releaseName": "VersePC v$VERSION",
+            "releaseNotes": "",
+            "files": {
+              "win-x64": {
+                "url": "https://github.com/doujie081231/versePc/releases/download/v$VERSION/VersePC-Setup-$VERSION.exe",
+                "sha256": "$HASH",
+                "size": $SIZE
               }
-            }
-            minSupportedVersion = $version
-            force = $false
-          } | ConvertTo-Json -Depth 4
-          Set-Content -Path update.json -Value $updateJson -NoNewline
-          Write-Host "update.json generated for version $version"
+            },
+            "minSupportedVersion": "$VERSION",
+            "force": false
+          }
+          EOF
 
       - name: Push update.json to main
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
-        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
