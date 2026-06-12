@@ -125,7 +125,7 @@ const SHARED_HTTPS_AGENT = new https.Agent({
     maxSockets: 256,
     maxFreeSockets: 128,
     timeout: 120000,
-    keepAliveMsecs: 30000,
+    keepAliveMsecs: 300000,
     scheduling: 'fifo',
     lookup: cachedLookup
 });
@@ -135,7 +135,7 @@ const SHARED_HTTP_AGENT = new http.Agent({
     maxSockets: 256,
     maxFreeSockets: 128,
     timeout: 120000,
-    keepAliveMsecs: 30000,
+    keepAliveMsecs: 300000,
     scheduling: 'fifo',
     lookup: cachedLookup
 });
@@ -2383,7 +2383,7 @@ function loadSettings() {
         versionSource: 'auto',
         maxThreads: 32,
         enableChunkDownload: true,
-        maxChunksPerFile: 8,
+        maxChunksPerFile: 16,
         speedLimit: 0,
         targetDir: '',
         sslVerify: false,
@@ -10767,7 +10767,7 @@ async function installFabric(gameVersion, loaderVersion, onProgress = null) {
         let fabLibFailures = 0;
         if (fabLibsToDownload.length > 0) {
             const settings = loadSettingsCached();
-            const FAB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, fabLibsToDownload.length);
+            const FAB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, fabLibsToDownload.length);
             let completed = 0;
             let active = 0;
             let done = null;
@@ -11399,7 +11399,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
             let forgeLibFailures = 0;
             const totalForgeLibs = (versionJsonData.libraries || []).length;
-            const FORGE_LIB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 32, 32);
+            const FORGE_LIB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
 
             const forgeLibTasks = [];
             for (const lib of (versionJsonData.libraries || [])) {
@@ -11870,7 +11870,7 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
         let neoLibFailures = 0;
         if (neoLibsToDownload.length > 0) {
             const settings = loadSettingsCached();
-            const NEO_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, neoLibsToDownload.length);
+            const NEO_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, neoLibsToDownload.length);
             let completed = 0;
             let active = 0;
             let done = null;
@@ -12056,7 +12056,7 @@ async function mergeFabricLoaderToVersion(versionId, gameVersion, loaderVersion,
     const downloadErrors = [];
     if (libsToDownload.length > 0) {
         const settings = loadSettingsCached();
-        const FABRIC_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, libsToDownload.length);
+        const FABRIC_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, libsToDownload.length);
         let completed = 0;
         let active = 0;
         let done = null;
@@ -13500,7 +13500,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
     let okCount = 0, failCount = 0;
     let inFlight = 0;
-    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 8, 8);
+    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
     let lastProgUpdate = 0;
     let lastReportedPct = 0;
 
@@ -14139,7 +14139,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
 
     let cfDownloadedCount = 0;
     let cfInFlight = 0;
-    const CF_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, 8);
+    const CF_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
     let cfLastProgUpdate = 0;
     let cfLastReportedPct = 0;
 
@@ -14367,7 +14367,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                 }
                 if (cfMissingAssets.length > 0) {
                     console.log(`[CurseForge] 资源文件缺失 ${cfMissingAssets.length}/${cfAssetEntries.length} 个，开始下载...`);
-                    const CF_ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, 16);
+                    const CF_ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
                     let cfAssetDone = 0;
                     const cfAssetTotal = cfMissingAssets.length;
                     const runCfAssetBatch = async () => {
