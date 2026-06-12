@@ -54,6 +54,9 @@ jobs:
       - name: Generate integrity
         run: node generate-integrity.js
 
+      - name: Prepare icon for macOS
+        run: sips -z 1024 1024 img/icon.png --out img/icon.png
+
       - name: Build x64
         run: npx electron-builder --mac --x64 --publish never
         env:
@@ -82,6 +85,9 @@ jobs:
 
       - name: Generate integrity
         run: node generate-integrity.js
+
+      - name: Prepare icon for macOS
+        run: sips -z 1024 1024 img/icon.png --out img/icon.png
 
       - name: Build arm64
         run: npx electron-builder --mac --arm64 --publish never
