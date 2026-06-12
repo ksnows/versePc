@@ -32,10 +32,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: |
-            dist/*.AppImage
-            dist/*.deb
-            dist/*.rpm
+          path: dist/*.AppImage
           if-no-files-found: error
 
   build-mac-x64:
