@@ -153,6 +153,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         chatStream: (params) => ipcRenderer.send('ai:chat-stream', params),
         chatAbort: () => ipcRenderer.invoke('ai:chat-abort'),
         toolApprove: (approvalId, approved, alwaysAllow) => ipcRenderer.invoke('ai:tool-approve', { approvalId, approved, alwaysAllow }),
+        syncAutoApproveSettings: (settings) => ipcRenderer.invoke('ai:sync-auto-approve', settings),
         askUserRespond: (askId, answer) => ipcRenderer.invoke('ai:ask-user-respond', { askId, answer }),
         getProviders: () => ipcRenderer.invoke('ai:get-providers'),
         getVersions: () => ipcRenderer.invoke('ai:get-versions'),

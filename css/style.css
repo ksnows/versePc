@@ -8721,6 +8721,7 @@ body {
 }
 .ai-approval-btn:hover { opacity: 0.85; }
 .ai-approval-btn.approve { background: #22c55e; color: #fff; }
+.ai-approval-btn.always-allow { background: #3b82f6; color: #fff; }
 .ai-approval-btn.deny { background: #ef4444; color: #fff; }
 .ai-approval-status { font-size: 13px; font-weight: 600; }
 .ai-approval-status.approved { color: #22c55e; }

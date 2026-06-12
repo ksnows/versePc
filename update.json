@@ -1,15 +1,6 @@
 {
-  "version": "1.1.14",
+  "version": "1.1.15",
   "releaseDate": "2026-06-12T00:00:00Z",
-  "releaseName": "VersePC v1.1.14",
-  "releaseNotes": "## 更新内容\n\n### Forge 安装与启动全面修复\n- 修复 Forge 库下载失败问题，优先使用 BMCLAPI 镜像\n- 修复 Forge 类路径问题，正确合并父版本库（inheritsFrom）\n- 修复旧版 Forge 处理器执行失败\n- 修复 Forge 游戏参数，特别是旧版使用 --tweakClass FMLTweaker\n- 修复 Forge 启动时 log4j2.xml 提取问题\n- 修复 Forge 修复功能，支持从 HMCL/PCL/BakaXL 扫描\n\n### Fabric 模组显示修复\n- 修复 Fabric 已安装模组不显示的问题\n- 扫描多个目录：版本隔离目录、共享游戏目录、.minecraft/mods\n- 使用 seenFiles 去重，避免重复显示\n\n### 模组依赖显示修复\n- 修复 CurseForge 模组依赖不显示的问题\n- 支持三个依赖查询端点：get-dependencies、get-dependencies-recursive、resolve-deps-versions\n- 添加 CurseForge API 支持，正确处理 relationType 映射\n\n### Java 下载镜像修复\n- 修复 release-assets.githubusercontent.com URL 无法转换为国内镜像的问题\n- 扩展 getTemurinMirrorUrl 函数，支持更多 URL 格式\n\n### 更新弹窗改进\n- 将更新弹窗改为类似公告的模态框样式\n- 支持两个下载选项：GitHub 更新和夸克网盘更新\n- 显示更新内容，支持 Markdown 渲染\n- 添加深色/浅色主题支持\n\n### 公告内容优化\n- 精简公告文案，从约 130 行缩减到约 37 行\n- 保留核心信息：反馈邮箱、主要功能列表、注意事项\n\n### 性能优化\n- 优化帧率，减少页面卡顿感\n- 降低 backdrop-filter 模糊值（sidebar: 16px→8px，title-bar: 8px→4px 等）\n- 移除 backdrop-filter 过渡动画，避免 GPU 重算\n- 添加 will-change 和 contain 属性，启用 GPU 合成层\n- 优化启动动画，移除 filter: blur 属性\n- 静态壁纸模式下跳过重复渲染\n- BrowserWindow 背景色修正，消除启动白屏闪烁\n\n### 检查更新反馈修复\n- 修复设置页检查更新没有最新版本反馈的问题\n- 合并重复的 onStatusChanged 回调，避免覆盖\n\n### 赞助者列表更新\n- 根据 CSV 文件更新赞助者列表，新增 22 人，总计 50 人",
-  "files": {
-    "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.1.13/VersePC-Setup-1.1.13.exe",
-      "sha256": "B9D12E394662BB8CC9896889E6F586361EB275680F48FEBF7E90B9E884E1BA18",
-      "size": 162795652
-    }
-  },
-  "minSupportedVersion": "1.0.0",
-  "force": false
+  "releaseName": "VersePC v1.1.15",
+  "releaseNotes": "## 更新内容\n\n### Forge 安装与启动全面修复\n- 使用专用 Forge 安装器执行安装，大幅提高可靠性\n- 修复库文件安装路径不匹配导致的文件缺失问题\n- 修复版本 JSON 生成位置不正确的问题\n- 安装失败时自动回退到备用安装方式\n\n### Forge 版本查找修复\n- 修复安装 Forge 时版本列表显示「暂无可用版本」的问题\n- 修复 Fabric 版本列表同样的问题\n\n### 整合包安装进度修复\n- 修复整合包安装卡在「正在准备基础版本」不动的问题\n- 基础版本安装现在显示详细进度\n- 前端实时显示服务器发回的详细进度消息\n\n### 拖入整合包修复\n- 修复拖入 .mrpack/.zip 整合包文件无效的问题\n- 兼容新版 Electron 的文件路径获取方式\n\n### 陶瓦联机修复\n- 修复打包后「ENOTDIR, not a directory」错误\n- 联机二进制文件改用用户数据目录存储\n\n### 自定义皮肤导入修复\n- 修复离线账户导入自定义皮肤失败的问题\n- 支持 multipart 文件上传的完整链路\n\n### 已安装模组显示修复\n- 模组页面新增「已安装模组」标签页\n- 修复已安装模组列表为空的问题\n\n### AI 助手授权改进\n- 自动批准设置现在正确生效，不再循环弹出授权\n- 审批卡片新增「始终允许」按钮\n- 常用查询工具默认标记为安全，无需授权\n\n### 其他修复\n- 修复整合包安装卡在「正在准备基础版本」不动的问题\n- 修复基础版本安装进度不更新的问题"
 }

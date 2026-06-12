@@ -1485,8 +1485,12 @@ async function handleVersePCProtocol(request) {
 async function handleAPIRequest(request, reqUrl) {
     const method = request.method;
     let body = null;
+    let contentType = request.headers.get('content-type') || 'application/json';
     if (method === 'POST' || method === 'PUT') {
-        try { body = await request.text(); } catch (e) { body = null; }
+        try {
+            const arrBuf = await request.arrayBuffer();
+            body = Buffer.from(arrBuf);
+        } catch (e) { body = null; }
     }
 
     const query = {};
@@ -1511,7 +1515,7 @@ async function handleAPIRequest(request, reqUrl) {
                 });
             }
         }
-        const result = await apiHandler.handleNativeAPI(pathname, method, body, query);
+        const result = await apiHandler.handleNativeAPI(pathname, method, body, query, contentType);
         const responseHeaders = new Headers();
         Object.entries(result.headers || {}).forEach(([key, value]) => {
             try { responseHeaders.set(key, value); } catch (e) {}
@@ -5699,17 +5703,42 @@ ${JSON.stringify(toTranslate, null, 2)}`;
         const pending = pendingApprovals.get(approvalId);
         if (!pending) return;
         if (alwaysAllow && pending.toolName) {
-            try {
-                const store = require('electron-store');
-            } catch (e) {}
-            const key = `versepc_ai_auto_approve_${pending.toolName}`;
-            if (pending.win) {
-                pending.win.webContents.send('store-set', key, 'true');
-            }
+            autoApproveCache.set(pending.toolName, true);
         }
         if (pending.timeout) clearTimeout(pending.timeout);
         pending.resolve({ approved, toolName: pending.toolName });
         pendingApprovals.delete(approvalId);
+    });
+
+    let _syncedAutoApproveSettings = {};
+    ipcMain.handle('ai:sync-auto-approve', async (event, settings) => {
+        _syncedAutoApproveSettings = settings || {};
+        autoApproveCache.clear();
+        if (settings.enabled) {
+            if (settings.read) {
+                ['read_file', 'view_file', 'list_files', 'search_files', 'grep_search'].forEach(t => autoApproveCache.set(t, true));
+            }
+            if (settings.write) {
+                ['write_file', 'edit_file', 'str_replace_based_edit_tool', 'json_edit_tool', 'create_file', 'delete_file', 'rename_file'].forEach(t => autoApproveCache.set(t, true));
+            }
+            if (settings.execute) {
+                ['bash', 'terminal_command'].forEach(t => autoApproveCache.set(t, true));
+            }
+            if (settings.mcp) {
+                ['mcp_tool'].forEach(t => autoApproveCache.set(t, true));
+            }
+            if (settings.subtasks) {
+                ['sub_agent_dispatch', 'sequential_thinking', 'update_todo_list'].forEach(t => autoApproveCache.set(t, true));
+            }
+            if (settings.mode) {
+                ['switch_mode'].forEach(t => autoApproveCache.set(t, true));
+            }
+            if (settings.all) {
+                Object.keys(TOOL_CONFIG).forEach(t => autoApproveCache.set(t, true));
+            }
+        }
+        console.log(`[AI] 自动批准设置同步: ${autoApproveCache.size} 个工具已自动批准`);
+        return { ok: true };
     });
 
     ipcMain.handle('ai:ask-user-respond', async (event, { askId, answer }) => {
@@ -5804,7 +5833,8 @@ ${JSON.stringify(toTranslate, null, 2)}`;
                 approvalId,
                 toolName,
                 risk: config.risk,
-                args
+                args,
+                autoApproved: autoApproveCache.has(toolName)
             });
         });
     }
@@ -6116,6 +6146,12 @@ ${toolDescriptions}
                                 const { approvalId, toolName, risk, args } = msg;
                                 const config = TOOL_CONFIG[toolName] || { risk: 'safe' };
                                 if (config.risk === 'safe') {
+                                    if (activeWorker) {
+                                        activeWorker.postMessage({ type: 'approval_response', approvalId, approved: true, toolName });
+                                    }
+                                    break;
+                                }
+                                if (autoApproveCache.has(toolName) && autoApproveCache.get(toolName)) {
                                     if (activeWorker) {
                                         activeWorker.postMessage({ type: 'approval_response', approvalId, approved: true, toolName });
                                     }

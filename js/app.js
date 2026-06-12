@@ -1361,6 +1361,7 @@ function setupTabs() {
                 const browsePanel = document.getElementById('browse-mods-panel');
                 if (installedPanel) installedPanel.style.display = '';
                 if (browsePanel) browsePanel.style.display = 'none';
+                loadInstalledMods();
             } else if (tab === 'browse-mods') {
                 currentModTab = 'browse-mods';
                 const installedPanel = document.getElementById('installed-mods-panel');
@@ -2827,8 +2828,7 @@ async function loadModLoaderVersions() {
     modloaderVersionCustomSelect.setOptions([{ value: '', text: '加载中...' }]);
     try {
         if (currentLoaderType === 'fabric') {
-            const data = await API.getFabricVersions(gameVersion);
-            const versions = data.versions || [];
+            const versions = await API.getModLoaderVersions(gameVersion, 'fabric');
             const options = versions.map(v => ({
                 value: v.version,
                 text: `${v.version} ${v.stable ? '(稳定)' : ''}`
@@ -2837,8 +2837,7 @@ async function loadModLoaderVersions() {
             const stable = versions.find(v => v.stable);
             if (stable) modloaderVersionCustomSelect.setValue(stable.version);
         } else if (currentLoaderType === 'forge') {
-            const data = await API.getForgeVersions(gameVersion);
-            const versions = data.versions || [];
+            const versions = await API.getModLoaderVersions(gameVersion, 'forge');
             const options = versions.map(v => ({
                 value: v.version,
                 text: `${v.version} (${v.type})`
@@ -4657,6 +4656,7 @@ function showModpackInstallModal(fileName, sessionId) {
 
 function getDownloadStageText(data) {
     if (!data) return '准备中...';
+    if (data.phase === 'base' && data.message && data.message !== '正在准备基础版本...') return data.message;
     const phaseMap = {
         'download':        '下载整合包文件...',
         'read':            '正在读取整合包...',
@@ -8311,10 +8311,15 @@ document.addEventListener('drop', (e) => {
     if (!files || files.length === 0) return;
     const file = files[0];
     const name = (file.name || '').toLowerCase();
-    if (name.endsWith('.mrpack') || name.endsWith('.cursemodpack') || (name.endsWith('.zip') && file.path)) {
-        if (file.path) {
+    const isModpackFile = name.endsWith('.mrpack') || name.endsWith('.cursemodpack') || name.endsWith('.zip');
+    if (isModpackFile) {
+        let filePath = file.path;
+        if (!filePath && window.electronAPI?.getDroppedFilePath) {
+            filePath = window.electronAPI.getDroppedFilePath(file);
+        }
+        if (filePath) {
             showToast('正在导入整合包...', 'info');
-            window.electronAPI.importModpack(file.path, '').then(result => {
+            window.electronAPI.importModpack(filePath, '').then(result => {
                 if (result && result.success) {
                     showToast(`整合包 "${result.name || '未知'}" 导入成功！`, 'success');
                 } else {

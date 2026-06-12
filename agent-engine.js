@@ -654,7 +654,20 @@ const TOOL_RISK = {
     validate_code: 'safe',
     build_index: 'safe',
     semantic_search: 'safe',
-    index_stats: 'safe'
+    index_stats: 'safe',
+    search_mods: 'safe', get_installed_mods: 'safe', get_system_info: 'safe',
+    get_versions: 'safe', get_game_status: 'safe', get_mod_details: 'safe',
+    browse_directory: 'safe', read_file: 'safe', get_game_log: 'safe',
+    diagnose_crash: 'safe', install_progress: 'safe', web_search: 'safe',
+    get_current_context: 'safe', search_modpacks: 'safe', install_version: 'moderate',
+    install_mod: 'moderate', toggle_mod: 'moderate', install_loader: 'moderate',
+    install_modpack: 'moderate', launch_game: 'dangerous', stop_game: 'dangerous',
+    manage_settings: 'dangerous', write_file: 'dangerous', edit_file: 'dangerous',
+    execute_command: 'dangerous', grep_search: 'safe', glob_search: 'safe',
+    web_fetch: 'safe', web_search_general: 'safe', todo_write: 'safe',
+    manage_core_memory: 'safe', agent: 'moderate', translate_mod: 'moderate',
+    download_cfpa_pack: 'safe', explore_environment: 'safe', select_version: 'safe',
+    mcp_tool: 'safe'
 };
 
 const TOOL_DISPLAY_NAMES = {

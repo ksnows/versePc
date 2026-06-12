@@ -188,6 +188,7 @@ const AIChat = {
         this.updateModelLabel();
         this._updateFolderSelector();
         this.renderSidebar();
+        try { if (this._autoApproveSettings && window.electronAPI.ai?.syncAutoApproveSettings) await window.electronAPI.ai.syncAutoApproveSettings(this._autoApproveSettings); } catch (e) {}
 
         this._refreshProviderKeyStatus();
         this._loadProvidersLazy();
@@ -3314,6 +3315,7 @@ Call attempt_completion when all operations are done and verified.
                     <div class="ai-approval-desc">${this.escapeHtml(desc)}</div>
                     <div class="ai-approval-actions">
                         <button class="ai-approval-btn approve" data-approval-id="${approvalId}">允许</button>
+                        <button class="ai-approval-btn always-allow" data-approval-id="${approvalId}">始终允许</button>
                         <button class="ai-approval-btn deny" data-approval-id="${approvalId}">拒绝</button>
                     </div>`;
                 block.appendChild(div);
@@ -3322,6 +3324,11 @@ Call attempt_completion when all operations are done and verified.
                     try { window.electronAPI.ai.toolApprove(approvalId, true); } catch (e) {}
                     div.classList.add('resolved');
                     div.querySelector('.ai-approval-actions').innerHTML = '<span class="ai-approval-status approved">✓ 已允许</span>';
+                });
+                div.querySelector('.ai-approval-btn.always-allow').addEventListener('click', () => {
+                    try { window.electronAPI.ai.toolApprove(approvalId, true, true); } catch (e) {}
+                    div.classList.add('resolved');
+                    div.querySelector('.ai-approval-actions').innerHTML = '<span class="ai-approval-status approved">✓ 已允许（自动）</span>';
                 });
                 div.querySelector('.ai-approval-btn.deny').addEventListener('click', () => {
                     try { window.electronAPI.ai.toolApprove(approvalId, false); } catch (e) {}
@@ -6761,6 +6768,7 @@ Call attempt_completion when all operations are done and verified.
 
         try { await window.electronAPI.store.set('versepc_ai_temp', String(this.temperature)); } catch (e) {}
         try { if (this._autoApproveSettings) await window.electronAPI.store.set('versepc_ai_auto_approve', JSON.stringify(this._autoApproveSettings)); } catch (e) {}
+        try { if (this._autoApproveSettings && window.electronAPI.ai?.syncAutoApproveSettings) await window.electronAPI.ai.syncAutoApproveSettings(this._autoApproveSettings); } catch (e) {}
         try { if (this._notifSettings) await window.electronAPI.store.set('versepc_ai_notifications', JSON.stringify(this._notifSettings)); } catch (e) {}
         try { if (this._contextSettings) await window.electronAPI.store.set('versepc_ai_context', JSON.stringify(this._contextSettings)); } catch (e) {}
         try { if (this._terminalSettings) await window.electronAPI.store.set('versepc_ai_terminal', JSON.stringify(this._terminalSettings)); } catch (e) {}

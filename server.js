@@ -1147,6 +1147,7 @@ const lanRooms = new Map();
 const lanRelayServers = new Map();
 
 const TERRACOTTA_DIR = path.join(__dirname, 'tools', 'terracotta');
+const TERRACOTTA_DATA_DIR = path.join(DATA_DIR, 'tools', 'terracotta');
 const TERRACOTTA_VERSION = '0.4.2';
 let terracottaProcess = null;
 let terracottaHttpPort = 0;
@@ -1176,9 +1177,9 @@ function generateNetworkSecret() {
 
 function getTerracottaBinaryPath() {
     const exeName = process.platform === 'win32' ? 'terracotta.exe' : 'terracotta';
-    const bundledPath = path.join(__dirname, 'tools', 'terracotta', exeName);
-    if (fs.existsSync(bundledPath)) return bundledPath;
-    return path.join(TERRACOTTA_DIR, exeName);
+    const devPath = path.join(__dirname, 'tools', 'terracotta', exeName);
+    if (!__dirname.includes('app.asar') && fs.existsSync(devPath)) return devPath;
+    return path.join(TERRACOTTA_DATA_DIR, exeName);
 }
 
 function isTerracottaInstalled() {
@@ -10238,9 +10239,10 @@ async function verifyFileSha1(filePath, expectedSha1) {
     }
 }
 
-async function ensureBaseVersionInstalled(gameVersion) {
+async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
     const baseJsonPath = path.join(VERSIONS_DIR, gameVersion, `${gameVersion}.json`);
     const baseJarPath = path.join(VERSIONS_DIR, gameVersion, `${gameVersion}.jar`);
+    const report = onProgress || (() => {});
     
     if (fs.existsSync(baseJsonPath) && fs.existsSync(baseJarPath)) {
         try {
@@ -10279,6 +10281,7 @@ async function ensureBaseVersionInstalled(gameVersion) {
     console.log(`[BaseVersion] ${gameVersion} not found or corrupted, installing...`);
     
     try {
+        report('正在获取版本信息...', 15);
         const manifest = await getVersionManifest();
         const versionInfo = manifest.versions.find(v => v.id === gameVersion);
         
@@ -10286,6 +10289,7 @@ async function ensureBaseVersionInstalled(gameVersion) {
             return { alreadyInstalled: false, error: `找不到版本 ${gameVersion}` };
         }
         
+        report('正在下载版本 JSON...', 20);
         const versionDetails = await getVersionDetails(versionInfo.url);
         const versionDir = path.join(VERSIONS_DIR, gameVersion);
         if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true });
@@ -10298,6 +10302,7 @@ async function ensureBaseVersionInstalled(gameVersion) {
             const clientJarPath = path.join(versionDir, `${gameVersion}.jar`);
             
             if (!fs.existsSync(clientJarPath) || (clientInfo.sha1 && !await verifyFileSha1(clientJarPath, clientInfo.sha1))) {
+                report('正在下载客户端...', 25);
                 console.log(`[BaseVersion] Downloading client JAR for ${gameVersion}...`);
                 if (fs.existsSync(clientJarPath)) fs.unlinkSync(clientJarPath);
                 await downloadFileWithMirror(clientInfo.url, clientJarPath);
@@ -10308,6 +10313,18 @@ async function ensureBaseVersionInstalled(gameVersion) {
         }
         
         const libraries = versionDetails.libraries || [];
+        const needDownloadLibs = libraries.filter(lib => {
+            if (lib.rules && !evaluateRules(lib.rules)) return false;
+            if (lib.downloads?.artifact) {
+                const libPath = safeLibPath(lib.downloads.artifact.path);
+                if (!libPath) return false;
+                return !fs.existsSync(libPath) || (lib.downloads.artifact.sha1 && !await verifyFileSha1(libPath, lib.downloads.artifact.sha1));
+            }
+            return false;
+        });
+        const totalLibs = needDownloadLibs.length;
+        let downloadedLibs = 0;
+
         for (const lib of libraries) {
             if (lib.rules && !evaluateRules(lib.rules)) continue;
 
@@ -10317,6 +10334,10 @@ async function ensureBaseVersionInstalled(gameVersion) {
                 const needDownload = !fs.existsSync(libPath) ||
                     (lib.downloads.artifact.sha1 && !await verifyFileSha1(libPath, lib.downloads.artifact.sha1));
                 if (needDownload && lib.downloads.artifact.url) {
+                    downloadedLibs++;
+                    if (totalLibs > 0) {
+                        report(`正在下载库文件 (${downloadedLibs}/${totalLibs})...`, 30 + Math.round(downloadedLibs / totalLibs * 35));
+                    }
                     try {
                         if (fs.existsSync(libPath)) fs.unlinkSync(libPath);
                         await downloadFileWithMirror(lib.downloads.artifact.url, libPath);
@@ -10334,6 +10355,10 @@ async function ensureBaseVersionInstalled(gameVersion) {
                     const jarName = classifier ? `${lname}-${lversion}-${classifier}.jar` : `${lname}-${lversion}.jar`;
                     const libFile = path.join(LIBRARIES_DIR, parts[0].replace(/\./g, path.sep), lname, lversion, jarName);
                     if (!fs.existsSync(libFile)) {
+                        downloadedLibs++;
+                        if (totalLibs > 0) {
+                            report(`正在下载库文件 (${downloadedLibs}/${totalLibs})...`, 30 + Math.round(downloadedLibs / totalLibs * 35));
+                        }
                         const baseUrl = lib.url || 'https://libraries.minecraft.net/';
                         const downloadUrl = `${baseUrl}${groupPath}/${lname}/${lversion}/${jarName}`;
                         try {
@@ -10364,6 +10389,7 @@ async function ensureBaseVersionInstalled(gameVersion) {
             }
         }
         
+        report('正在下载资源索引...', 68);
         if (versionDetails.assetIndex) {
             const assetIndexDir = path.join(ASSETS_DIR, 'indexes');
             if (!fs.existsSync(assetIndexDir)) fs.mkdirSync(assetIndexDir, { recursive: true });
@@ -10374,6 +10400,7 @@ async function ensureBaseVersionInstalled(gameVersion) {
             }
         }
         
+        report('正在校验库文件...', 72);
         const missingLibs = [];
         const libsToVerify = (versionDetails.libraries || []).filter(l => l.downloads?.artifact?.path);
         for (let i = 0; i < Math.min(3, libsToVerify.length); i++) {
@@ -10788,6 +10815,73 @@ async function verifyImportLibs(versionId, progress, abortSignal) {
     return { ok: true, checked: libChecked, missing: 0 };
 }
 
+async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null) {
+    const report = onProgress || (() => {});
+    const isPackaged = __dirname.includes('app.asar');
+    const resourcesBase = isPackaged
+        ? path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), 'resources')
+        : path.join(__dirname, 'resources');
+    const bundledInstaller = path.join(resourcesBase, 'forge-installer.jar');
+    if (!fs.existsSync(bundledInstaller)) {
+        throw new Error('forge-installer.jar 不存在: ' + bundledInstaller);
+    }
+    const bundledJava = path.join(resourcesBase, 'jdk-8u432+62-jre', 'bin', 'java.exe');
+    let javaPath = null;
+    if (fs.existsSync(bundledJava)) {
+        javaPath = bundledJava;
+    } else {
+        const bundledJdk = [...detectBundledJava(), ...detectSystemJava()];
+        const suitable = bundledJdk.find(j => j.majorVersion >= 8);
+        if (suitable) javaPath = suitable.path;
+    }
+    if (!javaPath) {
+        throw new Error('未找到 Java 8 或更高版本，无法安装 Forge。请先在设置中安装或配置 Java。');
+    }
+    console.log(`[Forge] 使用 Java: ${javaPath}`);
+    console.log(`[Forge] forge-installer: ${bundledInstaller}`);
+    console.log(`[Forge] Forge installer: ${installerJarPath}`);
+    console.log(`[Forge] Minecraft 目录: ${mcDir}`);
+
+    let javaMajor = 8;
+    try {
+        const verOut = execSync(`"${javaPath}" -version 2>&1`, { encoding: 'utf8', timeout: 5000 });
+        const m = verOut.match(/version "(\d+)/);
+        if (m) javaMajor = parseInt(m[1]);
+    } catch (_) {}
+
+    let args = `-cp "${bundledInstaller};${installerJarPath}" com.bangbang93.ForgeInstaller "${mcDir}"`;
+    if (javaMajor >= 9) {
+        args = '--add-exports cpw.mods.bootstraplauncher/cpw.mods.bootstraplauncher=ALL-UNNAMED ' + args;
+    }
+
+    return new Promise((resolve, reject) => {
+        const cmd = `"${javaPath}" ${args}`;
+        console.log(`[ForgeInstaller] 执行命令: ${cmd.slice(0, 200)}...`);
+
+        exec(cmd, { timeout: 600000, maxBuffer: 1024 * 1024 * 10, windowsHide: true }, (error, stdout, stderr) => {
+            console.log(`[ForgeInstaller] 进程完成`);
+            if (stdout) console.log(`[ForgeInstaller] stdout (最后500字): ${stdout.slice(-500)}`);
+            if (stderr) console.log(`[ForgeInstaller] stderr (最后500字): ${stderr.slice(-500)}`);
+
+            const allOutput = (stdout || '') + (stderr || '');
+            if (allOutput.includes('Extracting json')) report('提取 JSON 配置...', 10);
+            if (allOutput.includes('Downloading libraries')) report('下载依赖库...', 20);
+            if (allOutput.includes('Building Processors')) report('构建处理器...', 30);
+            if (allOutput.includes('Remapping final jar')) report('重映射 JAR...', 70);
+            if (allOutput.includes('Injecting profile')) report('写入版本配置...', 90);
+
+            if (error && error.killed) {
+                resolve({ success: false, error: 'Forge 安装器执行超时（10分钟）' });
+            } else if (!error || (error.code === 0)) {
+                report('Forge 安装完成', 100);
+                resolve({ success: true });
+            } else {
+                resolve({ success: false, error: `Forge 安装器退出码 ${error.code}: ${(stderr || stdout || '').slice(-300)}` });
+            }
+        });
+    });
+}
+
 async function installForge(gameVersion, forgeVersion, onProgress = null, mirrorBaseUrl = null) {
     if (forgeVersion && forgeVersion.startsWith(gameVersion + '-')) {
         forgeVersion = forgeVersion.slice(gameVersion.length + 1);
@@ -10892,18 +10986,92 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
         console.log(`[Forge] installProfile: ${installProfile ? 'found' : 'not found'}, versionJson: ${versionJsonData ? 'found' : 'not found'}`);
 
+        const versionJsonPath = path.join(versionDir, `${versionId}.json`);
+        const settings = loadSettingsCached();
+        const gameDir = settings.gameDir || path.join(MINECRAFT_DIR, '.minecraft');
+
         if (versionJsonData) {
+            console.log(`[Forge] 使用 BMCLAPI forge-installer.jar 安装 (现代 Forge)...`);
+            if (onProgress) onProgress(0.05, '正在使用 Forge 安装器...');
+
+            let tempGameDir = null;
+            let installerGameDir = gameDir;
+            try {
+                const fsLibDir = path.join(gameDir, 'libraries');
+                if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
+                if (!fs.existsSync(fsLibDir) || path.resolve(fsLibDir) !== path.resolve(LIBRARIES_DIR)) {
+                    tempGameDir = path.join(os.tmpdir(), `versepc-forge-install-${Date.now()}`);
+                    fs.mkdirSync(tempGameDir, { recursive: true });
+                    const tempLibDir = path.join(tempGameDir, 'libraries');
+                    try {
+                        fs.symlinkSync(LIBRARIES_DIR, tempLibDir, 'junction');
+                    } catch (e) {
+                        try { fs.rmSync(tempGameDir, { recursive: true, force: true }); } catch (_) {}
+                        tempGameDir = null;
+                    }
+                    if (tempGameDir) {
+                        installerGameDir = tempGameDir;
+                        try { fs.mkdirSync(path.join(tempGameDir, 'versions'), { recursive: true }); } catch (_) {}
+                        console.log(`[Forge] 临时游戏目录: ${tempGameDir}, libraries → ${LIBRARIES_DIR}`);
+                    }
+                }
+            } catch (e) {
+                console.warn(`[Forge] 创建临时目录失败: ${e.message}`);
+            }
+
+            try {
+                const installerResult = await runForgeInstallerJar(installerPath, installerGameDir, (msg, pct) => {
+                    if (onProgress) onProgress(0.05 + pct * 0.85, msg);
+                });
+
+                if (installerResult.success) {
+                    const installerJsonPath = path.join(installerGameDir, 'versions', versionId, `${versionId}.json`);
+                    if (fs.existsSync(installerJsonPath) && !fs.existsSync(versionJsonPath)) {
+                        try {
+                            const installerJson = JSON.parse(fs.readFileSync(installerJsonPath, 'utf8'));
+                            if (!installerJson.inheritsFrom) installerJson.inheritsFrom = gameVersion;
+                            if (!installerJson.id) installerJson.id = versionId;
+                            fs.mkdirSync(versionDir, { recursive: true });
+                            fs.writeFileSync(versionJsonPath, JSON.stringify(installerJson, null, 2));
+                            console.log(`[Forge] 复制 forge-installer.jar 生成的版本JSON`);
+                        } catch (e) {
+                            console.warn(`[Forge] 复制版本JSON失败: ${e.message}`);
+                        }
+                    }
+                    if (!fs.existsSync(versionJsonPath)) {
+                        versionJsonData.id = versionId;
+                        versionJsonData.inheritsFrom = gameVersion;
+                        if (!versionJsonData.type) versionJsonData.type = 'release';
+                        fs.writeFileSync(versionJsonPath, JSON.stringify(versionJsonData, null, 2));
+                        console.log(`[Forge] forge-installer.jar 未生成版本JSON，手动写入`);
+                    } else {
+                        try {
+                            const createdJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8'));
+                            if (!createdJson.inheritsFrom) {
+                                createdJson.inheritsFrom = gameVersion;
+                                fs.writeFileSync(versionJsonPath, JSON.stringify(createdJson, null, 2));
+                            }
+                        } catch (_) {}
+                    }
+                    try { fs.unlinkSync(installerPath); } catch (e) {}
+                    console.log(`[Forge] Installation complete: ${versionId}`);
+                    if (tempGameDir) try { fs.rmSync(tempGameDir, { recursive: true, force: true }); } catch (_) {}
+                    return { success: true, versionId: versionId };
+                } else {
+                    console.warn(`[Forge] forge-installer.jar 失败: ${installerResult.error}，回退手动安装...`);
+                }
+            } catch (e) {
+                console.warn(`[Forge] forge-installer.jar 异常: ${e.message}，回退手动安装...`);
+            }
+            if (tempGameDir) try { fs.rmSync(tempGameDir, { recursive: true, force: true }); } catch (_) {}
+
             versionJsonData.id = versionId;
             versionJsonData.inheritsFrom = gameVersion;
             if (!versionJsonData.type) versionJsonData.type = 'release';
 
-            console.log(`[Forge] mainClass: ${versionJsonData.mainClass}`);
-            console.log(`[Forge] libraries: ${(versionJsonData.libraries || []).length}`);
-
-            if (onProgress) onProgress(0.05, '正在提取Forge Maven文件...');
-            console.log(`[Forge] 从安装包提取 maven 文件 (先提取，再下载剩余库)...`);
+            console.log(`[Forge] 回退: 手动提取 maven 文件并下载库...`);
+            if (onProgress) onProgress(0.10, '正在提取Forge文件...');
             const mavenEntries = zip.getEntries().filter(e => e.entryName.startsWith('maven/'));
-            console.log(`[Forge] maven entries count: ${mavenEntries.length}`);
             let forgeYieldCounter = 0;
             for (const entry of mavenEntries) {
                 const relativePath = entry.entryName.replace('maven/', '');
@@ -10913,7 +11081,6 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                     try {
                         await fs.promises.writeFile(extractPath, entry.getData());
                         if (extractPath.endsWith('.jar') && !isJarIntact(extractPath)) {
-                            console.error(`[Forge] Maven文件提取后损坏: ${relativePath}`);
                             try { await fs.promises.unlink(extractPath); } catch (_) {}
                         }
                     } catch (e) {
@@ -10925,7 +11092,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
             let forgeLibFailures = 0;
             const totalForgeLibs = (versionJsonData.libraries || []).length;
-            const FORGE_LIB_PARALLEL = Math.min(parseInt(loadSettingsCached().maxThreads, 10) || 32, 32);
+            const FORGE_LIB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 32, 32);
 
             const forgeLibTasks = [];
             for (const lib of (versionJsonData.libraries || [])) {
@@ -10942,14 +11109,12 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                     const jarName = classifier ? `${lname}-${lver}-${classifier}.jar` : `${lname}-${lver}.jar`;
                     libPath = path.join(LIBRARIES_DIR, groupPath, lname, lver, jarName);
                 }
-
                 const needsDownload = libPath && !isJarIntact(libPath);
                 if (!needsDownload) continue;
-
                 forgeLibTasks.push({ lib, libPath, parts, type: lib.downloads?.artifact?.url ? 'artifact' : 'maven' });
             }
 
-            console.log(`[Forge] 需要下载 ${forgeLibTasks.length}/${totalForgeLibs} 个库文件 (并行: ${FORGE_LIB_PARALLEL})`);
+            console.log(`[Forge] 回退模式: 需要下载 ${forgeLibTasks.length}/${totalForgeLibs} 个库文件`);
 
             let forgeLibDone = 0;
             let taskIdx = 0;
@@ -10961,9 +11126,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                     const task = forgeLibTasks[idx];
                     const { lib, libPath, parts } = task;
 
-                    if (onProgress) {
-                        onProgress(0.10 + (forgeLibDone / totalForgeLibs) * 0.30, `正在下载Forge库文件 (${forgeLibDone + 1}/${forgeLibTasks.length})`);
-                    }
+                    if (onProgress) onProgress(0.10 + (forgeLibDone / totalForgeLibs) * 0.30, `正在下载Forge库文件 (${forgeLibDone + 1}/${forgeLibTasks.length})`);
 
                     const libSize = lib.downloads?.artifact?.size || 0;
                     const libTimeout = libSize > 10 * 1024 * 1024 ? 300000 : null;
@@ -10983,7 +11146,6 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                         const classifier = parts.length >= 4 ? parts[3] : '';
                         const jarName = classifier ? `${lname}-${lver}-${classifier}.jar` : `${lname}-${lver}.jar`;
                         const isForgeLib = parts[0].includes('forge') || parts[0].includes('minecraftforge') || parts[0].includes('neoforged') || (parts[0] === 'net.minecraft' && lname === 'client');
-                        // 多镜像下载: Forge库 → BMCLAPI(快) → 官方Maven → libraries; 普通库 → 官方 → BMCLAPI
                         const bmclapiMaven = `https://bmclapi2.bangbang93.com/maven/${mavenGroup}/${lname}/${lver}/${jarName}`;
                         const urlsToTry = isForgeLib
                             ? [bmclapiMaven, `https://maven.minecraftforge.net/${mavenGroup}/${lname}/${lver}/${jarName}`, `https://libraries.minecraft.net/${mavenGroup}/${lname}/${lver}/${jarName}`]
@@ -10996,13 +11158,10 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                                 dlOk = true;
                                 break;
                             } catch (e) {
-                                console.log(`[Forge] Mirror ${new URL(dlUrl).hostname}/${mavenGroup}/${lname}/${lver}/${jarName} → ${e.message.slice(0, 60)}`);
+                                console.log(`[Forge] Mirror ${new URL(dlUrl).hostname} → ${e.message.slice(0, 60)}`);
                             }
                         }
-                        if (!dlOk) {
-                            forgeLibFailures++;
-                            console.log(`[Forge] All mirrors exhausted: ${lib.name}`);
-                        }
+                        if (!dlOk) forgeLibFailures++;
                     }
                     forgeLibDone++;
                 }
@@ -11015,14 +11174,10 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
             await Promise.all(forgeLibPool);
 
             if (onProgress) onProgress(0.80, '正在创建版本配置...');
-
-            const jsonPath = path.join(versionDir, `${versionId}.json`);
-            fs.writeFileSync(jsonPath, JSON.stringify(versionJsonData, null, 2));
+            fs.writeFileSync(versionJsonPath, JSON.stringify(versionJsonData, null, 2));
 
             try { fs.unlinkSync(installerPath); } catch (e) {}
-            try { fs.rmdirSync(path.join(DATA_DIR, 'temp'), { recursive: true }); } catch (e) {}
-
-            console.log(`[Forge] Installation complete: ${versionId}`);
+            console.log(`[Forge] Installation complete (fallback): ${versionId}`);
             return { success: true, versionId: versionId };
         } else if (installProfile) {
             const forgeUniversal = installProfile.install?.path;
@@ -12851,7 +13006,9 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     if (isNewVersionDir) {
         progress('base', '正在准备基础版本...', 10);
         console.log(`[mrpack] 确保基础版本存在: ${mcVersion}`);
-        const baseResult = await ensureBaseVersionInstalled(mcVersion);
+        const baseResult = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
+            progress('base', msg || '正在准备基础版本...', Math.min(pct, 75));
+        });
         if (baseResult.error) {
             try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (e) {}
             return { success: false, versionId, error: baseResult.error };
@@ -13499,7 +13656,9 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     if (isNewVersionDirCF) {
         console.log(`[CurseForge] 确保基础版本存在: ${mcVersion}`);
         progress('base', '正在准备基础版本...', 10);
-        const baseResult = await ensureBaseVersionInstalled(mcVersion);
+        const baseResult = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
+            progress('base', msg || '正在准备基础版本...', Math.min(pct, 75));
+        });
         if (baseResult.error) {
             try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (e) {}
             return { success: false, versionId, error: baseResult.error };
@@ -14130,11 +14289,11 @@ process.on('SIGTERM', () => { saveDiskCache(); process.exit(); });
  * @param {Object} query - URL 查询参数
  * @returns {Promise<{status: number, headers: Object, body: Buffer}>}
  */
-async function handleNativeAPI(pathname, method, body, query) {
+async function handleNativeAPI(pathname, method, body, query, incomingContentType) {
     const req = new EventEmitter();
     req.method = method;
     req.url = pathname + (query && Object.keys(query).length > 0 ? '?' + new URLSearchParams(query).toString() : '');
-    req.headers = { 'content-type': 'application/json' };
+    req.headers = { 'content-type': incomingContentType || 'application/json' };
 
     const res = new EventEmitter();
     let statusCode = 200;
@@ -14175,7 +14334,8 @@ async function handleNativeAPI(pathname, method, body, query) {
 
         await new Promise(r => setImmediate(() => {
             if (body !== null && body !== undefined) {
-                req.emit('data', Buffer.from(typeof body === 'string' ? body : JSON.stringify(body)));
+                const buf = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+                req.emit('data', buf);
             }
             req.emit('end');
             setImmediate(r);
