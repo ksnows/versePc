@@ -5119,7 +5119,7 @@ async function downloadMissingDependencies(missingFiles, onProgress, versionJson
             if (fs.existsSync(exIdx)) assetIndexPath = exIdx;
         }
 
-        if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1))) {
+        if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !(await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1)))) {
             const targetPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
             const dir = path.dirname(targetPath);
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -10247,7 +10247,7 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
     if (fs.existsSync(baseJsonPath) && fs.existsSync(baseJarPath)) {
         try {
             const existingJson = JSON.parse(fs.readFileSync(baseJsonPath, 'utf-8'));
-            if (existingJson.downloads?.client?.sha1 && !await verifyFileSha1(baseJarPath, existingJson.downloads.client.sha1)) {
+            if (existingJson.downloads?.client?.sha1 && !(await verifyFileSha1(baseJarPath, existingJson.downloads.client.sha1))) {
                 console.warn(`[BaseVersion] ${gameVersion} JAR SHA1校验失败，重新下载`);
                 fs.unlinkSync(baseJarPath);
             } else {
@@ -10301,27 +10301,29 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
             const clientInfo = versionDetails.downloads.client;
             const clientJarPath = path.join(versionDir, `${gameVersion}.jar`);
             
-            if (!fs.existsSync(clientJarPath) || (clientInfo.sha1 && !await verifyFileSha1(clientJarPath, clientInfo.sha1))) {
+            if (!fs.existsSync(clientJarPath) || (clientInfo.sha1 && !(await verifyFileSha1(clientJarPath, clientInfo.sha1)))) {
                 report('正在下载客户端...', 25);
                 console.log(`[BaseVersion] Downloading client JAR for ${gameVersion}...`);
                 if (fs.existsSync(clientJarPath)) fs.unlinkSync(clientJarPath);
                 await downloadFileWithMirror(clientInfo.url, clientJarPath);
-                if (clientInfo.sha1 && !await verifyFileSha1(clientJarPath, clientInfo.sha1)) {
+                if (clientInfo.sha1 && !(await verifyFileSha1(clientJarPath, clientInfo.sha1))) {
                     console.warn(`[BaseVersion] Client JAR SHA1 mismatch after download!`);
                 }
             }
         }
         
         const libraries = versionDetails.libraries || [];
-        const needDownloadLibs = libraries.filter(lib => {
-            if (lib.rules && !evaluateRules(lib.rules)) return false;
+        const needDownloadLibs = [];
+        for (const lib of libraries) {
+            if (lib.rules && !evaluateRules(lib.rules)) continue;
             if (lib.downloads?.artifact) {
                 const libPath = safeLibPath(lib.downloads.artifact.path);
-                if (!libPath) return false;
-                return !fs.existsSync(libPath) || (lib.downloads.artifact.sha1 && !await verifyFileSha1(libPath, lib.downloads.artifact.sha1));
+                if (!libPath) continue;
+                if (!fs.existsSync(libPath) || (lib.downloads.artifact.sha1 && !(await verifyFileSha1(libPath, lib.downloads.artifact.sha1)))) {
+                    needDownloadLibs.push(lib);
+                }
             }
-            return false;
-        });
+        }
         const totalLibs = needDownloadLibs.length;
         let downloadedLibs = 0;
 
@@ -10332,7 +10334,7 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
                 const libPath = safeLibPath(lib.downloads.artifact.path);
                 if (!libPath) continue;
                 const needDownload = !fs.existsSync(libPath) ||
-                    (lib.downloads.artifact.sha1 && !await verifyFileSha1(libPath, lib.downloads.artifact.sha1));
+                    (lib.downloads.artifact.sha1 && !(await verifyFileSha1(libPath, lib.downloads.artifact.sha1)));
                 if (needDownload && lib.downloads.artifact.url) {
                     downloadedLibs++;
                     if (totalLibs > 0) {
@@ -10394,7 +10396,7 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
             const assetIndexDir = path.join(ASSETS_DIR, 'indexes');
             if (!fs.existsSync(assetIndexDir)) fs.mkdirSync(assetIndexDir, { recursive: true });
             const assetIndexPath = path.join(assetIndexDir, `${versionDetails.assetIndex.id}.json`);
-            if (!fs.existsSync(assetIndexPath) || (versionDetails.assetIndex.sha1 && !await verifyFileSha1(assetIndexPath, versionDetails.assetIndex.sha1))) {
+            if (!fs.existsSync(assetIndexPath) || (versionDetails.assetIndex.sha1 && !(await verifyFileSha1(assetIndexPath, versionDetails.assetIndex.sha1)))) {
                 if (fs.existsSync(assetIndexPath)) fs.unlinkSync(assetIndexPath);
                 await downloadFileWithMirror(versionDetails.assetIndex.url, assetIndexPath);
             }
@@ -12410,7 +12412,7 @@ async function performInstallation(sessionId, versionDetails) {
 
             const assetIndexPath = path.join(assetIndexDir, `${assetIndexInfo.id}.json`);
 
-            if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1))) {
+            if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !(await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1)))) {
                 if (fs.existsSync(assetIndexPath)) fs.unlinkSync(assetIndexPath);
                 await downloadFileWithMirror(assetIndexInfo.url, assetIndexPath);
             }
@@ -13433,7 +13435,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         try {
             const assetIndexInfo = mergedJson.assetIndex;
             const assetIndexPath = path.join(ASSETS_DIR, 'indexes', `${assetIndexInfo.id}.json`);
-            if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1))) {
+            if (!fs.existsSync(assetIndexPath) || (assetIndexInfo.sha1 && !(await verifyFileSha1(assetIndexPath, assetIndexInfo.sha1)))) {
                 const idxDir = path.dirname(assetIndexPath);
                 if (!fs.existsSync(idxDir)) fs.mkdirSync(idxDir, { recursive: true });
                 if (fs.existsSync(assetIndexPath)) fs.unlinkSync(assetIndexPath);
@@ -14002,7 +14004,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         try {
             const cfAssetIndexInfo = cfMergedJson.assetIndex;
             const cfAssetIndexPath = path.join(ASSETS_DIR, 'indexes', `${cfAssetIndexInfo.id}.json`);
-            if (!fs.existsSync(cfAssetIndexPath) || (cfAssetIndexInfo.sha1 && !await verifyFileSha1(cfAssetIndexPath, cfAssetIndexInfo.sha1))) {
+            if (!fs.existsSync(cfAssetIndexPath) || (cfAssetIndexInfo.sha1 && !(await verifyFileSha1(cfAssetIndexPath, cfAssetIndexInfo.sha1)))) {
                 const cfIdxDir = path.dirname(cfAssetIndexPath);
                 if (!fs.existsSync(cfIdxDir)) fs.mkdirSync(cfIdxDir, { recursive: true });
                 if (fs.existsSync(cfAssetIndexPath)) fs.unlinkSync(cfAssetIndexPath);
