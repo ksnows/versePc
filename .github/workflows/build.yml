@@ -75,9 +75,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mac-x64
-          path: |
-            dist/*.dmg
-            dist/*.zip
+          path: dist/*.dmg
           if-no-files-found: error
 
   build-linux:
