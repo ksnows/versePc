@@ -2966,7 +2966,7 @@ function resolveLibraryPath(libName) {
 
 function diagnoseVersion(versionId) {
     const issues = [];
-    const cleanId = versionId.replace(' [外部]', '');
+    const cleanId = versionId.replace(/ \[外部\d*\]/, '');
     let versionDir = null;
     const extFolders = loadExternalFolders();
     for (const folder of extFolders) {
@@ -3827,8 +3827,8 @@ function scanExternalFolder(folderPath) {
 }
 
 function loadVersionSettings(versionId) {
-    const cleanId = versionId.replace(' [外部]', '');
-    const isExternal = versionId.includes('[外部]');
+    const cleanId = versionId.replace(/ \[外部\d*\]/, '');
+    const isExternal = versionId.includes(' [外部');
     let settingsFile;
     if (isExternal) {
         const externalSettingsDir = path.join(DATA_DIR, 'external-settings');
@@ -3872,8 +3872,8 @@ function loadVersionSettings(versionId) {
 }
 
 function saveVersionSettings(versionId, settings) {
-    const cleanId = versionId.replace(' [外部]', '');
-    const isExternal = versionId.includes('[外部]');
+    const cleanId = versionId.replace(/ \[外部\d*\]/, '');
+    const isExternal = versionId.includes(' [外部');
     let settingsFile;
     if (isExternal) {
         const externalSettingsDir = path.join(DATA_DIR, 'external-settings');
@@ -7092,7 +7092,7 @@ function getInstalledVersions(forceRefresh) {
 }
 
 function resolveVersionIsolation(versionId) {
-    if (!versionId || versionId.includes('[外部]')) return !!versionId;
+    if (!versionId || versionId.includes(' [外部')) return !!versionId;
 
     const settings = loadSettingsCached();
     const verSettings = loadVersionSettings(versionId);
@@ -7123,7 +7123,7 @@ function resolveVersionIsolation(versionId) {
 }
 
 function resolveExternalVersionDir(versionId) {
-    if (!versionId || !versionId.includes('[外部]')) return null;
+    if (!versionId || !versionId.includes(' [外部')) return null;
     const installed = getInstalledVersions();
     const ext = installed.find(v => v.id === versionId && v.isExternal);
     if (ext && ext.externalVersionDir) return ext.externalVersionDir;
@@ -8554,6 +8554,8 @@ function findMainJar(versionJson, versionId, externalVersionDir = null, _visited
         }
     }
 
+    searchPaths.push(path.join(VERSIONS_DIR, actualVersionId, `${actualVersionId}.jar`));
+
     if (versionJson.inheritsFrom) {
         if (isExternal && externalRoot) {
             searchPaths.push(path.join(externalRoot, 'versions', versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
@@ -8561,7 +8563,6 @@ function findMainJar(versionJson, versionId, externalVersionDir = null, _visited
         }
         searchPaths.push(path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.jar`));
     }
-    searchPaths.push(path.join(VERSIONS_DIR, actualVersionId, `${actualVersionId}.jar`));
 
     for (const p of searchPaths) {
         if (fs.existsSync(p)) return p;
@@ -11018,7 +11019,7 @@ function replaceVariables(str, vars) {
 async function launchGame(versionId, settings, account, checkOnly = false) {
     try {
     let externalVersionDir = null;
-    const cleanVersionId = versionId.replace(' [外部]', '');
+    const cleanVersionId = versionId.replace(/ \[外部\d*\]/, '');
 
     const externalFolders = loadExternalFolders();
     for (const folder of externalFolders) {
@@ -16475,7 +16476,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     let versionDir;
 
     if (targetVersion) {
-        const cleanTargetId = targetVersion.replace(' [外部]', '');
+        const cleanTargetId = targetVersion.replace(/ \[外部\d*\]/, '');
         const existingDir = path.join(VERSIONS_DIR, cleanTargetId);
         if (fs.existsSync(existingDir)) {
             versionId = cleanTargetId;
@@ -17312,7 +17313,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     let versionDir;
 
     if (targetVersion) {
-        const cleanTargetId = targetVersion.replace(' [外部]', '');
+        const cleanTargetId = targetVersion.replace(/ \[外部\d*\]/, '');
         const existingDir = path.join(VERSIONS_DIR, cleanTargetId);
         if (fs.existsSync(existingDir)) {
             versionId = cleanTargetId;
@@ -17979,7 +17980,7 @@ async function _importHmcl(zip, hmclEntry, filePath, progress, targetVersion = '
     console.log(`[HMCL] 整合包: ${packName}, MC: ${mcVersion}, 作者: ${author}`);
     progress('prepare', `整合包: ${packName}  MC: ${mcVersion}`, 8);
 
-    let versionId = targetVersion ? targetVersion.replace(' [外部]', '') : _dedupeVersionId(packName);
+    let versionId = targetVersion ? targetVersion.replace(/ \[外部\d*\]/, '') : _dedupeVersionId(packName);
     let versionDir = path.join(VERSIONS_DIR, versionId);
 
     if (targetVersion) {
@@ -18096,7 +18097,7 @@ async function _importRawZip(zip, filePath, progress, targetVersion = '', abortS
     let versionDir;
     
     if (targetVersion) {
-        const cleanTargetId = targetVersion.replace(' [外部]', '');
+        const cleanTargetId = targetVersion.replace(/ \[外部\d*\]/, '');
         const existingDir = path.join(VERSIONS_DIR, cleanTargetId);
         if (fs.existsSync(existingDir)) {
             versionId = cleanTargetId;
@@ -19266,7 +19267,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const lcVersionId = lcData.versionId;
                 if (!lcVersionId) { sendError('Missing versionId', 400); break; }
                 const lcSettings = loadSettingsCached();
-                const lcCleanId = lcVersionId.replace(' [外部]', '');
+                const lcCleanId = lcVersionId.replace(/ \[外部\d*\]/, '');
                 let lcExternalDir = null;
                 const lcExtFolders = loadExternalFolders();
                 for (const folder of lcExtFolders) {
@@ -19304,7 +19305,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (!ldVersionId) { sendError('Missing versionId', 400); break; }
 
                 const ldSettings = loadSettingsCached();
-                const ldCleanId = ldVersionId.replace(' [外部]', '');
+                const ldCleanId = ldVersionId.replace(/ \[外部\d*\]/, '');
                 let ldExternalDir = null;
                 const ldExtFolders = loadExternalFolders();
                 for (const folder of ldExtFolders) {
@@ -19499,7 +19500,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const vofFolderType = parsedUrl.query.folderType || 'version';
                 if (!vofVersionId) { sendError('Missing versionId', 400); break; }
                 try {
-                    const cleanVofId = vofVersionId.replace(' [外部]', '');
+                    const cleanVofId = vofVersionId.replace(/ \[外部\d*\]/, '');
                     let externalVersionDir = null;
                     const extFolders = loadExternalFolders();
                     for (const folder of extFolders) {
@@ -19811,8 +19812,8 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const { versionId: dvId, permanent: dvPermanent } = body6;
                 if (!dvId) { sendError('Missing versionId', 400); break; }
                 try {
-                    const cleanId = dvId.replace(' [外部]', '');
-                    const isExternal = dvId.includes('[外部]');
+                    const cleanId = dvId.replace(/ \[外部\d*\]/, '');
+                    const isExternal = dvId.includes(' [外部');
                     let deleted = false;
                     let deleteError = '';
 
@@ -19820,7 +19821,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         const settings = loadSettingsCached();
                         const extFolders = loadExternalFolders();
                         const matchFolder = extFolders.find(f => {
-                            const checkId = dvId.replace(' [外部]', '');
+                            const checkId = dvId.replace(/ \[外部\d*\]/, '');
                             return f.name === checkId || f.path.includes(checkId);
                         });
                         if (matchFolder) {
@@ -20588,7 +20589,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const eiVersionId = parsedUrl.query.versionId;
                 if (!eiVersionId) { sendError('Missing versionId', 400); break; }
                 try {
-                    const cleanEiId = eiVersionId.replace(' [外部]', '');
+                    const cleanEiId = eiVersionId.replace(/ \[外部\d*\]/, '');
                     const eiDir = getVersionGameDir(eiVersionId) || path.join(VERSIONS_DIR, cleanEiId);
 
                     const resourcePacks = [];
@@ -20679,7 +20680,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const exportDir = path.join(APP_DATA_PATH, 'exports');
                     if (!fs.existsSync(exportDir)) fs.mkdirSync(exportDir, { recursive: true });
 
-                    const cleanEmId = emId.replace(' [外部]', '');
+                    const cleanEmId = emId.replace(/ \[外部\d*\]/, '');
                     const srcDir = getVersionGameDir(emId) || path.join(VERSIONS_DIR, cleanEmId);
 
                     if (!fs.existsSync(srcDir)) {
@@ -23042,7 +23043,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 }
 
                 try {
-                    const cleanId = versionId.replace(' [外部]', '');
+                    const cleanId = versionId.replace(/ \[外部\d*\]/, '');
                     let customIconData = null;
                     let customIconMime = 'image/png';
 
@@ -25473,7 +25474,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 try {
                     const caSettings = loadSettingsCached();
                     let caVersionDir = null;
-                    const caCleanId = caVersionId.replace(' [外部]', '');
+                    const caCleanId = caVersionId.replace(/ \[外部\d*\]/, '');
                     const caExtFolders = loadExternalFolders();
                     for (const folder of caExtFolders) {
                         if (!fs.existsSync(folder.path)) continue;
@@ -25629,7 +25630,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 try {
                     const ptSettings = loadSettingsCached();
                     let ptVersionDir = null;
-                    const ptCleanId = ptVersionId.replace(' [外部]', '');
+                    const ptCleanId = ptVersionId.replace(/ \[外部\d*\]/, '');
                     const ptExtFolders = loadExternalFolders();
                     for (const folder of ptExtFolders) {
                         if (!fs.existsSync(folder.path)) continue;

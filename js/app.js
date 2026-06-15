@@ -2315,7 +2315,7 @@ async function updateVersionSelects() {
 
     const versionOptions = installedVersions.map(v => {
         const customName = v.customName || '';
-        let baseName = v.isExternal ? v.id.replace(' [外部]', '') : v.id;
+        let baseName = v.isExternal ? v.id.replace(/ \[外部\d*\]/, '') : v.id;
         let text = customName || baseName;
         let subtext = customName ? baseName : '';
         if (v.isModpack) { text += ` [${v.modpackLoader || '整合包'}]`; subtext = (subtext ? subtext + ' · ' : '') + (v.modpackLoader || '整合包'); }
@@ -2373,7 +2373,7 @@ async function updateVersionSelects() {
             else if (v.isForge) { badge = 'Forge'; badgeClass = 'forge'; }
             else if (v.isNeoForge) { badge = 'NeoForge'; badgeClass = 'forge'; }
             const externalBadge = v.isExternal ? '<span class="v-badge external" style="background:rgba(255,165,0,0.15);color:#ffa500;font-size:10px;margin-left:4px">外部</span>' : '';
-            const displayName = v.isExternal ? (v.customName || v.id.replace(' [外部]', '')) : (v.customName || v.id);
+            const displayName = v.isExternal ? (v.customName || v.id.replace(/ \[外部\d*\]/, '')) : (v.customName || v.id);
             return `<div class="version-item" style="cursor:pointer" onclick="openVersionSettings('${escapeOnclick(v.id)}','${escapeOnclick(displayName)}')">
                 <div class="version-item-left">
                     <div class="version-item-icon"><img src="${iconUrl}" alt="" class="version-icon-img"></div>
@@ -2422,7 +2422,7 @@ function renderVersions() {
         if (isInInstalledTab) {
             const externalBadgeHtml = v.isExternal ? '<span style="display:inline-block;background:rgba(255,165,0,0.15);color:#ffa500;font-size:10px;padding:1px 6px;border-radius:4px;margin-left:6px">外部文件夹</span>' : '';
             const externalPathHtml = v.isExternal && v.externalPath ? `<span style="color:var(--text-muted);font-size:11px;margin-left:4px" title="${escapeHtml(v.externalPath)}">${escapeHtml(v.externalPath)}</span>` : '';
-            const displayName = v.isExternal ? (v.customName || v.id.replace(' [外部]', '')) : (v.customName || v.id);
+            const displayName = v.isExternal ? (v.customName || v.id.replace(/ \[外部\d*\]/, '')) : (v.customName || v.id);
             const deleteBtnHtml = `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteVersion('${escapeOnclick(v.id)}')">${v.isExternal ? '移除' : '删除'}</button>`;
             return `<div class="version-item version-item-clickable" 
                 data-version-id="${escapeHtml(v.id)}" 
@@ -2993,7 +2993,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Shift') _shiftKeyDo
 document.addEventListener('keyup', (e) => { if (e.key === 'Shift') _shiftKeyDown = false; });
 
 async function deleteVersion(versionId) {
-    const isExternal = versionId.includes('[外部]');
+    const isExternal = versionId.includes(' [外部');
     const ver = installedVersions.find(v => v.id === versionId);
     const isPermanent = !isExternal && _shiftKeyDown;
     let warningParts = [];
@@ -9777,7 +9777,7 @@ async function deleteCurrentVersion() {
         showToast('未找到版本信息', 'error');
         return;
     }
-    const isExternal = currentSettingsVersionId.includes('[外部]');
+    const isExternal = currentSettingsVersionId.includes(' [外部');
     if (isExternal) {
         const confirmed = await showConfirmDialog('移除外部版本', '确定要从列表中移除此外部版本吗？（不会删除实际游戏文件）', '移除', '取消');
         if (!confirmed) return;
