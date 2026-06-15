@@ -2241,6 +2241,7 @@ function matchPattern(filename, pattern) {
 // ============================================================================
 
 const UPDATE_JSON_SOURCES = [
+    'https://raw.gitmirror.com/doujie081231/versePc/main/update.json',
     'https://raw.githubusercontent.com/doujie081231/versePc/main/update.json',
     'https://cdn.jsdelivr.net/gh/doujie081231/versePc@main/update.json',
 ];
