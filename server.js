@@ -10718,8 +10718,6 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
                 }
             }
         }
-    }
-
     } else {
         if (!jvmArgs.some(a => a.includes('minecraft.launcher.brand'))) {
             jvmArgs.push('-Dminecraft.launcher.brand=VersePC');
