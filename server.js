@@ -10581,19 +10581,9 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
     }
 
     if (isForge || isNeoForge) {
-        jvmArgs.push(`-Dminecraft.client.jar=${mainJarPath}`);
-        jvmArgs.push('-Dfml.ignoreInvalidMinecraftCertificates=true');
-        jvmArgs.push('-Dfml.ignorePatchDiscrepancies=true');
-        // Forge/NeoForge 必需的日志和兼容性属性（防止自定义 BootstrapLauncher 的 NoSuchElementException）
-        if (!jvmArgs.some(a => a.includes('forge.logging.console.level'))) {
-            jvmArgs.push('-Dforge.logging.console.level=info');
+        if (!jvmArgs.some(a => a.includes('minecraft.client.jar'))) {
+            jvmArgs.push(`-Dminecraft.client.jar=${mainJarPath}`);
         }
-        if (!jvmArgs.some(a => a.includes('forge.enableLoginPrompt'))) {
-            jvmArgs.push('-Dforge.enableLoginPrompt=false');
-        }
-    }
-    if (isNeoForge) {
-        jvmArgs.push('-Dfml.earlyprogresswindow=false');
     }
 
     // JPMS module flags (--add-exports/--add-opens) only work on Java 9+
@@ -10726,18 +10716,6 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
                         }
                     }
                 }
-            }
-        }
-    // NeoForge: 扩展 ignoreList，防止 ModLauncher 扫描 universal JAR（含 neoforge.mods.toml），
-    // 让 ServiceLoader 的 IBindingsProvider 机制正确注册 neoforge 模组
-    if (isNeoForge) {
-        const ignoreIdx = jvmArgs.findIndex(a => typeof a === 'string' && a.startsWith('-DignoreList='));
-        if (ignoreIdx >= 0) {
-            const neoIgnoreAdditions = 'neoforge-,bootstraplauncher,securejarhandler,asm-commons,asm-util,asm-analysis,asm-tree,asm,JarJarFileSystems';
-            const existing = jvmArgs[ignoreIdx];
-            if (!existing.includes('neoforge-')) {
-                jvmArgs[ignoreIdx] = existing + ',' + neoIgnoreAdditions;
-                console.log(`[Launch] NeoForge: 扩展ignoreList`);
             }
         }
     }
