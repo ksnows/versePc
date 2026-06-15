@@ -5465,6 +5465,36 @@ function selectJavaForVersion(versionId, settings, versionJson = null, externalV
         _scanMcRuntime(mcRuntime, 5);
     }
 
+    const mcRuntimeRoaming = path.join(app.getPath('appData'), '.minecraft', 'runtime');
+    if (fs.existsSync(mcRuntimeRoaming)) {
+        const _scanRoaming = (dir, depth) => {
+            if (depth <= 0 || !fs.existsSync(dir)) return;
+            try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    const subDir = path.join(dir, entry.name);
+                    if (entry.name.toLowerCase() === 'bin') {
+                        const javaExe = path.join(subDir, javaExeName);
+                        if (fs.existsSync(javaExe)) {
+                            const info = getJavaVersionInfo(javaExe);
+                            if (info.major > 0) {
+                                const norm = javaExe.toLowerCase().replace(/\\/g, '/');
+                                if (!candidates.some(c => c.path.toLowerCase().replace(/\\/g, '/') === norm)) {
+                                    candidates.push({ path: javaExe, majorVersion: info.major, minorVersion: info.minor, is64Bit: true, isJdk: true, source: 'bundled' });
+                                    console.log(`[Java]   Roaming/.minecraft/runtime发现: ${javaExe} (版本=${info.major})`);
+                                }
+                            }
+                        }
+                    } else {
+                        _scanRoaming(subDir, depth - 1);
+                    }
+                }
+            } catch (e) {}
+        };
+        _scanRoaming(mcRuntimeRoaming, 5);
+    }
+
     console.log(`[Java] 快速扫描完成，找到 ${candidates.length} 个候选Java`);
 
     if (candidates.some(j => j.majorVersion >= requiredVersion && j.majorVersion <= maxVersion)) {
