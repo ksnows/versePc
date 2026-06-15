@@ -78,7 +78,10 @@ const AIChat = {
         file_search: { name: '文件搜索代理', role: 'File Search', icon: 'search', color: '#4caf50' },
         code_analysis: { name: '代码分析代理', role: 'Code Analysis', icon: 'code', color: '#9c27b0' },
         resource_download: { name: '资源搜索代理', role: 'Resource Search', icon: 'download', color: '#8d6e63' },
-        crash_analysis: { name: '崩溃分析代理', role: 'Crash Analysis', icon: 'bug', color: '#9e9e9e' }
+        crash_analysis: { name: '崩溃分析代理', role: 'Crash Analysis', icon: 'bug', color: '#9e9e9e' },
+        explore: { name: 'Explorer Agent', role: 'Exploration', icon: 'explore', color: '#ff9800' },
+        review: { name: 'Review Agent', role: 'Code Review', icon: 'review', color: '#e91e63' },
+        verifier: { name: 'Verifier Agent', role: 'Verification', icon: 'check_circle', color: '#009688' }
     },
     _currentSubAgent: null,
     _currentToolUseBlocks: [],
@@ -88,6 +91,7 @@ const AIChat = {
     _taskGroups: {},
     toolCallBubble: null,
     userMemory: '',
+    _persistentMemory: [],
     toolCallStartTime: null,
     thinkingBubble: null,
     thinkingContent: '',
@@ -113,6 +117,11 @@ const AIChat = {
     _trustedFolders: [],
     _recentFolders: [],
     _todos: [],
+    _goal: null,
+    _activeSkill: null,
+    _installedSkills: [],
+    _approvalMode: 'suggest',
+    _subAgentModels: {},
 
     async loadUserMemory() {
         try {
@@ -124,6 +133,19 @@ const AIChat = {
     async saveUserMemory() {
         try {
             await window.electronAPI.store.set('versepc_ai_memory', this.userMemory);
+        } catch (e) {}
+    },
+
+    async loadPersistentMemory() {
+        try {
+            const raw = await window.electronAPI.store.get('versepc_ai_persistent_memory');
+            if (raw && Array.isArray(JSON.parse(raw))) this._persistentMemory = JSON.parse(raw);
+        } catch (e) {}
+    },
+
+    async savePersistentMemory() {
+        try {
+            await window.electronAPI.store.set('versepc_ai_persistent_memory', JSON.stringify(this._persistentMemory));
         } catch (e) {}
     },
 
@@ -139,7 +161,8 @@ const AIChat = {
             'versepc_ai_terminal', 'versepc_ai_prompts', 'versepc_ai_ui',
             'versepc_ai_experimental', 'versepc_ai_language', 'versepc_ai_custom_provider',
             'versepc_ai_chats', 'versepc_ai_memory', 'versepc_ai_added_models',
-            'versepc_ai_trusted_folders', 'versepc_ai_recent_folders'
+            'versepc_ai_trusted_folders', 'versepc_ai_recent_folders',
+            'versepc_ai_persistent_memory'
         ];
         try {
             const all = await window.electronAPI.store.getMultiple(allKeys);
@@ -165,6 +188,7 @@ const AIChat = {
                     } catch (e) {}
                 }
                 if (all.versepc_ai_memory) this.userMemory = all.versepc_ai_memory;
+                try { if (all.versepc_ai_persistent_memory) { const parsed = JSON.parse(all.versepc_ai_persistent_memory); if (Array.isArray(parsed)) this._persistentMemory = parsed; } } catch (e) {}
                 try { if (all.versepc_ai_added_models) { const parsed = JSON.parse(all.versepc_ai_added_models); if (Array.isArray(parsed)) this.addedModels = parsed; } } catch (e) {}
                 try { if (all.versepc_ai_trusted_folders) { const parsed = JSON.parse(all.versepc_ai_trusted_folders); if (Array.isArray(parsed)) this._trustedFolders = parsed; } } catch (e) {}
                 try {
@@ -184,6 +208,7 @@ const AIChat = {
             await this.loadSettings();
             await this.loadConversations();
             await this.loadUserMemory();
+            await this.loadPersistentMemory();
         }
         this.updateModelLabel();
         this._updateFolderSelector();
@@ -226,29 +251,6 @@ const AIChat = {
         this._initAtMention();
 
         console.log(`[PERF-INIT] AIChat.init total ${(performance.now()-t0).toFixed(1)}ms`);
-
-        if (typeof PerformanceObserver !== 'undefined') {
-            try {
-                const observer = new PerformanceObserver((list) => {
-                    for (const entry of list.getEntries()) {
-                        if (entry.duration > 50) {
-                            console.warn(`[PERF-LONG-TASK] ${entry.duration.toFixed(1)}ms`, entry);
-                        }
-                    }
-                });
-                observer.observe({ entryTypes: ['longtask'] });
-            } catch (e) {}
-        }
-
-        let _hbLast = Date.now();
-        setInterval(() => {
-            const now = Date.now();
-            const drift = now - _hbLast - 1000;
-            if (drift > 150) {
-                console.warn(`[PERF-HB] main thread blocked ${drift}ms, queue=${this._chunkQueue?.length || 0}, domBatch=${this._domBatchQueue?.length || 0}`);
-            }
-            _hbLast = now;
-        }, 1000);
 
         document.addEventListener('click', (e) => {
             if (!e.target.closest('.rc-mode-dropdown')) {
@@ -329,6 +331,17 @@ const AIChat = {
             this.conversations.unshift(conv);
             this.currentId = conv.id;
             this._todos = [];
+            this._goal = null;
+            try {
+                const relayData = localStorage.getItem('versepc_ai_relay');
+                if (relayData) {
+                    const relay = JSON.parse(relayData);
+                    if (relay.content) {
+                        conv.messages.push({ role: 'system', content: relay.content, timestamp: Date.now(), isRelay: true });
+                        localStorage.removeItem('versepc_ai_relay');
+                    }
+                }
+            } catch (e) {}
             this.updateTodoBar();
             this.renderSidebar();
             this.showWelcome();
@@ -617,11 +630,48 @@ const AIChat = {
         const el = document.getElementById('ai-token-usage');
         if (!el) return;
         const u = this._sessionUsage;
-        if (!u || u.total_tokens === 0) { el.textContent = ''; el.style.display = 'none'; return; }
+        if (!u || u.total_tokens === 0) { el.textContent = ''; el.style.display = 'none'; this._updateStatusBar(); return; }
         const fmt = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n;
-        el.textContent = `${fmt(u.total_tokens)} tokens`;
-        el.title = `输入: ${fmt(u.prompt_tokens)} | 输出: ${fmt(u.completion_tokens)} | 合计: ${fmt(u.total_tokens)} | 轮次: ${u.rounds}`;
+        const cost = u.estimatedCost || 0;
+        const costStr = cost > 0 ? ` · $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}` : '';
+        el.textContent = `${fmt(u.total_tokens)} tokens${costStr}`;
+        el.title = `输入: ${fmt(u.prompt_tokens)} | 输出: ${fmt(u.completion_tokens)} | 合计: ${fmt(u.total_tokens)} | 轮次: ${u.rounds}${cost > 0 ? `\n预估费用: $${cost.toFixed(4)}` : ''}`;
         el.style.display = '';
+        this._updateStatusBar();
+    },
+
+    _updateStatusBar(state) {
+        const modeEl = document.getElementById('ai-status-mode');
+        const modelEl = document.getElementById('ai-status-model');
+        const costEl = document.getElementById('ai-status-cost');
+        const tokensEl = document.getElementById('ai-status-tokens');
+        const contextEl = document.getElementById('ai-status-context');
+        const stateEl = document.getElementById('ai-status-state');
+        const activeBtn = document.querySelector('.rc-mode-btn.rc-mode-btn-active');
+        if (modeEl) {
+            const modeLabels = { plan: '探索', agent: '助手', dev: '开发' };
+            const modeKey = activeBtn ? activeBtn.dataset.mode : 'plan';
+            modeEl.textContent = modeLabels[modeKey] || modeKey;
+        }
+        if (modelEl) {
+            const m = this.model || '-';
+            modelEl.textContent = m.length > 20 ? m.slice(0, 18) + '..' : m;
+        }
+        const u = this._sessionUsage;
+        if (costEl && u) costEl.textContent = `$${(u.estimatedCost || 0).toFixed(4)}`;
+        if (tokensEl && u) {
+            const fmt = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n;
+            tokensEl.textContent = `${fmt(u.total_tokens || 0)} tok`;
+        }
+        if (contextEl && u) {
+            const pct = Math.min(100, Math.round((u.total_tokens || 0) / 1280 * 100));
+            contextEl.textContent = `${pct}%`;
+        }
+        if (stateEl) {
+            const labels = { thinking: '思考中', running: '执行工具', generating: '生成中', idle: '空闲' };
+            stateEl.textContent = labels[state] || labels[state === undefined ? 'idle' : state] || '空闲';
+            stateEl.setAttribute('data-state', state || 'idle');
+        }
     },
 
     getOrCreateWorkflowContent() {
@@ -919,6 +969,14 @@ const AIChat = {
         row.appendChild(iconEl);
         row.appendChild(statusEl);
 
+        if (tc.snapshot) {
+            const snapBadge = document.createElement('span');
+            snapBadge.className = 'ai-snapshot-badge';
+            snapBadge.textContent = '已快照';
+            snapBadge.title = '文件修改前已自动创建快照，可用 /restore 恢复';
+            row.appendChild(snapBadge);
+        }
+
         const _metaTools = new Set(['update_todo_list', 'sequential_thinking', 'attempt_completion', 'todo_write']);
         if (!_metaTools.has(tc.name)) {
             row.appendChild(chevronEl);
@@ -1023,6 +1081,14 @@ const AIChat = {
         row.appendChild(iconEl);
         row.appendChild(statusEl);
 
+        if (tc.snapshot) {
+            const snapBadge = document.createElement('span');
+            snapBadge.className = 'ai-snapshot-badge';
+            snapBadge.textContent = '已快照';
+            snapBadge.title = '文件修改前已自动创建快照，可用 /restore 恢复';
+            row.appendChild(snapBadge);
+        }
+
         const contentWrapper = document.createElement('div');
         contentWrapper.className = 'ai-file-ops-content';
         const resultArea = document.createElement('div');
@@ -1090,6 +1156,14 @@ const AIChat = {
         bubble.appendChild(statusEl);
         bubble.appendChild(timeEl);
 
+        if (tc.snapshot) {
+            const snapBadge = document.createElement('span');
+            snapBadge.className = 'ai-snapshot-badge';
+            snapBadge.textContent = '已快照';
+            snapBadge.title = '文件修改前已自动创建快照，可用 /restore 恢复';
+            bubble.appendChild(snapBadge);
+        }
+
         const _metaTools = new Set(['update_todo_list', 'sequential_thinking', 'attempt_completion', 'todo_write']);
         if (!_metaTools.has(tc.name)) {
             bubble.appendChild(chevronEl);
@@ -1126,6 +1200,44 @@ const AIChat = {
 
     _getToolSummary(name, args) {
         return this.getToolActionDescription(name, JSON.stringify(args)) || '';
+    },
+
+    _bindApprovalActions(container, approvalId, overlay) {
+        const resolveApproval = (approved, alwaysAllow) => {
+            if (container._countdownTimer) clearInterval(container._countdownTimer);
+            container.classList.add('resolved');
+            try { window.electronAPI.ai.toolApprove(approvalId, approved, alwaysAllow); } catch (e) {}
+        };
+
+        const approveBtn = container.querySelector('.ai-approval-btn.approve');
+        const alwaysBtn = container.querySelector('.ai-approval-btn.always-allow');
+        const denyBtn = container.querySelector('.ai-approval-btn.deny');
+        const actionsEl = container.querySelector('.ai-approval-actions, .ai-approval-modal-actions');
+
+        if (approveBtn) approveBtn.addEventListener('click', () => {
+            resolveApproval(true, false);
+            if (actionsEl) actionsEl.innerHTML = '<span class="ai-approval-status approved">✓ 已允许</span>';
+            if (overlay) this._removeApprovalOverlay(overlay, container);
+        });
+        if (alwaysBtn) alwaysBtn.addEventListener('click', () => {
+            resolveApproval(true, true);
+            if (actionsEl) actionsEl.innerHTML = '<span class="ai-approval-status approved">✓ 已允许（自动）</span>';
+            if (overlay) this._removeApprovalOverlay(overlay, container);
+        });
+        if (denyBtn) denyBtn.addEventListener('click', () => {
+            resolveApproval(false, false);
+            if (actionsEl) actionsEl.innerHTML = '<span class="ai-approval-status denied">✗ 已拒绝</span>';
+            if (overlay) this._removeApprovalOverlay(overlay, container);
+        });
+    },
+
+    _removeApprovalOverlay(overlay, modal) {
+        if (!overlay) return;
+        const remaining = overlay.querySelectorAll('.ai-approval-modal:not(.resolved)');
+        if (remaining.length === 0) {
+            overlay.style.display = 'none';
+            overlay.remove();
+        }
     },
 
     _formatArgs(args) {
@@ -1274,6 +1386,32 @@ const AIChat = {
                 this._toolResultProcessQueue(queue, index + 1);
             });
         }
+    },
+
+    _finalizePendingToolCalls() {
+        if (this._pendingToolResults && Object.keys(this._pendingToolResults).length > 0) {
+            const results = Object.values(this._pendingToolResults);
+            if (!this._toolResultQueue) this._toolResultQueue = [];
+            this._toolResultQueue.push(...results);
+            if (!this._toolResultRAF) {
+                this._toolResultRAF = requestAnimationFrame(() => {
+                    this._toolResultRAF = null;
+                    const queue = this._toolResultQueue;
+                    this._toolResultQueue = [];
+                    this._toolResultProcessQueue(queue, 0);
+                });
+            }
+            this._pendingToolResults = {};
+        }
+        const runningRows = document.querySelectorAll('.ai-tool-call-row.running');
+        runningRows.forEach(row => {
+            row.classList.remove('running');
+            row.classList.add('done');
+            const iconEl = row.querySelector('.ai-tool-call-icon');
+            if (iconEl) {
+                iconEl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="9 12 11 14 15 10"/></svg>';
+            }
+        });
     },
 
     _lazyRenderToolResult(row) {
@@ -2351,6 +2489,9 @@ const AIChat = {
     },
 
     typewriterTick() {
+        if (!this.typewriterTextBlock) {
+            this._getOrCreateTextBlock();
+        }
         if (this.displayedLength >= this.fullTextBuffer.length) {
             this.typewriterTimer = null;
             if (this.typewriterTextBlock && this.fullTextBuffer) {
@@ -2419,6 +2560,7 @@ const AIChat = {
             this.typewriterTimer = null;
         }
         this.displayedLength = this.fullTextBuffer.length;
+        if (!this.typewriterTextBlock && this.fullTextBuffer) this._getOrCreateTextBlock();
         if (this.typewriterTextBlock && this.fullTextBuffer) {
             const block = this.typewriterTextBlock;
             this.asyncRenderMarkdown(this.fullTextBuffer, (html) => {
@@ -2437,6 +2579,7 @@ const AIChat = {
         const now = Date.now();
         if (!immediate && (now - (this._lastRenderTime || 0)) < 200) return;
         this._lastRenderTime = now;
+        if (!this.typewriterTextBlock) this._getOrCreateTextBlock();
         if (!this.typewriterTextBlock || !this.fullTextBuffer) return;
         const text = this.fullTextBuffer.slice(0, this.displayedLength);
         const block = this.typewriterTextBlock;
@@ -2538,6 +2681,94 @@ const AIChat = {
     async sendMessage(text) {
         if (!text.trim()) return;
 
+        const trimmed = text.trim();
+
+        if (trimmed.startsWith('# ') && !trimmed.startsWith('## ') && !trimmed.startsWith('#!')) {
+            const memContent = trimmed.slice(2).trim();
+            if (memContent) {
+                const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+                if (!this.userMemory) this.userMemory = '';
+                this.userMemory += (this.userMemory ? '\n' : '') + `- (${ts}) ${memContent}`;
+                this.saveUserMemory();
+                if (typeof showToast === 'function') showToast('已保存到记忆', 'success');
+            }
+            return;
+        }
+
+        if (trimmed === '/skills') {
+            this._loadAndShowSkills();
+            return;
+        }
+
+        if (trimmed.startsWith('/skill ')) {
+            const skillName = trimmed.slice(7).trim();
+            this._activateSkill(skillName);
+            return;
+        }
+
+        if (trimmed === '/fork') {
+            const current = this.getCurrent();
+            if (!current) { showToast('没有当前会话', 'error'); return; }
+            const forked = {
+                id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                title: `Fork: ${current.title}`,
+                messages: JSON.parse(JSON.stringify(current.messages)),
+                createdAt: Date.now(),
+                folderPath: current.folderPath || null,
+                forkedFrom: current.id
+            };
+            this._conversations.push(forked);
+            this.saveConversations();
+            this.switchTo(forked.id);
+            showToast('会话已分叉', 'success');
+            return;
+        }
+
+        if (trimmed.startsWith('/review')) {
+            const target = trimmed.slice(7).trim();
+            const reviewPrompt = target
+                ? `请对以下目标进行结构化代码审查：${target}\n\n请以只读方式审查，输出格式：\n1. 问题分类（按严重性排序）\n2. 每个问题：严重性评分(1-10)、文件路径:行号、问题描述、修复建议\n3. 总体评价和风险点`
+                : '请对当前项目进行结构化代码审查。以只读方式审查，输出格式：\n1. 问题分类（按严重性排序）\n2. 每个问题：严重性评分(1-10)、文件路径:行号、问题描述、修复建议\n3. 总体评价和风险点';
+            text = reviewPrompt;
+        }
+
+        if (trimmed === '/compact') {
+            this._manualCompact();
+            return;
+        }
+
+        if (trimmed.startsWith('/goal')) {
+            const parts = trimmed.split(/\s+/);
+            const action = parts[1] || 'set';
+            const rest = parts.slice(2).join(' ');
+            this._handleGoalCommand(action, rest);
+            return;
+        }
+
+        if (trimmed === '/relay') {
+            const current = this.getCurrent();
+            if (!current || !current.messages.length) {
+                showToast('当前没有对话历史', 'error');
+                return;
+            }
+            const userMsgs = current.messages.filter(m => m.role === 'user').map(m => m.content).slice(-5);
+            const assistantMsgs = current.messages.filter(m => m.role === 'assistant').map(m => m.content).slice(-3);
+            const relay = `# Session Relay\n## 会话: ${current.title}\n## 最近用户请求:\n${userMsgs.map((m, i) => `${i + 1}. ${m.slice(0, 200)}`).join('\n')}\n## 最近AI回复摘要:\n${assistantMsgs.map((m, i) => `${i + 1}. ${m.slice(0, 300)}`).join('\n')}\n## 时间: ${new Date().toISOString()}`;
+            try { localStorage.setItem('versepc_ai_relay', JSON.stringify({ content: relay, timestamp: Date.now(), fromTitle: current.title })); } catch (e) {}
+            this._addSystemMessage('接力文档已生成，将在下次新建会话时自动注入');
+            return;
+        }
+
+        if (trimmed === '/restore' || trimmed.startsWith('/restore ')) {
+            await this._handleRestoreCommand(text.trim());
+            return;
+        }
+
+        if (text.trim() === '/doctor' || text.trim().startsWith('/doctor ')) {
+            await this._handleDoctorCommand(text.trim());
+            return;
+        }
+
         if (this.isGenerating) {
             console.warn('[AIChat] isGenerating stuck, force stopping');
             this.stopGenerationForce();
@@ -2634,7 +2865,7 @@ const AIChat = {
         this._userScrollingUp = false;
         this._lastChunkTime = Date.now();
         this._generationSeq = (this._generationSeq || 0) + 1;
-        this._sessionUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, rounds: 0 };
+        this._sessionUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, rounds: 0, estimatedCost: 0 };
         this._updateTokenUsageUI();
         this._startWatchdog();
         this.updateSendButton(true);
@@ -2715,21 +2946,29 @@ const AIChat = {
             const _customPrompt = this._promptSettings && this._promptSettings.systemPrompt ? `\n\n## Custom Instructions\n${this._promptSettings.systemPrompt}` : '';
             const _modeRule = (() => {
                 const activeBtn = document.querySelector('.rc-mode-btn.rc-mode-btn-active');
-                const isChatMode = activeBtn ? activeBtn.dataset.mode === 'chat' : (this._role === 'gamer');
-                if (!isChatMode) return '';
-                return `\n\n## Mode: Conversation (对话模式)\n当前用户处于对话模式，你只能访问 VERsE 的版本下载文件夹（~/.versepc/versions/）以及用户已添加的外部版本文件夹。如果用户要求读取/写入/执行任何其他外部路径（例如：E:\\、D:\\、C:\\Users、桌面、文档等），你必须回复："我现在是对话模式，无法访问外部的文件夹，需要调整为开发者模式才可以。" 并提示用户点击上方的"开发者模式"按钮切换。`;
+                const currentMode = activeBtn ? activeBtn.dataset.mode : 'plan';
+                if (currentMode === 'plan') {
+                    return `\n\n## Mode: Plan (只读探索模式)\n你当前处于 Plan 模式。在此模式下，你只能使用只读工具进行探索和分析，不能执行任何修改操作。\n允许的工具：read_file, grep_search, glob_search, web_search, web_fetch, web_search_general, get_versions, get_installed_mods, get_game_status, search_mods, browse_directory, select_version, get_game_log, diagnose_crash, get_system_info, explore_environment, build_index, semantic_search, index_stats, sequential_thinking, attempt_completion, ask_user, manage_core_memory, update_todo_list, view_history, validate_code, ckg, sub_agent_dispatch\n禁止的工具：write_file, edit_file, bash, execute_command, install_mod, toggle_mod, install_version, install_loader, launch_game, stop_game, manage_settings, translate_mod, install_modpack, agent, str_replace_based_edit_tool, json_edit_tool, download_cfpa_pack, start_preview, manage_processes, undo_edit, add_download_task\n当用户请求修改操作时，提醒他们切换到 Agent 或 Developer 模式。\n输出结构化计划：目标、上下文、关键文件、约束、建议方案、验证计划、风险点。`;
+                }
+                if (currentMode === 'agent') {
+                    return `\n\n## Mode: Agent (标准工作模式)\n当前用户处于 Agent 模式。你可以访问 ~/.versepc/versions/ 以及用户已添加的外部版本文件夹。如果用户要求访问其他外部路径，提醒他们切换到 Developer 模式。`;
+                }
+                return '';
             })();
             const _devToolsRule = (() => {
                 const activeBtn = document.querySelector('.rc-mode-btn.rc-mode-btn-active');
-                const isDevMode = activeBtn ? activeBtn.dataset.mode === 'dev' : (this._role !== 'gamer');
-                if (!isDevMode) return '';
+                const currentMode = activeBtn ? activeBtn.dataset.mode : 'plan';
+                if (currentMode !== 'dev') return '';
                 return `\n\n## 模组开发工具 (开发者模式可用)\n- check_dev_environment: 检查开发环境（JDK/Gradle/MDK），在使用其他开发工具前应先调用\n- install_dev_tools: 安装缺失的JDK/Gradle/模板\n- init_mod_project: 初始化新模组项目(fabric/forge/neoforge)\n- build_mod: 用Gradle编译模组项目\n- create_datapack: 创建数据包（配方/战利品表/标签/进度）\n- create_resourcepack: 创建资源包（模型/纹理/语言文件）\n- mod_compile_and_install: 一键编译并安装到指定版本\n\n### 生成模组流程:\n1. 判断需求复杂度：简单需求（配方/战利品表/标签/进度）优先用数据包\n2. 数据包路径: create_datapack → 写入 ~/.versepc/versions/{版本ID}/datapacks/\n3. 完整模组: check_dev_environment → init_mod_project → 用 str_replace_based_edit_tool 编写代码 → build_mod → 安装\n4. 模组开发文档: https://fabricmc.net/wiki/ 或 https://docs.neoforged.net/`;
             })();
             const sysPrompt = `You are VersePC Coder, a coding agent specialized in Minecraft launcher development.
-${_langRule}${_customPrompt}${_modeRule}${_devToolsRule}
+${_langRule}${_customPrompt}${_modeRule}${_devToolsRule}${this._goal && this._goal.status === 'active' ? `\n\n## Current Goal\n${this._goal.description}\n请围绕此目标展开工作。` : ''}${this._activeSkill ? `\n\n## Active Skill: ${this._activeSkill.name}\n${this._activeSkill.content}` : ''}
 
 ${this.userMemory ? `## User Preferences
 ${this.userMemory}
+
+` : ''}${this._persistentMemory && this._persistentMemory.length > 0 ? `## 用户记忆（跨会话持久化）
+${this._persistentMemory.map(m => `- ${m}`).join('\n')}
 
 ` : ''}## Core Principle
 
@@ -2829,7 +3068,9 @@ Call attempt_completion when all operations are done and verified.
                     apiFormat,
                     baseUrl: customBaseUrl,
                     language: this._language || 'zh-CN',
-                    projectDir: this._currentFolderPath || null
+                    projectDir: this._currentFolderPath || null,
+                    currentMode: (() => { const btn = document.querySelector('.rc-mode-btn.rc-mode-btn-active'); return btn ? btn.dataset.mode : 'plan'; })(),
+                    approvalMode: (() => { try { return window.electronAPI._approvalMode || 'suggest'; } catch(e) { return 'suggest'; } })()
                 });
 
                 this._fallbackTimeout = setTimeout(() => {
@@ -2846,6 +3087,289 @@ Call attempt_completion when all operations are done and verified.
             }
             this.stopGeneration(e.message || '请求失败', true);
         }
+    },
+
+    async _handleRestoreCommand(text) {
+        const input = document.getElementById('ai-input');
+        if (input) { input.value = ''; aiAutoResize(input); }
+
+        const conv = this.getCurrent();
+        if (conv) {
+            conv.messages.push({ role: 'user', content: text });
+        }
+
+        const userMsgEl = this.appendMessage('user', text);
+
+        const arg = text.replace(/^\/restore\s*/, '').trim();
+
+        if (arg === 'help' || arg === '?') {
+            this.appendMessage('assistant', `**/restore 命令用法：**\n\n- \`/restore\` — 显示快照列表并选择恢复\n- \`/restore <文件路径>\` — 显示指定文件的快照\n- \`/restore help\` — 显示此帮助`);
+            return;
+        }
+
+        try {
+            const snapshots = await window.electronAPI.backup.list(arg || null);
+
+            if (!snapshots || snapshots.length === 0) {
+                this.appendMessage('assistant', arg
+                    ? `未找到文件 \`${arg}\` 的快照。`
+                    : '当前没有可用的快照。AI 在修改文件时会自动创建快照。');
+                return;
+            }
+
+            this._showRestoreModal(snapshots);
+        } catch (e) {
+            this.appendMessage('assistant', `获取快照列表失败: ${e.message}`);
+        }
+    },
+
+    _showRestoreModal(snapshots) {
+        let existing = document.getElementById('ai-restore-overlay');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'ai-restore-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;';
+
+        const modal = document.createElement('div');
+        modal.style.cssText = 'background:var(--bg-primary,#1a1a2e);border:1px solid var(--border-color,#2a2a4a);border-radius:12px;width:560px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'padding:16px 20px;border-bottom:1px solid var(--border-color,#2a2a4a);display:flex;align-items:center;justify-content:space-between;';
+        header.innerHTML = `<span style="font-size:15px;font-weight:600;color:var(--text-primary,#e0e0e0)">📸 快照恢复 <span style="font-size:12px;font-weight:400;color:var(--text-secondary,#888);margin-left:8px">${snapshots.length} 个可用</span></span><button id="ai-restore-close" style="background:none;border:none;color:var(--text-secondary,#888);cursor:pointer;font-size:18px;padding:4px 8px;">✕</button>`;
+
+        const body = document.createElement('div');
+        body.style.cssText = 'overflow-y:auto;padding:8px;flex:1;';
+
+        for (const snap of snapshots) {
+            const item = document.createElement('div');
+            item.style.cssText = 'padding:10px 12px;border-radius:8px;cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:background 0.15s;';
+            item.onmouseenter = () => item.style.background = 'var(--bg-hover,rgba(255,255,255,0.05))';
+            item.onmouseleave = () => item.style.background = 'transparent';
+
+            const fileName = snap.originalPath.split(/[\\/]/).pop();
+            const dirPath = snap.originalPath.replace(/[\\/][^\\/]+$/, '');
+            const timeStr = new Date(snap.timestamp).toLocaleString('zh-CN');
+            const toolDisplay = TOOL_DISPLAY_NAMES[snap.toolName] || snap.toolName;
+            const statusDot = snap.restored
+                ? '<span style="color:var(--ai-success,#4caf50);font-size:11px;">● 已恢复</span>'
+                : '<span style="color:var(--ai-info,#2196f3);font-size:11px;">● 可恢复</span>';
+
+            item.innerHTML = `
+                <div style="display:flex;align-items:center;justify-content:space-between;">
+                    <span style="font-weight:500;color:var(--text-primary,#e0e0e0);font-size:13px;">${this.escapeHtml(fileName)}</span>
+                    ${statusDot}
+                </div>
+                <div style="font-size:11px;color:var(--text-secondary,#888);display:flex;gap:12px;">
+                    <span>📂 ${this.escapeHtml(dirPath)}</span>
+                    <span>🔧 ${this.escapeHtml(toolDisplay)}</span>
+                    <span>🕐 ${timeStr}</span>
+                </div>`;
+
+            item.addEventListener('click', async () => {
+                if (snap.restored) {
+                    const confirmRe = confirm('此快照已被恢复过，确定要再次恢复吗？');
+                    if (!confirmRe) return;
+                }
+                try {
+                    const result = await window.electronAPI.backup.restore(snap.id);
+                    if (result.success) {
+                        overlay.remove();
+                        this.appendMessage('assistant', `✅ 已恢复文件 \`${result.restoredPath}\` 到快照版本。`);
+                    } else {
+                        this.appendMessage('assistant', `❌ 恢复失败: ${result.error}`);
+                    }
+                } catch (e) {
+                    this.appendMessage('assistant', `❌ 恢复失败: ${e.message}`);
+                }
+            });
+
+            body.appendChild(item);
+        }
+
+        const footer = document.createElement('div');
+        footer.style.cssText = 'padding:12px 20px;border-top:1px solid var(--border-color,#2a2a4a);text-align:center;';
+        footer.innerHTML = '<span style="font-size:11px;color:var(--text-secondary,#666);">点击快照条目即可恢复文件到修改前的版本</span>';
+
+        modal.appendChild(header);
+        modal.appendChild(body);
+        modal.appendChild(footer);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        const closeModal = () => overlay.remove();
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
+        document.getElementById('ai-restore-close').addEventListener('click', closeModal);
+        document.addEventListener('keydown', function onKey(e) {
+            if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', onKey); }
+        });
+    },
+
+    _manualCompact() {
+        const current = this.getCurrent();
+        if (!current || !current.messages || current.messages.length < 2) {
+            showToast('对话内容过少，无需压缩', 'error');
+            return;
+        }
+        const messages = current.messages;
+        const totalChars = messages.reduce((sum, m) => sum + (m.content || '').length, 0);
+        const mid = Math.floor(messages.length / 2);
+        const oldMsgs = messages.slice(0, mid);
+        const recentMsgs = messages.slice(mid);
+        const summary = oldMsgs.map(m => {
+            const role = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'AI' : 'System';
+            const content = (m.content || '').slice(0, 200);
+            return `[${role}]: ${content}`;
+        }).join('\n');
+        const summaryMsg = {
+            role: 'system',
+            content: `[Context Summary]\nPrevious conversation:\n${summary}`,
+            timestamp: Date.now(),
+            isCompacted: true
+        };
+        current.messages = [summaryMsg, ...recentMsgs];
+        this.saveConversations();
+        this._renderMessages();
+        const savedTokens = Math.round(totalChars * 0.3 / 4);
+        showToast(`上下文已压缩，释放约 ${savedTokens} tokens`, 'success');
+    },
+
+    _handleGoalCommand(action, content) {
+        switch (action) {
+            case 'set':
+                if (!content) { showToast('用法: /goal set <目标描述>', 'error'); return; }
+                this._goal = { description: content, status: 'active', createdAt: Date.now(), budget: null, consumed: 0 };
+                showToast(`目标已设置: ${content}`, 'success');
+                this._renderGoalPanel();
+                break;
+            case 'pause':
+                if (this._goal) { this._goal.status = 'paused'; showToast('目标已暂停', 'success'); this._renderGoalPanel(); }
+                break;
+            case 'resume':
+                if (this._goal) { this._goal.status = 'active'; showToast('目标已恢复', 'success'); this._renderGoalPanel(); }
+                break;
+            case 'complete':
+                if (this._goal) { this._goal.status = 'complete'; showToast('目标已完成', 'success'); this._renderGoalPanel(); }
+                break;
+            case 'blocked':
+                if (this._goal) { this._goal.status = 'blocked'; showToast('目标已标记为阻塞', 'success'); this._renderGoalPanel(); }
+                break;
+            case 'clear':
+                this._goal = null;
+                showToast('目标已清除', 'success');
+                this._renderGoalPanel();
+                break;
+            default:
+                showToast('可用: /goal set <描述>, /goal pause, /goal resume, /goal complete, /goal blocked, /goal clear', 'info');
+        }
+    },
+
+    _renderGoalPanel() {
+        const el = document.getElementById('ai-side-todo-list');
+        if (!el) return;
+        if (!this._goal) {
+            el.innerHTML = '<div style="color:var(--text-secondary);font-size:12px;padding:8px;text-align:center">暂无目标。使用 /goal set <描述> 设置</div>';
+            return;
+        }
+        const statusColors = { active: '#4caf50', paused: '#ff9800', complete: '#2196f3', blocked: '#f44336' };
+        const statusLabels = { active: '进行中', paused: '已暂停', complete: '已完成', blocked: '已阻塞' };
+        const color = statusColors[this._goal.status] || '#999';
+        const label = statusLabels[this._goal.status] || this._goal.status;
+        el.innerHTML = `<div style="padding:8px"><div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span style="width:8px;height:8px;border-radius:50%;background:${color}"></span><span style="font-size:13px;font-weight:500">${label}</span></div><div style="font-size:12px;color:var(--text-secondary);line-height:1.5">${this._goal.description}</div></div>`;
+    },
+
+    async _loadAndShowSkills() {
+        try {
+            const skills = await window.electronAPI.invoke('skills:list') || [];
+            if (skills.length === 0) {
+                this._addSystemMessage('暂无已安装的 Skills。将 SKILL.md 文件放入 ~/.versepc/skills/ 目录即可安装。');
+                return;
+            }
+            const list = skills.map((s, i) => `${i + 1}. **${s.name}** - ${s.description || '无描述'}`).join('\n');
+            this._addSystemMessage(`已安装的 Skills:\n${list}\n\n使用 /skill <名称> 激活`);
+        } catch (e) {
+            this._addSystemMessage('Skills 加载失败: ' + e.message);
+        }
+    },
+
+    async _activateSkill(name) {
+        try {
+            const skill = await window.electronAPI.invoke('skills:get', name);
+            if (!skill || !skill.content) {
+                showToast(`Skill "${name}" 未找到`, 'error');
+                return;
+            }
+            this._activeSkill = { name: skill.name, content: skill.content };
+            showToast(`Skill "${skill.name}" 已激活`, 'success');
+            this._addSystemMessage(`Skill "${skill.name}" 已激活，后续对话将遵循此 Skill 的工作流程。`);
+        } catch (e) {
+            showToast('Skill 激活失败: ' + e.message, 'error');
+        }
+    },
+
+    async _handleDoctorCommand(text) {
+        const results = [];
+        const addResult = (status, label, detail) => results.push({ status, label, detail });
+
+        addResult('info', 'AI 系统诊断', '正在检查各项配置...');
+
+        try {
+            const model = await window.electronAPI.store.get('versepc_ai_model');
+            if (model) {
+                addResult('pass', '当前模型', model);
+            } else {
+                addResult('warn', '当前模型', '未选择模型，请在设置中选择');
+            }
+        } catch (e) {
+            addResult('fail', '当前模型', '读取失败: ' + e.message);
+        }
+
+        const providers = ['deepseek', 'openai', 'anthropic', 'google', 'zhipu', 'qwen', 'moonshot', 'siliconflow', 'openrouter'];
+        let hasKey = false;
+        for (const p of providers) {
+            try {
+                const key = await window.electronAPI.store.get(`versepc_ai_key_${p}`);
+                if (key) {
+                    hasKey = true;
+                    addResult('pass', `API Key: ${p}`, '已配置');
+                }
+            } catch (_) {}
+        }
+        if (!hasKey) {
+            addResult('warn', 'API Key', '未配置任何 Provider 的 API Key');
+        }
+
+        try {
+            await window.electronAPI.store.set('_doctor_test', Date.now());
+            const val = await window.electronAPI.store.get('_doctor_test');
+            if (val) {
+                addResult('pass', '存储空间', '读写正常');
+            } else {
+                addResult('fail', '存储空间', '写入后读取失败');
+            }
+        } catch (e) {
+            addResult('fail', '存储空间', '存储异常: ' + e.message);
+        }
+
+        try {
+            const added = await window.electronAPI.store.get('versepc_ai_added_models');
+            const count = Array.isArray(added) ? added.length : 0;
+            addResult('info', '已添加模型', `${count} 个`);
+        } catch (_) {
+            addResult('info', '已添加模型', '无法读取');
+        }
+
+        try {
+            const mem = await window.electronAPI.store.get('versepc_ai_persistent_memory');
+            const count = Array.isArray(mem) ? mem.length : 0;
+            addResult('info', '持久化记忆', `${count} 条`);
+        } catch (_) {
+            addResult('info', '持久化记忆', '无法读取');
+        }
+
+        const iconMap = { pass: '✅', warn: '⚠️', fail: '❌', info: 'ℹ️' };
+        const lines = results.map(r => `${iconMap[r.status]} **${r.label}**: ${r.detail}`);
+        this.appendMessage('assistant', `## 🔍 AI 系统诊断报告\n\n${lines.join('\n')}`);
     },
 
     _cleanupGenerationState() {
@@ -2987,6 +3511,13 @@ Call attempt_completion when all operations are done and verified.
                     }
                     this.userMemory = [...memorySet].slice(-20).join('\n');
                     this.saveUserMemory();
+
+                    const persistSet = new Set(this._persistentMemory.map(m => m.trim()));
+                    for (const mem of newMemories) {
+                        persistSet.add(mem);
+                    }
+                    this._persistentMemory = [...persistSet].slice(-50);
+                    this.savePersistentMemory();
                 }
                 cleanContent = finalContent.replace(/\[MEMORY:.*?\]/g, '').trim();
             }
@@ -3295,46 +3826,109 @@ Call attempt_completion when all operations are done and verified.
         }
 
         if (data.type === 'approval_requested') {
-            const { approvalId, toolName, risk, args } = data;
+            const { approvalId, toolName, risk, args, dangerous, autoDenyMs } = data;
             const desc = this.getToolActionDescription(toolName, JSON.stringify(args || {})) || TOOL_DISPLAY_NAMES[toolName] || toolName;
             const riskColor = risk === 'dangerous' ? '#ef4444' : risk === 'moderate' ? '#f59e0b' : '#22c55e';
-            const riskLabel = risk === 'dangerous' ? '高风险' : risk === 'moderate' ? '中风险' : '低风险';
+            const riskLabel = risk === 'dangerous' ? '⚠ 高风险' : risk === 'moderate' ? '中风险' : '低风险';
+            const isDangerous = risk === 'dangerous';
+            const countdownMs = autoDenyMs || (isDangerous ? 120000 : 30000);
+            const countdownSec = Math.floor(countdownMs / 1000);
+            const dangerReason = dangerous?.reason || '';
+
+            let parsedArgs = {};
+            try { parsedArgs = typeof args === 'string' ? JSON.parse(args) : (args || {}); } catch (e) {}
+            const cmdPreview = parsedArgs.command || parsedArgs.file_path || parsedArgs.path || '';
 
             this._scheduleDOMBatch(() => {
-                const block = this._getOrCreateTextBlock();
-                if (!block) return;
-                const div = document.createElement('div');
-                div.className = 'ai-approval-card';
-                div.id = 'approval-' + approvalId;
-                div.innerHTML = `
-                    <div class="ai-approval-header">
-                        <span class="ai-approval-icon">⚠️</span>
-                        <span class="ai-approval-title">需要授权</span>
-                        <span class="ai-approval-risk" style="color:${riskColor}">${riskLabel}</span>
-                    </div>
-                    <div class="ai-approval-desc">${this.escapeHtml(desc)}</div>
-                    <div class="ai-approval-actions">
-                        <button class="ai-approval-btn approve" data-approval-id="${approvalId}">允许</button>
-                        <button class="ai-approval-btn always-allow" data-approval-id="${approvalId}">始终允许</button>
-                        <button class="ai-approval-btn deny" data-approval-id="${approvalId}">拒绝</button>
-                    </div>`;
-                block.appendChild(div);
+                if (isDangerous) {
+                    let overlay = document.getElementById('ai-approval-overlay');
+                    if (!overlay) {
+                        overlay = document.createElement('div');
+                        overlay.id = 'ai-approval-overlay';
+                        overlay.className = 'ai-approval-overlay';
+                        document.body.appendChild(overlay);
+                    }
 
-                div.querySelector('.ai-approval-btn.approve').addEventListener('click', () => {
-                    try { window.electronAPI.ai.toolApprove(approvalId, true); } catch (e) {}
-                    div.classList.add('resolved');
-                    div.querySelector('.ai-approval-actions').innerHTML = '<span class="ai-approval-status approved">✓ 已允许</span>';
-                });
-                div.querySelector('.ai-approval-btn.always-allow').addEventListener('click', () => {
-                    try { window.electronAPI.ai.toolApprove(approvalId, true, true); } catch (e) {}
-                    div.classList.add('resolved');
-                    div.querySelector('.ai-approval-actions').innerHTML = '<span class="ai-approval-status approved">✓ 已允许（自动）</span>';
-                });
-                div.querySelector('.ai-approval-btn.deny').addEventListener('click', () => {
-                    try { window.electronAPI.ai.toolApprove(approvalId, false); } catch (e) {}
-                    div.classList.add('resolved');
-                    div.querySelector('.ai-approval-actions').innerHTML = '<span class="ai-approval-status denied">✗ 已拒绝</span>';
-                });
+                    const modal = document.createElement('div');
+                    modal.className = 'ai-approval-modal';
+                    modal.id = 'approval-' + approvalId;
+                    modal.innerHTML = `
+                        <div class="ai-approval-modal-header">
+                            <span class="ai-approval-modal-icon">🛡️</span>
+                            <div class="ai-approval-modal-title-group">
+                                <span class="ai-approval-modal-title">需要安全授权</span>
+                                <span class="ai-approval-risk-badge dangerous">${riskLabel}</span>
+                            </div>
+                        </div>
+                        <div class="ai-approval-modal-body">
+                            <div class="ai-approval-tool-name">${this.escapeHtml(TOOL_DISPLAY_NAMES[toolName] || toolName)}</div>
+                            <div class="ai-approval-desc">${this.escapeHtml(desc)}</div>
+                            ${dangerReason ? `<div class="ai-approval-danger-reason">🔴 ${this.escapeHtml(dangerReason)}</div>` : ''}
+                            ${cmdPreview ? `<div class="ai-approval-cmd-preview"><code>${this.escapeHtml(cmdPreview.length > 200 ? cmdPreview.slice(0, 200) + '...' : cmdPreview)}</code></div>` : ''}
+                        </div>
+                        <div class="ai-approval-modal-footer">
+                            <span class="ai-approval-countdown" data-countdown="${countdownSec}">${countdownSec}s 后自动拒绝</span>
+                            <div class="ai-approval-modal-actions">
+                                <button class="ai-approval-btn deny" data-approval-id="${approvalId}">拒绝</button>
+                                <button class="ai-approval-btn always-allow" data-approval-id="${approvalId}">始终允许</button>
+                                <button class="ai-approval-btn approve" data-approval-id="${approvalId}">允许执行</button>
+                            </div>
+                        </div>`;
+                    overlay.appendChild(modal);
+                    overlay.style.display = 'flex';
+
+                    this._bindApprovalActions(modal, approvalId, overlay);
+
+                    const countdownEl = modal.querySelector('.ai-approval-countdown');
+                    let remaining = countdownSec;
+                    const timer = setInterval(() => {
+                        remaining--;
+                        if (remaining <= 0) { clearInterval(timer); return; }
+                        if (countdownEl && !modal.classList.contains('resolved')) {
+                            countdownEl.textContent = `${remaining}s 后自动拒绝`;
+                        } else {
+                            clearInterval(timer);
+                        }
+                    }, 1000);
+                    modal._countdownTimer = timer;
+                } else {
+                    const block = this._getOrCreateTextBlock();
+                    if (!block) return;
+                    const div = document.createElement('div');
+                    div.className = 'ai-approval-card ai-approval-moderate';
+                    div.id = 'approval-' + approvalId;
+                    div.innerHTML = `
+                        <div class="ai-approval-header">
+                            <span class="ai-approval-icon">⚠️</span>
+                            <span class="ai-approval-title">需要授权</span>
+                            <span class="ai-approval-risk" style="color:${riskColor}">${riskLabel}</span>
+                            <span class="ai-approval-countdown" data-countdown="${countdownSec}">${countdownSec}s</span>
+                        </div>
+                        <div class="ai-approval-desc">${this.escapeHtml(desc)}</div>
+                        ${cmdPreview ? `<div class="ai-approval-cmd-preview"><code>${this.escapeHtml(cmdPreview.length > 150 ? cmdPreview.slice(0, 150) + '...' : cmdPreview)}</code></div>` : ''}
+                        <div class="ai-approval-actions">
+                            <button class="ai-approval-btn approve" data-approval-id="${approvalId}">允许</button>
+                            <button class="ai-approval-btn always-allow" data-approval-id="${approvalId}">始终允许</button>
+                            <button class="ai-approval-btn deny" data-approval-id="${approvalId}">拒绝</button>
+                        </div>`;
+                    block.appendChild(div);
+                    this._scrollDebounced();
+
+                    this._bindApprovalActions(div, approvalId);
+
+                    const countdownEl = div.querySelector('.ai-approval-countdown');
+                    let remaining = countdownSec;
+                    const timer = setInterval(() => {
+                        remaining--;
+                        if (remaining <= 0) { clearInterval(timer); return; }
+                        if (countdownEl && !div.classList.contains('resolved')) {
+                            countdownEl.textContent = `${remaining}s`;
+                        } else {
+                            clearInterval(timer);
+                        }
+                    }, 1000);
+                    div._countdownTimer = timer;
+                }
             });
             return;
         }
@@ -3525,6 +4119,7 @@ Call attempt_completion when all operations are done and verified.
                     };
                     const [text, type] = statusMap[firstCall.name] || ['正在处理...', ''];
                     this._showStatusIndicator(text, type);
+                    this._updateStatusBar('running');
                 }
             });
             return;
@@ -3538,6 +4133,7 @@ Call attempt_completion when all operations are done and verified.
         if (data.type === 'reasoning_start') {
             if (data.silent) return;
             if (this._currentSubAgent) return;
+            this._updateStatusBar('thinking');
             this.thinkingContent = '';
             if (this._reasoningTimer) { clearInterval(this._reasoningTimer); this._reasoningTimer = null; }
             const now = Date.now();
@@ -3840,10 +4436,18 @@ Call attempt_completion when all operations are done and verified.
         }
 
         if (data.type === 'usage' && data.usage) {
-            this._sessionUsage = this._sessionUsage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, rounds: 0 };
-            this._sessionUsage.prompt_tokens += data.usage.prompt_tokens || 0;
-            this._sessionUsage.completion_tokens += data.usage.completion_tokens || 0;
-            this._sessionUsage.total_tokens += data.usage.total_tokens || 0;
+            this._sessionUsage = this._sessionUsage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, rounds: 0, estimatedCost: 0 };
+            if (data.usage.promptTokens != null) {
+                this._sessionUsage.prompt_tokens = data.usage.promptTokens;
+                this._sessionUsage.completion_tokens = data.usage.completionTokens;
+                this._sessionUsage.total_tokens = data.usage.totalTokens;
+                this._sessionUsage.estimatedCost = data.usage.estimatedCost || 0;
+            } else {
+                this._sessionUsage.prompt_tokens += data.usage.prompt_tokens || 0;
+                this._sessionUsage.completion_tokens += data.usage.completion_tokens || 0;
+                this._sessionUsage.total_tokens += data.usage.total_tokens || 0;
+                this._sessionUsage.estimatedCost = data.usage.estimatedCost || this._sessionUsage.estimatedCost || 0;
+            }
             this._sessionUsage.rounds += data.usage.rounds || 1;
             this._updateTokenUsageUI();
             return;
@@ -3877,6 +4481,7 @@ Call attempt_completion when all operations are done and verified.
             this._collapseCompletedTaskThinking();
             this._closeAllTaskGroups();
             this._hideStatusIndicator();
+            this._updateStatusBar('idle');
             const content = data.text || '';
             const completedTasks = (this._todos || []).filter(t => t.status === 'completed').length;
             const totalTasks = (this._todos || []).length;
@@ -3977,10 +4582,8 @@ Call attempt_completion when all operations are done and verified.
             if (content) {
                 const textContent = typeof content === 'string' ? content : (typeof content === 'object' ? JSON.stringify(content, null, 2) : String(content));
                 this._streamFullResponse += textContent;
-                const textBlock = this._getOrCreateTextBlock();
-                if (textBlock) {
-                    this.feedTypewriter(textContent);
-                }
+                this._getOrCreateTextBlock();
+                this.feedTypewriter(textContent);
             }
             return;
         }
@@ -3991,11 +4594,8 @@ Call attempt_completion when all operations are done and verified.
                 try { content = JSON.stringify(content, null, 2); } catch (e) { content = String(content); }
             }
             this._streamFullResponse += content;
-            const textBlock = this._getOrCreateTextBlock();
-            console.log(`[AI-TEXT] fed ${content.length} chars, block=${!!textBlock}, total=${this._streamFullResponse.length}`);
-            if (textBlock) {
-                this.feedTypewriter(content);
-            }
+            console.log(`[AI-TEXT] fed ${content.length} chars, total=${this._streamFullResponse.length}`);
+            this.feedTypewriter(content);
         }
         if (data.type === 'completion') {
             this.flushTypewriter();
@@ -4697,6 +5297,8 @@ Call attempt_completion when all operations are done and verified.
         { id: 'experimental', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3h6v4H9z"/><path d="M10 9V3M14 9V3"/><path d="M7 9l-2 12h14l-2-12"/></svg>', label: '实验性' },
         { id: 'language', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>', label: '语言' },
         { id: 'about', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>', label: '关于' },
+        { id: 'memory', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 4a3 3 0 110 6 3 3 0 010-6zm0 14c-2.67 0-8-1.34-8-4v-2c0-2.66 5.33-4 8-4s8 1.34 8 4v2c0 2.66-5.33 4-8 4z"/></svg>', label: '记忆' },
+        { id: 'projectInstructions', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>', label: '项目指令' },
         { id: 'mcp', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>', label: 'MCP 服务器' },
     ],
 
@@ -4789,6 +5391,8 @@ Call attempt_completion when all operations are done and verified.
             case 'experimental': return this._renderExperimentalTab();
             case 'language': return this._renderLanguageTab();
             case 'about': return this._renderAboutTab();
+            case 'memory': return this._renderMemoryTab();
+            case 'projectInstructions': return this._renderProjectInstructionsTab();
             case 'mcp': return this._renderMcpSettings();
             default: return '';
         }
@@ -5189,6 +5793,129 @@ Call attempt_completion when all operations are done and verified.
         `);
     },
 
+    _renderMemoryTab() {
+        const memEntries = Array.isArray(this._persistentMemory) ? this._persistentMemory : [];
+        let listHtml = '';
+        if (memEntries.length === 0) {
+            listHtml = '<div class="rc-settings-item"><p style="color:var(--ai-text-secondary);font-size:13px;margin:0">暂无记忆条目。AI 会通过 [MEMORY:...] 标签自动记录，或在下方手动添加。</p></div>';
+        } else {
+            for (let i = 0; i < memEntries.length; i++) {
+                const entry = this._escapeHtml(memEntries[i]);
+                listHtml += `<div class="rc-settings-item" style="display:flex;align-items:center;gap:8px">
+                    <span style="flex:1;font-size:13px;word-break:break-all">${entry}</span>
+                    <button class="rc-btn rc-btn-danger rc-btn-sm" onclick="AIChat._deleteMemoryEntry(${i})" style="flex-shrink:0">删除</button>
+                </div>`;
+            }
+        }
+        return this._sectionHeader('记忆管理', '管理跨会话持久化的用户记忆，AI 会自动记录重要信息') + this._section(`
+            <div class="rc-settings-item" style="display:flex;gap:8px;align-items:flex-end">
+                <div style="flex:1">
+                    <label class="rc-settings-item-label">添加记忆</label>
+                    <input type="text" class="rc-apikey-form-input" id="memory-add-input" placeholder="输入新的记忆内容..." style="width:100%">
+                </div>
+                <button class="rc-btn rc-btn-primary rc-btn-sm" onclick="AIChat._addMemoryEntry()" style="flex-shrink:0;margin-bottom:1px">添加</button>
+            </div>
+            ${listHtml}
+            ${memEntries.length > 0 ? `<div class="rc-settings-item" style="border-top:1px solid var(--ai-border);padding-top:12px">
+                <button class="rc-btn rc-btn-danger rc-btn-sm" onclick="AIChat._clearAllMemory()">清空所有记忆</button>
+                <span style="color:var(--ai-text-secondary);font-size:12px;margin-left:8px">共 ${memEntries.length} 条</span>
+            </div>` : ''}
+        `);
+    },
+
+    async _addMemoryEntry() {
+        const input = document.getElementById('memory-add-input');
+        if (!input) return;
+        const text = input.value.trim();
+        if (!text) return;
+        if (!Array.isArray(this._persistentMemory)) this._persistentMemory = [];
+        this._persistentMemory.push(text);
+        await this.savePersistentMemory();
+        this._switchSettingsTab('memory');
+    },
+
+    async _deleteMemoryEntry(index) {
+        if (!Array.isArray(this._persistentMemory)) return;
+        if (index < 0 || index >= this._persistentMemory.length) return;
+        this._persistentMemory.splice(index, 1);
+        await this.savePersistentMemory();
+        this._switchSettingsTab('memory');
+    },
+
+    async _clearAllMemory() {
+        this._persistentMemory = [];
+        await this.savePersistentMemory();
+        this._switchSettingsTab('memory');
+    },
+
+    _renderProjectInstructionsTab() {
+        const projectDir = this._currentFolderPath || '';
+        const filePath = projectDir ? `${projectDir}\\.versepc\\AGENTS.md` : '(未打开项目)';
+        return this._sectionHeader('项目指令文件', '为当前项目定义 AI 行为规则，文件保存在 .versepc/AGENTS.md') + this._section(`
+            <div class="rc-settings-item">
+                <label class="rc-settings-item-label">项目目录</label>
+                <p style="color:var(--ai-text-secondary);font-size:12px;margin:4px 0 0">${this._escapeHtml(filePath)}</p>
+            </div>
+            <div class="rc-settings-item">
+                <label class="rc-settings-item-label">AGENTS.md 内容</label>
+                <textarea id="project-instructions-editor" class="rc-apikey-form-input" rows="12" placeholder="# 项目指令&#10;&#10;在此定义 AI 应遵循的规则...&#10;&#10;- 使用 TypeScript&#10;- 遵循 ESLint 规则&#10;- 不要修改 package.json" style="width:100%;font-family:monospace;font-size:12px;resize:vertical;min-height:200px">${this._escapeHtml(this._projectInstructionsContent || '')}</textarea>
+            </div>
+            <div class="rc-settings-item" style="display:flex;gap:8px">
+                <button class="rc-btn rc-btn-primary rc-btn-sm" onclick="AIChat._saveProjectInstructions()">保存</button>
+                <button class="rc-btn rc-btn-sm" onclick="AIChat._loadProjectInstructionsContent()">重新加载</button>
+                ${projectDir ? `<button class="rc-btn rc-btn-sm" onclick="AIChat._createVersepcDir()">创建 .versepc 目录</button>` : ''}
+            </div>
+        `);
+    },
+
+    async _loadProjectInstructionsContent() {
+        const projectDir = this._currentFolderPath;
+        if (!projectDir) return;
+        try {
+            const result = await window.electronAPI.readFile?.(`${projectDir}\\.versepc\\AGENTS.md`);
+            if (result && !result.error) {
+                this._projectInstructionsContent = result.content || '';
+            } else {
+                this._projectInstructionsContent = '';
+            }
+        } catch (_) {
+            this._projectInstructionsContent = '';
+        }
+        const textarea = document.getElementById('project-instructions-editor');
+        if (textarea) textarea.value = this._projectInstructionsContent || '';
+    },
+
+    async _saveProjectInstructions() {
+        const textarea = document.getElementById('project-instructions-editor');
+        if (!textarea) return;
+        const content = textarea.value;
+        const projectDir = this._currentFolderPath;
+        if (!projectDir) {
+            alert('请先打开一个项目目录');
+            return;
+        }
+        try {
+            const dirPath = `${projectDir}\\.versepc`;
+            await window.electronAPI.createDir?.(dirPath);
+            await window.electronAPI.writeFile?.(`${dirPath}\\AGENTS.md`, content);
+            this._projectInstructionsContent = content;
+            alert('项目指令已保存到 .versepc/AGENTS.md');
+        } catch (e) {
+            alert('保存失败: ' + e.message);
+        }
+    },
+
+    async _createVersepcDir() {
+        const projectDir = this._currentFolderPath;
+        if (!projectDir) return;
+        try {
+            await window.electronAPI.createDir?.(`${projectDir}\\.versepc`);
+            alert('.versepc 目录已创建');
+        } catch (e) {
+            alert('创建失败: ' + e.message);
+        }
+    },
+
     _updateAutoApprove(key, val) {
         if (!this._autoApproveSettings) this._autoApproveSettings = {};
         this._autoApproveSettings[key] = val;
@@ -5409,6 +6136,7 @@ Call attempt_completion when all operations are done and verified.
         }
         this.updateModelLabel();
         this.renderModelTable();
+        this.renderAddedModels();
     },
 
     renderModelTable() {
@@ -5464,9 +6192,20 @@ Call attempt_completion when all operations are done and verified.
         try { await window.electronAPI.store.set('versepc_ai_added_models', JSON.stringify(this.addedModels)); } catch(e){}
         if (this.model === modelId && this.addedModels.length > 0) {
             this.model = this.addedModels[0].modelId;
+            this.apiKey = this.addedModels[0].apiKey || '';
+            try { await window.electronAPI.store.set('versepc_ai_api_key', this.apiKey); } catch(e){}
+            this.updateModelLabel();
+        } else if (this.addedModels.length === 0) {
+            this.model = '';
+            this.apiKey = '';
+            try {
+                await window.electronAPI.store.set('versepc_ai_model', '');
+                await window.electronAPI.store.set('versepc_ai_api_key', '');
+            } catch(e){}
             this.updateModelLabel();
         }
         this.renderModelTable();
+        this.renderAddedModels();
     },
 
     showAddModelDialog() {
@@ -6836,7 +7575,7 @@ Call attempt_completion when all operations are done and verified.
         };
 
         if (typeof requestIdleCallback !== 'undefined') {
-            requestIdleCallback(doRender, { timeout: 50 });
+            requestIdleCallback(doRender, { timeout: 200 });
         } else {
             setTimeout(doRender, 0);
         }
@@ -6849,13 +7588,14 @@ Call attempt_completion when all operations are done and verified.
         let index = 0;
         const highlightNext = () => {
             if (index >= blocks.length) return;
-            const block = blocks[index];
-            index++;
-            try { hljs.highlightElement(block); block.setAttribute('data-hljs-done', ''); } catch (e) {}
+            const t0 = performance.now();
+            while (index < blocks.length && performance.now() - t0 < 12) {
+                const block = blocks[index];
+                index++;
+                try { hljs.highlightElement(block); block.setAttribute('data-hljs-done', ''); } catch (e) {}
+            }
             if (index < blocks.length) {
-                typeof requestIdleCallback !== 'undefined'
-                    ? requestIdleCallback(highlightNext, { timeout: 50 })
-                    : setTimeout(highlightNext, 0);
+                setTimeout(highlightNext, 0);
             }
         };
         highlightNext();
@@ -7076,18 +7816,34 @@ Call attempt_completion when all operations are done and verified.
     },
 
     _renderErrorCard(container, errorMsg) {
-        const errInfo = this.classifyError(errorMsg);
-        const btnAction = errInfo.action === 'settings' ? "AIChat.toggleSettings()" : "AIChat.retryLastMessage()";
         const warningSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
         const chevronSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
-        let friendlyMsg = errorMsg || '未知错误';
+        const copyDetailSvg = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:12px;height:12px;vertical-align:-2px"><rect x="5" y="5" width="8" height="8" rx="1"/><path d="M3 11V4a1 1 0 0 1 1-1h6"/></svg>';
+
+        let contextLines = null;
+        let rawErrorMsg = errorMsg || '未知错误';
+        const ctxMatch = errorMsg && errorMsg.match(/^API 调用失败\nProvider: (.+)\nModel: (.+)\nEndpoint: (.+)\n错误: ([\s\S]*)$/);
+        if (ctxMatch) {
+            contextLines = { provider: ctxMatch[1], model: ctxMatch[2], endpoint: ctxMatch[3], error: ctxMatch[4] };
+            rawErrorMsg = contextLines.error;
+        }
+
+        const errInfo = this.classifyError(rawErrorMsg);
+        const btnAction = errInfo.action === 'settings' ? "AIChat.toggleSettings()" : "AIChat.retryLastMessage()";
+        let friendlyMsg = rawErrorMsg;
         if (/econnreset/i.test(friendlyMsg)) friendlyMsg = '网络连接被重置，可能是服务器中断了连接。请检查网络后重试。';
         else if (/econnrefused/i.test(friendlyMsg)) friendlyMsg = '连接被拒绝，服务器可能未启动或不可达。';
         else if (/etimedout/i.test(friendlyMsg)) friendlyMsg = '连接超时，服务器响应时间过长。';
         else if (/socket hang up/i.test(friendlyMsg)) friendlyMsg = '连接被中断，可能是网络不稳定导致。';
         const escapedError = this.escapeHtml(friendlyMsg);
-        const clipboardText = this.escapeHtml(errorMsg || '').replace(/'/g, "&#39;");
-        container.innerHTML = `<div class="ai-error-block" style="animation:aiMsgIn 0.3s var(--ease-out-expo)"><div class="ai-error-block-header" onclick="this.nextElementSibling.classList.toggle('open');this.querySelector('.ai-error-block-chevron').classList.toggle('open')"><span class="ai-error-block-icon">${warningSvg}</span><span class="ai-error-block-title">${errInfo.title}</span><span class="ai-error-block-chevron">${chevronSvg}</span></div><div class="ai-error-block-body open"><div class="ai-error-block-text">${escapedError}</div><div class="ai-error-actions" style="display:flex;gap:8px;margin-top:10px"><button class="ai-error-btn" onclick="${btnAction}" style="padding:5px 14px;border-radius:6px;border:none;background:rgba(239,68,68,0.15);color:#fca5a5;font-size:12px;cursor:pointer;transition:background 0.15s">${errInfo.retryLabel}</button><button class="ai-error-copy-btn" onclick="navigator.clipboard.writeText('${clipboardText}').then(()=>{this.textContent='已复制';setTimeout(()=>this.textContent='复制',1500)})" style="padding:5px 14px;border-radius:6px;border:1px solid rgba(239,68,68,0.2);background:transparent;color:#fca5a5;font-size:12px;cursor:pointer;transition:background 0.15s">复制</button></div></div></div>`;
+
+        const contextHtml = contextLines ? `<div class="ai-error-context" style="margin-bottom:8px;padding:6px 10px;border-radius:6px;background:rgba(239,68,68,0.06);font-size:11px;color:rgba(252,165,165,0.8);line-height:1.6"><div>Provider: ${this.escapeHtml(contextLines.provider)}</div><div>Model: ${this.escapeHtml(contextLines.model)}</div><div>Endpoint: ${this.escapeHtml(contextLines.endpoint)}</div></div>` : '';
+
+        const detailText = errorMsg || '未知错误';
+        const detailClipboard = this.escapeHtml(detailText).replace(/'/g, "&#39;").replace(/\n/g, '\\n');
+        const rawClipboard = this.escapeHtml(rawErrorMsg).replace(/'/g, "&#39;");
+
+        container.innerHTML = `<div class="ai-error-block" style="animation:aiMsgIn 0.3s var(--ease-out-expo)"><div class="ai-error-block-header" onclick="this.nextElementSibling.classList.toggle('open');this.querySelector('.ai-error-block-chevron').classList.toggle('open')"><span class="ai-error-block-icon">${warningSvg}</span><span class="ai-error-block-title">${errInfo.title}</span><span class="ai-error-block-chevron">${chevronSvg}</span></div><div class="ai-error-block-body open">${contextHtml}<div class="ai-error-block-text">${escapedError}</div><div class="ai-error-actions" style="display:flex;gap:8px;margin-top:10px"><button class="ai-error-btn" onclick="${btnAction}" style="padding:5px 14px;border-radius:6px;border:none;background:rgba(239,68,68,0.15);color:#fca5a5;font-size:12px;cursor:pointer;transition:background 0.15s">${errInfo.retryLabel}</button><button class="ai-error-copy-btn" onclick="navigator.clipboard.writeText('${rawClipboard}').then(()=>{this.textContent='已复制';setTimeout(()=>this.textContent='复制',1500)})" style="padding:5px 14px;border-radius:6px;border:1px solid rgba(239,68,68,0.2);background:transparent;color:#fca5a5;font-size:12px;cursor:pointer;transition:background 0.15s">复制</button>${contextLines ? `<button class="ai-error-detail-btn" onclick="navigator.clipboard.writeText('${detailClipboard}').then(()=>{this.innerHTML='${copyDetailSvg} 已复制';setTimeout(()=>this.innerHTML='${copyDetailSvg} 复制错误详情',1500)})" style="padding:5px 14px;border-radius:6px;border:1px solid rgba(239,68,68,0.2);background:transparent;color:#fca5a5;font-size:12px;cursor:pointer;transition:background 0.15s">${copyDetailSvg} 复制错误详情</button>` : ''}</div></div></div>`;
     },
 
     _renderSubAgentCard(agentType, name, role, task) {
@@ -8550,20 +9306,19 @@ const Onboarding = {
             const btn = e.target.closest('.rc-mode-btn');
             if (!btn) return;
             const mode = btn.dataset.mode;
-            // developer mode 始终显示文件夹；对话模式只有当用户不是 gamer 时显示
             if (mode === 'dev') {
                 this._showFolderBar();
                 AIChat._role = 'developer';
-                if (AIChat._currentFolderPath) {
-                    AIChat._currentFolderPath = AIChat._currentFolderPath;
-                }
-            } else {
+            } else if (mode === 'agent') {
                 if (Onboarding.role === 'gamer') {
                     this._hideFolderBar();
                 } else {
                     this._showFolderBar();
                 }
                 AIChat._role = 'gamer';
+            } else {
+                this._hideFolderBar();
+                AIChat._role = 'planner';
             }
             this._setActiveMode(mode);
             this._persist();
@@ -8600,8 +9355,8 @@ const Onboarding = {
     async _pickFolder() {
         try {
             const res = await window.electronAPI.selectFolder({ title: '选择项目文件夹', properties: ['openDirectory'] });
-            if (res && res.filePaths && res.filePaths[0]) {
-                this.folderPath = res.filePaths[0];
+            if (res && !res.cancelled && res.path) {
+                this.folderPath = res.path;
                 this.folderName = this._basename(this.folderPath);
                 const pathEl = document.getElementById('onboard-folder-path');
                 if (pathEl) pathEl.textContent = this.folderPath;
@@ -8645,7 +9400,7 @@ const Onboarding = {
         if (step === 'welcome') {
             this._startWelcomeTypewriter();
         } else if (step === 'role') {
-            this._setActiveMode('chat');
+            this._setActiveMode('plan');
         } else if (step === 'folder') {
             const pathEl = document.getElementById('onboard-folder-path');
             if (pathEl) pathEl.textContent = this.folderPath || '未选择文件夹';
@@ -8967,6 +9722,25 @@ const OnboardingUI = {
 
 function startOnboarding(force) { Onboarding.start(force); }
 function resetOnboarding() { Onboarding.reset(); }
+function aiSwitchMode(mode) {
+    if (mode !== 'plan' && mode !== 'agent' && mode !== 'dev') return;
+    if (typeof Onboarding !== 'undefined' && Onboarding._setActiveMode) {
+        Onboarding._setActiveMode(mode);
+        if (mode === 'dev') Onboarding._showFolderBar();
+        else Onboarding._hideFolderBar();
+    }
+    if (typeof AIChat !== 'undefined') {
+        if (mode === 'plan') AIChat._role = 'planner';
+        else if (mode === 'agent') AIChat._role = 'gamer';
+        else AIChat._role = 'developer';
+    }
+    if (typeof Onboarding !== 'undefined') {
+        if (mode === 'plan') Onboarding.role = 'planner';
+        else if (mode === 'agent') Onboarding.role = 'gamer';
+        else Onboarding.role = 'developer';
+        try { Onboarding._persist(); } catch (e) {}
+    }
+}
 
 let _editorPanelOpen = false;
 let _fileExplorerVisible = false;

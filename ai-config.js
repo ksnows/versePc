@@ -306,6 +306,72 @@ const TOOL_DISPLAY_NAMES = {
     semantic_search: '语义搜索', index_stats: '索引统计',
 };
 
+const MODEL_PRICES = {
+    'deepseek-chat': { input: 1, output: 2 },
+    'deepseek-reasoner': { input: 4, output: 16 },
+    'deepseek-v4-pro': { input: 2, output: 8 },
+    'deepseek-v4-flash': { input: 0, output: 0 },
+    'gpt-4o': { input: 2.5, output: 10 },
+    'gpt-4o-mini': { input: 0.15, output: 0.6 },
+    'gpt-4.1': { input: 2, output: 8 },
+    'gpt-4.1-mini': { input: 0.4, output: 1.6 },
+    'gpt-4.1-nano': { input: 0.1, output: 0.4 },
+    'o3-mini': { input: 1.1, output: 4.4 },
+    'o3': { input: 10, output: 40 },
+    'claude-sonnet-4-6-20250217': { input: 3, output: 15 },
+    'claude-opus-4-7-20260416': { input: 15, output: 75 },
+    'claude-sonnet-4-5-20250929': { input: 3, output: 15 },
+    'claude-opus-4-5-20251124': { input: 15, output: 75 },
+    'claude-haiku-4-5-20251001': { input: 0.8, output: 4 },
+    'gemini-2.5-pro': { input: 1.25, output: 10 },
+    'gemini-2.5-flash': { input: 0.15, output: 0.6 },
+    'gemini-2.5-flash-lite': { input: 0.075, output: 0.3 },
+    'gemini-2.0-flash': { input: 0.1, output: 0.4 },
+    'gemini-3.5-flash': { input: 0.15, output: 0.6 },
+    'glm-5.1': { input: 5, output: 10 },
+    'glm-5': { input: 2, output: 5 },
+    'glm-5-plus': { input: 5, output: 10 },
+    'glm-5-air': { input: 1, output: 2 },
+    'glm-5-flash': { input: 0, output: 0 },
+    'glm-4.7': { input: 1, output: 2 },
+    'qwen3.6-max-preview': { input: 2, output: 6 },
+    'qwen3.6-plus': { input: 0.8, output: 2 },
+    'qwen3.6-flash': { input: 0, output: 0 },
+    'qwen3-235b-a22b': { input: 0.5, output: 2 },
+    'qwen3-30b-a3b': { input: 0, output: 0 },
+    'qwq-plus': { input: 1, output: 4 },
+    'kimi-k2.6': { input: 3, output: 12 },
+    'kimi-k2.5': { input: 2, output: 8 },
+    'moonshot-v1-128k': { input: 8, output: 8 },
+    'moonshot-v1-32k': { input: 8, output: 8 },
+    'yi-lightning': { input: 0, output: 0 },
+    'yi-large': { input: 2, output: 2 },
+    'yi-large-turbo': { input: 1, output: 1 },
+    'yi-medium': { input: 0.6, output: 0.6 },
+    'Baichuan4-Turbo': { input: 2, output: 6 },
+    'Baichuan4-Air': { input: 0.5, output: 1 },
+    'Baichuan4': { input: 2, output: 6 },
+    'Baichuan3-Turbo': { input: 1, output: 2 },
+    'MiniMax-M2.7': { input: 1, output: 4 },
+    'MiniMax-M2.5': { input: 0.5, output: 2 },
+    'MiniMax-M2.1': { input: 0.2, output: 0.8 },
+    'step-2-16k': { input: 3, output: 12 },
+    'step-1-8k': { input: 0, output: 0 },
+    'doubao-1.5-pro-256k': { input: 0.8, output: 2 },
+    'doubao-1.5-lite-32k': { input: 0, output: 0 },
+    'doubao-pro-256k': { input: 0.8, output: 2 },
+    'doubao-lite-128k': { input: 0, output: 0 },
+    'llama-3.3-70b-versatile': { input: 0, output: 0 },
+    'qwen/qwen3-32b': { input: 0, output: 0 },
+    'deepseek-r1-distill-llama-70b': { input: 0, output: 0 },
+};
+
+function estimateCost(modelId, promptTokens, completionTokens) {
+    const pricing = MODEL_PRICES[modelId];
+    if (!pricing) return 0;
+    return (promptTokens / 1000000) * pricing.input + (completionTokens / 1000000) * pricing.output;
+}
+
 function getProviderForModel(modelId) {
     for (const [key, provider] of Object.entries(AI_PROVIDERS)) {
         if (provider.models.some(m => m.id === modelId)) {
@@ -370,6 +436,7 @@ module.exports = {
     AI_PROVIDERS,
     PLATFORMS,
     MODELS,
+    MODEL_PRICES,
     TOOL_CONFIG,
     TOOL_RISK,
     TOOL_DISPLAY_NAMES,
@@ -378,4 +445,5 @@ module.exports = {
     buildApiHeaders,
     buildChatEndpoint,
     buildNonStreamingEndpoint,
+    estimateCost,
 };

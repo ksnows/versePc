@@ -357,7 +357,7 @@ class CrashAnalyzer {
                                 this.logMc += line + '\n';
                             } else if (line.includes('启动器输出日志')) {
                                 hasLauncherMark = true;
-                                console.log('[Crash] 找到 PCL 输出的启动器日志头');
+                                console.log('[Crash] 找到 VersePC 输出的启动器日志头');
                             }
                         }
                         
@@ -995,7 +995,7 @@ class CrashAnalyzer {
     getAnalyzeResult(isHandAnalyze) {
         if (!this.crashReasons.size) {
             if (isHandAnalyze) {
-                return '分析完成：PCL 无法确定崩溃原因。';
+                return '分析完成：VersePC 无法确定崩溃原因。';
             } else {
                 return `很抱歉，我们未能分析出该日志中的崩溃原因。${'\n'}如果你认为这应当被分析出，请提交反馈。`.trim();
             }
@@ -1040,9 +1040,9 @@ class CrashAnalyzer {
                     break;
                 case CrashReason.ModIncompatible:
                     if (additional && additional.length === 1) {
-                        results.push(`PCL 发现以下 Mod 可能导致崩溃：${additional[0]}\n请尝试删除或更新该 Mod。`);
+                        results.push(`VersePC 发现以下 Mod 可能导致崩溃：${additional[0]}\n请尝试删除或更新该 Mod。`);
                     } else {
-                        results.push(`PCL 发现以下 Mod 可能导致崩溃：\n - ${additional.join('\n - ')}\n\n请尝试删除或更新这些 Mod。`);
+                        results.push(`VersePC 发现以下 Mod 可能导致崩溃：\n - ${additional.join('\n - ')}\n\n请尝试删除或更新这些 Mod。`);
                     }
                     break;
                 case CrashReason.ModCrashed:
@@ -1144,9 +1144,6 @@ class CrashAnalyzer {
                 case CrashReason.ManuallyTriggeredCrash:
                     results.push('发现手动触发的崩溃，这通常是为了测试目的。\n如果你不是故意触发此崩溃，请检查你的操作。');
                     break;
-                case CrashReason.ModRequiresJava11:
-                    results.push('某些 Mod 需要 Java 11，请下载安装 Java 11。\n请在启动设置中将 Java 版本切换为 Java 11。');
-                    break;
                 case CrashReason.Unknown:
                     if (additional && additional.length > 0) {
                         results.push(`发现未知错误：${additional[0]}`);
@@ -1155,7 +1152,7 @@ class CrashAnalyzer {
                     }
                     break;
                 default:
-                    results.push(`PCL 检测到崩溃原因：${reason}\n请检查日志文件中的详细信息。`);
+                    results.push(`VersePC 检测到崩溃原因：${reason}\n请检查日志文件中的详细信息。`);
                     break;
             }
         }

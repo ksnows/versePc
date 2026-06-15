@@ -876,7 +876,9 @@ body {
 }
 
 .version-grid-item {
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     padding: 12px 16px;
     border-radius: var(--radius);
     display: flex;
@@ -944,6 +946,7 @@ body {
 
 .tab-group {
     display: flex;
+    flex-wrap: wrap;
     background: var(--bg-tertiary);
     border-radius: var(--radius);
     padding: 2px;
@@ -981,7 +984,9 @@ body {
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    background: var(--bg-card);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border-radius: var(--radius);
     border: 1px solid var(--border);
     transition: all var(--transition);
@@ -1024,6 +1029,14 @@ body {
 }
 
 .version-item-icon.snapshot {
+    background: transparent;
+}
+
+.version-item-icon.special {
+    background: transparent;
+}
+
+.version-item-icon.old {
     background: transparent;
 }
 
@@ -1664,7 +1677,9 @@ body {
     align-items: center;
     gap: 14px;
     padding: 10px 16px;
-    background: var(--bg-card);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border-radius: var(--radius);
     border: 1px solid var(--border);
     transition: border-color 150ms ease, background-color 150ms ease;
@@ -1813,7 +1828,9 @@ body {
 }
 
 .world-item {
-    background: var(--bg-card);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border-radius: var(--radius-lg);
     padding: 16px;
     border: 1px solid var(--border);
@@ -1950,9 +1967,22 @@ body {
     color: var(--text-secondary);
 }
 
+#page-account-detail {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 10;
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
 .acct-detail {
     display: flex;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     overflow: hidden;
     animation: detailSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
@@ -2799,7 +2829,9 @@ body {
     align-items: center;
     gap: 14px;
     padding: 10px 16px;
-    background: var(--bg-card);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border-radius: var(--radius);
     border: 1px solid var(--border);
     cursor: pointer;
@@ -3281,7 +3313,9 @@ body {
     align-items: center;
     justify-content: space-between;
     padding: 10px 12px;
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border-radius: var(--radius);
     border: 1px solid var(--border);
     transition: all var(--transition);
@@ -3416,7 +3450,9 @@ body {
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border-radius: var(--radius);
     border: 1px solid var(--border);
 }
@@ -3491,7 +3527,9 @@ body {
 
 .java-download-item {
     padding: 16px;
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border-radius: var(--radius);
     border: 1px solid var(--border);
     display: flex;
@@ -4379,6 +4417,27 @@ body {
     -webkit-backdrop-filter: blur(10px);
 }
 
+#app.wp-light .mod-item,
+#app.wp-light .modmgr-item,
+#app.wp-light .mod-featured-card,
+#app.wp-light .mdv-group,
+#app.wp-light .version-item,
+#app.wp-light .version-grid-item,
+#app.wp-light .mod-version-item,
+#app.wp-light .loader-card,
+#app.wp-light .lver-item,
+#app.wp-light .ds-item,
+#app.wp-light .dl-task,
+#app.wp-light .download-item,
+#app.wp-light .world-item,
+#app.wp-light .md-dep-item,
+#app.wp-light .java-item,
+#app.wp-light .java-download-item {
+    background: rgba(20, 20, 20, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
 #app.wp-dark .sidebar {
     background: rgba(10, 10, 10, 0.88);
     backdrop-filter: blur(12px) saturate(1.3);
@@ -4442,6 +4501,27 @@ body {
     -webkit-backdrop-filter: blur(10px);
 }
 
+#app.wp-dark .mod-item,
+#app.wp-dark .modmgr-item,
+#app.wp-dark .mod-featured-card,
+#app.wp-dark .mdv-group,
+#app.wp-dark .version-item,
+#app.wp-dark .version-grid-item,
+#app.wp-dark .mod-version-item,
+#app.wp-dark .loader-card,
+#app.wp-dark .lver-item,
+#app.wp-dark .ds-item,
+#app.wp-dark .dl-task,
+#app.wp-dark .download-item,
+#app.wp-dark .world-item,
+#app.wp-dark .md-dep-item,
+#app.wp-dark .java-item,
+#app.wp-dark .java-download-item {
+    background: rgba(10, 10, 10, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
 /* 全景模式下自定义下拉框适配 */
 #app.wp-light .custom-select-dropdown,
 #app.wp-dark .custom-select-dropdown {
@@ -4502,6 +4582,27 @@ body {
     background: var(--bg-card) !important;
 }
 
+[data-no-glass] .mod-item,
+[data-no-glass] .modmgr-item,
+[data-no-glass] .mod-featured-card,
+[data-no-glass] .mdv-group,
+[data-no-glass] .version-item,
+[data-no-glass] .version-grid-item,
+[data-no-glass] .mod-version-item,
+[data-no-glass] .loader-card,
+[data-no-glass] .lver-item,
+[data-no-glass] .ds-item,
+[data-no-glass] .dl-task,
+[data-no-glass] .download-item,
+[data-no-glass] .world-item,
+[data-no-glass] .md-dep-item,
+[data-no-glass] .java-item,
+[data-no-glass] .java-download-item {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background: var(--bg-card) !important;
+}
+
 [data-no-glass] #app.wp-light .sidebar,
 [data-no-glass] #app.wp-dark .sidebar,
 [data-no-glass] #app.wp-light .card,
@@ -4513,7 +4614,39 @@ body {
 [data-no-glass] #app.wp-light .home-hero,
 [data-no-glass] #app.wp-dark .home-hero,
 [data-no-glass] #app.wp-light .toast,
-[data-no-glass] #app.wp-dark .toast {
+[data-no-glass] #app.wp-dark .toast,
+[data-no-glass] #app.wp-light .mod-item,
+[data-no-glass] #app.wp-dark .mod-item,
+[data-no-glass] #app.wp-light .modmgr-item,
+[data-no-glass] #app.wp-dark .modmgr-item,
+[data-no-glass] #app.wp-light .mod-featured-card,
+[data-no-glass] #app.wp-dark .mod-featured-card,
+[data-no-glass] #app.wp-light .mdv-group,
+[data-no-glass] #app.wp-dark .mdv-group,
+[data-no-glass] #app.wp-light .version-item,
+[data-no-glass] #app.wp-dark .version-item,
+[data-no-glass] #app.wp-light .version-grid-item,
+[data-no-glass] #app.wp-dark .version-grid-item,
+[data-no-glass] #app.wp-light .mod-version-item,
+[data-no-glass] #app.wp-dark .mod-version-item,
+[data-no-glass] #app.wp-light .loader-card,
+[data-no-glass] #app.wp-dark .loader-card,
+[data-no-glass] #app.wp-light .lver-item,
+[data-no-glass] #app.wp-dark .lver-item,
+[data-no-glass] #app.wp-light .ds-item,
+[data-no-glass] #app.wp-dark .ds-item,
+[data-no-glass] #app.wp-light .dl-task,
+[data-no-glass] #app.wp-dark .dl-task,
+[data-no-glass] #app.wp-light .download-item,
+[data-no-glass] #app.wp-dark .download-item,
+[data-no-glass] #app.wp-light .world-item,
+[data-no-glass] #app.wp-dark .world-item,
+[data-no-glass] #app.wp-light .md-dep-item,
+[data-no-glass] #app.wp-dark .md-dep-item,
+[data-no-glass] #app.wp-light .java-item,
+[data-no-glass] #app.wp-dark .java-item,
+[data-no-glass] #app.wp-light .java-download-item,
+[data-no-glass] #app.wp-dark .java-download-item {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
 }
@@ -4700,7 +4833,9 @@ body {
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     cursor: pointer;
@@ -4757,7 +4892,9 @@ body {
     align-items: center;
     gap: 12px;
     padding: 14px 16px;
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     cursor: pointer;
@@ -4857,7 +4994,9 @@ body {
     align-items: center;
     gap: 12px;
     padding: 11px 14px;
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     cursor: pointer;
@@ -6428,7 +6567,9 @@ body {
     gap: 10px;
     padding: 8px 12px;
     border-radius: 8px;
-    background: var(--bg-tertiary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     cursor: pointer;
     transition: background 0.15s;
@@ -6565,6 +6706,9 @@ body {
 }
 
 .mdv-group {
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
@@ -7185,6 +7329,9 @@ body {
     align-items: center;
     gap: 12px;
     padding: 10px 14px;
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     margin-bottom: 6px;
@@ -8050,7 +8197,9 @@ body {
     align-items: center;
     gap: 12px;
     padding: 10px 14px;
-    background: var(--bg-secondary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: var(--radius, 8px);
     margin-bottom: 6px;
@@ -8127,7 +8276,9 @@ body {
     padding: 0 4px;
 }
 .dl-task {
-    background: var(--bg-secondary);
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
@@ -10096,7 +10247,7 @@ body {
 .rc-welcome p { font-size:13px; color:var(--ai-text-muted); margin:0; }
 .rc-input-centered { position:fixed !important; left:50%; bottom:60px; transform:translateX(-50%); width:min(600px,80%); z-index:10; transition:all 0.3s cubic-bezier(0.4,0,0.2,1); }
 .rc-input-centered .rc-input-container { border-radius:16px; box-shadow:0 4px 24px rgba(0,0,0,0.08); }
-.rc-input-centered .rc-input-context-bar { display:none; }
+.rc-input-centered .rc-input-context-bar { position:absolute; bottom:-36px; left:0; right:0; display:flex; justify-content:center; background:transparent; border:none; padding:0; }
 .rc-quick-prompts { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; justify-content:center; }
 .rc-quick-btn { padding:6px 14px; background:var(--ai-bg-tertiary); border:1px solid var(--ai-border); border-radius:16px; color:var(--ai-text-secondary); font-size:12px; cursor:pointer; transition:all var(--ai-transition); }
 .rc-quick-btn:hover { border-color:var(--ai-accent); color:var(--ai-accent); background:rgba(var(--ai-accent-rgb),0.08); }
@@ -10155,7 +10306,7 @@ body {
 .rc-send-btn:disabled { background:rgba(128,128,128,0.3); color:rgba(255,255,255,0.3); cursor:not-allowed; }
 .rc-stop-btn { display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; background:var(--ai-error, #c72e0f); border:none; border-radius:50%; color:white; cursor:pointer; transition:background-color 0.2s ease-out; padding:0; flex-shrink:0; }
 .rc-stop-btn:hover { background:color-mix(in srgb, var(--ai-error, #c72e0f) 85%, black); }
-.rc-input-context-bar { display:flex; align-items:center; justify-content:space-between; padding:6px 4px 2px; }
+.rc-input-context-bar { display:flex; align-items:center; justify-content:space-between; padding:6px 4px 2px; position:relative; z-index:1; }
 .rc-context-left, .rc-context-right { display:flex; align-items:center; gap:2px; }
 .rc-context-item { display:inline-flex; align-items:center; gap:4px; padding:3px 8px; background:transparent; border:none; border-radius:6px; color:var(--ai-text-muted); font-size:12px; cursor:pointer; transition:background 0.15s ease, color 0.15s ease; font-family:var(--ai-font); white-space:nowrap; height:26px; }
 .rc-context-item:hover { background:var(--ai-bg-hover); color:var(--ai-text-secondary); }
@@ -12001,6 +12152,7 @@ body {
 .ai-file-ops-status { flex: 1; font-size: 12px; color: var(--ai-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ai-file-ops-status.done { color: var(--ai-success, #22c55e); }
 .ai-file-ops-status.error { color: var(--ai-error, #ef4444); }
+.ai-snapshot-badge { font-size: 10px; color: var(--ai-info, #3b82f6); background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.2); border-radius: 4px; padding: 1px 6px; margin-left: 6px; white-space: nowrap; line-height: 16px; letter-spacing: 0.3px; }
 .ai-file-ops-content { padding-left: 36px; max-height: 0; overflow: hidden; transition: max-height 0.3s cubic-bezier(0.4,0,0.2,1), opacity 0.2s ease, padding 0.3s ease; opacity: 0; background: rgba(0,0,0,0.15); border-radius: 4px; margin: 0 8px; }
 .ai-file-ops-content.open { max-height: 1200px; opacity: 1; padding: 6px 10px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--ai-border, #3e3e42) transparent; }
 .ai-file-ops-content pre { margin: 0; font-size: 12px; font-family: var(--ai-font-mono, monospace); color: var(--ai-text-secondary); white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
@@ -14096,3 +14248,9 @@ body {
     fill: none;
     stroke: #999;
 }
+.ai-status-bar { display:flex; align-items:center; gap:6px; padding:4px 12px; border-top:1px solid var(--ai-border,rgba(255,255,255,0.06)); background:var(--ai-bg-secondary,rgba(0,0,0,0.15)); font-size:11px; font-family:var(--ai-font); user-select:none; overflow-x:auto; }
+.ai-status-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:4px; background:var(--ai-bg-tertiary,rgba(255,255,255,0.05)); color:var(--ai-text-secondary,#aaa); white-space:nowrap; }
+.ai-status-chip-right { margin-left:auto; }
+.ai-status-chip[data-state="thinking"] { color:#64b5f6; }
+.ai-status-chip[data-state="running"] { color:#ffb74d; }
+.ai-status-chip[data-state="generating"] { color:#81c784; }

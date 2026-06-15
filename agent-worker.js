@@ -93,16 +93,16 @@ function execToolViaMain(name, argsStr) {
     });
 }
 
-function requestApprovalViaMain(toolName, argsStr) {
+function requestApprovalViaMain(toolName, argsStr, escalatedRisk, dangerousInfo) {
     return new Promise((resolve) => {
         const aid = `apv_${Date.now().toString(36)}_${Math.random().toString(36).substr(2, 6)}`;
-        const risk = TOOL_RISK[toolName] || 'moderate';
+        const risk = escalatedRisk || TOOL_RISK[toolName] || 'moderate';
         const timer = setTimeout(() => {
             pendingApprovals.delete(aid);
             resolve({ approved: false, toolName, timeout: true });
         }, 60000);
         pendingApprovals.set(aid, { resolve, timer, toolName });
-        parentPort.postMessage({ type: 'approval_request', approvalId: aid, toolName, risk, args: argsStr });
+        parentPort.postMessage({ type: 'approval_request', approvalId: aid, toolName, risk, args: argsStr, dangerous: dangerousInfo || null });
     });
 }
 
@@ -163,7 +163,8 @@ function translateChunk(processed) {
                         id: c.id,
                         name: c.name,
                         displayName: c.displayName || c.name,
-                        arguments: c.args || ''
+                        arguments: c.args || '',
+                        snapshot: !!c.snapshot
                     }));
                     return { type: 'tool_calls_start', calls: mapped };
                 } catch (e) {
@@ -174,7 +175,7 @@ function translateChunk(processed) {
                 try {
                     const parsed = JSON.parse(text);
                     if (parsed.error) {
-                        return { type: 'tool_call_result', id: parsed.id, name: parsed.name, error: true, result: parsed.error };
+                        return { type: 'tool_call_result', id: parsed.id, name: parsed.name, error: true, result: parsed.error, snapshot: !!parsed.snapshot };
                     }
                     return {
                         type: 'tool_call_result',
@@ -182,7 +183,8 @@ function translateChunk(processed) {
                         name: parsed.name,
                         displayName: parsed.displayName || parsed.name,
                         result: parsed.result,
-                        elapsed: parsed.elapsed
+                        elapsed: parsed.elapsed,
+                        snapshot: !!parsed.snapshot
                     };
                 } catch (e) {
                     return { type: 'tool_call_result', id: '', name: '', result: text };
@@ -257,9 +259,9 @@ engine = new AgentEngine({
         const chunk = translateChunk(processed);
         if (chunk) sendChunk(chunk);
     },
-    onRequestApproval(toolName, argsStr) {
-        aiLog('APPROVAL', { toolName });
-        return requestApprovalViaMain(toolName, argsStr);
+    onRequestApproval(toolName, argsStr, escalatedRisk, dangerousInfo) {
+        aiLog('APPROVAL', { toolName, escalatedRisk, dangerous: !!dangerousInfo });
+        return requestApprovalViaMain(toolName, argsStr, escalatedRisk, dangerousInfo);
     },
     onAskUser(question, options, context) {
         return askUserViaMain(question, options, context);
@@ -277,7 +279,10 @@ parentPort.on('message', (msg) => {
         switch (msg.type) {
             case 'start':
                 aborted = false;
-                aiLog('START', { model: msg.params?.model, tools: msg.params?.tools?.length || 0, msgs: msg.params?.messages?.length || 0 });
+                if (msg.params && msg.params.currentMode) {
+                    engine._currentMode = msg.params.currentMode;
+                }
+                aiLog('START', { model: msg.params?.model, tools: msg.params?.tools?.length || 0, msgs: msg.params?.messages?.length || 0, mode: engine._currentMode });
                 engine.processChat(msg.params).then(() => {
                     aiLog('DONE', 'processChat completed');
                     parentPort.postMessage({ type: 'done' });

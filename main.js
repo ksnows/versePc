@@ -31,6 +31,16 @@
  */
 
 // ============================================================================
+// 单实例锁 - 必须在所有初始化之前执行，防止重复启动导致闪窗口
+// 参考 PCL2 SingleInstanceService 的设计：第二个实例立即退出，让第一个实例接管
+// ============================================================================
+const { app } = require('electron');
+const gotTheLockEarly = app.requestSingleInstanceLock();
+if (!gotTheLockEarly) {
+    process.exit(0);
+}
+
+// ============================================================================
 // V8 Code Cache - 首次启动后缓存编译结果，后续启动提速 40-60%
 // ============================================================================
 try {
@@ -38,6 +48,25 @@ try {
     const cacheDir = require('path').join(require('os').tmpdir(), 'versepc-v8-cache');
     try { require('fs').mkdirSync(cacheDir, { recursive: true }); } catch (e) {}
     v8.setFlagsFromString('--compile-cache-dir=' + cacheDir);
+} catch (e) {}
+
+// ============================================================================
+// V8 内存上限 - 根据系统内存动态设置，防止渲染进程 OOM 崩溃
+// 参考 PCL2 的内存分配策略：根据可用内存分级配置
+// ============================================================================
+try {
+    const osMod = require('os');
+    const totalMemMB = Math.floor(osMod.totalmem() / 1024 / 1024);
+    let rendererHeapMB;
+    if (totalMemMB <= 4096) rendererHeapMB = 768;
+    else if (totalMemMB <= 8192) rendererHeapMB = 1024;
+    else if (totalMemMB <= 16384) rendererHeapMB = 1536;
+    else rendererHeapMB = 2048;
+    process.env.ELECTRON_RENDERER_V8_HEAP_SIZE = String(rendererHeapMB);
+    try {
+        const v8 = require('v8');
+        v8.setFlagsFromString('--max-old-space-size=' + rendererHeapMB);
+    } catch (e) {}
 } catch (e) {}
 
 // ============================================================================
@@ -70,7 +99,8 @@ try {
 // ============================================================================
 // 模块导入
 // ============================================================================
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog, screen, protocol, clipboard, net, session } = require('electron');
+// 注意：app 在第 37 行单实例锁中已解构，这里只补齐其余模块
+const { BrowserWindow, Menu, shell, ipcMain, dialog, screen, protocol, clipboard, net, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -349,11 +379,44 @@ function createWindow() {
     }, 8000);
     mainWindow.webContents.once('did-finish-load', () => clearTimeout(_gpuWatchdog));
 
-    // 渲染进程崩溃检测
+    // 渲染进程崩溃检测 - 参考 PCL2 的崩溃处理策略
+    let rendererCrashRetries = 0;
+    const MAX_RENDERER_RETRIES = 2;
     mainWindow.webContents.on('render-process-gone', (event, details) => {
-        console.error('[Renderer] Process gone:', details.reason);
+        const reason = details.reason || 'unknown';
+        const exitCode = details.exitCode || -1;
+        console.error(`[Renderer] Process gone: reason=${reason}, exitCode=${exitCode}`);
+
+        const osMod = require('os');
+        const freeMB = Math.floor(osMod.freemem() / 1024 / 1024);
+        const totalMB = Math.floor(osMod.totalmem() / 1024 / 1024);
+        const usedPct = Math.round(((totalMB - freeMB) / totalMB) * 100);
+
+        if (reason === 'oom' && rendererCrashRetries < MAX_RENDERER_RETRIES) {
+            rendererCrashRetries++;
+            console.log(`[Renderer] OOM 崩溃, 尝试自动恢复 (${rendererCrashRetries}/${MAX_RENDERER_RETRIES})`);
+            try {
+                if (process.platform === 'win32') {
+                    const { execSync } = require('child_process');
+                    execSync('powershell -NoProfile -Command "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"', { timeout: 3000, windowsHide: true });
+                }
+            } catch (e) {}
+            setTimeout(() => {
+                try { mainWindow.webContents.reload(); } catch (e) {}
+            }, 1500);
+            return;
+        }
+
+        rendererCrashRetries = 0;
+        const reasonText = reason === 'oom'
+            ? `内存不足 (系统内存使用 ${usedPct}%，剩余 ${freeMB}MB/${totalMB}MB)`
+            : `渲染进程异常退出: ${reason} (code: ${exitCode})`;
+        const suggestion = reason === 'oom'
+            ? '建议关闭其他程序释放内存，或在设置中减少分配给游戏的内存'
+            : '请尝试重启启动器';
+
         mainWindow.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
-            '<html><body style="background:#0a0a0a;color:#e5e5e5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>VersePC 崩溃</h2><p>渲染进程异常退出: ' + (details.reason || 'unknown') + '</p><p style="margin-top:20px"><button onclick="location.reload()" style="padding:8px 16px;border:1px solid #555;border-radius:6px;background:transparent;color:#e5e5e5;cursor:pointer">重新加载</button></p></div></body></html>'
+            '<!DOCTYPE html><html><head><meta charset="utf-8"><title>VersePC 崩溃</title></head><body style="background:#0a0a0a;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center;max-width:500px;padding:20px"><h2 style="margin-bottom:16px">VersePC 崩溃</h2><p style="color:#ccc;margin-bottom:8px">' + reasonText + '</p><p style="color:#888;font-size:13px;margin-bottom:24px">' + suggestion + '</p><div style="display:flex;gap:12px;justify-content:center"><button onclick="location.reload()" style="padding:10px 24px;border:1px solid #555;border-radius:8px;background:transparent;color:#e5e5e5;cursor:pointer;font-size:14px">重新加载</button><button onclick="require(\'electron\').ipcRenderer.send(\'relaunch-app\')" style="padding:10px 24px;border:1px solid #0066cc;border-radius:8px;background:#0066cc;color:white;cursor:pointer;font-size:14px">重启启动器</button></div></div></body></html>'
         ));
     });
 
@@ -527,6 +590,11 @@ ipcMain.on('window-maximize', () => {
 
 ipcMain.on('window-close', () => {
     if (mainWindow) mainWindow.close();
+});
+
+ipcMain.on('relaunch-app', () => {
+    app.relaunch();
+    app.exit(0);
 });
 
 ipcMain.handle('window-is-maximized', async () => {
@@ -1201,20 +1269,25 @@ app.on('gpu-info-update', () => {
 });
 
 // ============================================================================
-// 单实例锁 - 防止崩溃后残留进程导致新实例黑屏
+// 单实例锁的第二阶段：second-instance 事件处理（仅在拿到锁的实例中注册）
+// 单实例锁检查已上移到文件最早期（line 33-41），此处只注册事件处理器
 // ============================================================================
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-    console.log('[App] Another instance is running, quitting');
-    app.quit();
-} else {
-    app.on('second-instance', () => {
-        if (mainWindow) {
-            if (mainWindow.isMinimized()) mainWindow.restore();
+app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        if (!mainWindow.isVisible()) mainWindow.show();
+        if (mainWindow.isFullScreen()) {
+        } else {
             mainWindow.focus();
         }
-    });
-}
+        if (process.platform === 'win32') {
+            try { mainWindow.flashFrame(true); setTimeout(() => { try { mainWindow.flashFrame(false); } catch (e) {} }, 800); } catch (e) {}
+        }
+        mainWindow.moveTop();
+    } else {
+        if (typeof createWindow === 'function') createWindow();
+    }
+});
 
 // ============================================================================
 // 应用就绪 - Electron 启动完成后的初始化流程
@@ -1224,22 +1297,25 @@ app.whenReady().then(async () => {
         console.log('VersePC starting...');
 
         // 启动时清理可能残留的旧进程（崩溃后重启的情况）
+        // 由于单实例锁已上移到文件最早期，这里只会作为第一个实例执行
+        // 进一步加强保护：检查进程的父进程，只有真正孤立的 zombie 才杀
         if (process.platform === 'win32') {
             try {
                 const { execSync } = require('child_process');
                 const myPid = process.pid;
-                const pids = execSync(
-                    `wmic process where "name='VersePC.exe' and ProcessId!=${myPid}" get ProcessId /format:value 2>nul`,
+                const allVersePcPids = execSync(
+                    `wmic process where "name='VersePC.exe'" get ProcessId,ParentProcessId,CommandLine /format:csv 2>nul`,
                     { encoding: 'utf8', timeout: 5000 }
                 );
-                const oldPids = pids.match(/ProcessId=(\d+)/g);
-                if (oldPids) {
-                    for (const m of oldPids) {
-                        const pid = parseInt(m.split('=')[1]);
-                        if (pid && pid !== myPid) {
-                            try { process.kill(pid); console.log('[App] Killed zombie process:', pid); } catch (e) {}
-                        }
-                    }
+                const lines = allVersePcPids.split('\n').filter(l => l.trim() && !l.startsWith('Node'));
+                for (const line of lines) {
+                    const parts = line.split(',');
+                    if (parts.length < 4) continue;
+                    const pid = parseInt(parts[parts.length - 2]);
+                    const ppid = parseInt(parts[parts.length - 1]);
+                    if (!pid || pid === myPid) continue;
+                    if (ppid && ppid !== 0) continue;
+                    try { process.kill(pid); console.log('[App] Killed zombie process:', pid); } catch (e) {}
                 }
             } catch (e) {}
         }
@@ -1690,11 +1766,26 @@ function isPathAllowed(filePath) {
 function registerModsIPC() {
     ipcMain.handle("dialog:select-folder", async (event, { title, defaultPath }) => {
         try {
+            let resolvedDefault = defaultPath || '';
+            if (resolvedDefault) {
+                try {
+                    if (!fs.existsSync(resolvedDefault)) {
+                        fs.mkdirSync(resolvedDefault, { recursive: true });
+                    }
+                } catch (e) {
+                    let fallback = path.dirname(resolvedDefault);
+                    while (fallback && fallback !== path.dirname(fallback)) {
+                        if (fs.existsSync(fallback)) { resolvedDefault = fallback; break; }
+                        fallback = path.dirname(fallback);
+                    }
+                    if (!resolvedDefault || !fs.existsSync(resolvedDefault)) resolvedDefault = '';
+                }
+            }
             const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
             const result = await dialog.showOpenDialog(win, {
                 properties: ['openDirectory'],
                 title: title || '选择文件夹',
-                defaultPath: defaultPath || undefined
+                defaultPath: resolvedDefault || undefined
             });
             if (result.canceled || !result.filePaths.length) {
                 return { cancelled: true };
@@ -2295,7 +2386,10 @@ function initAutoUpdater() {
             const updateInfo = await fetchUpdateJson();
             if (!updateInfo) {
                 console.log('[Updater] No update info available');
-                sendToUpdateUI('update-not-available', { version: app.getVersion() });
+                sendToUpdateUI('update-error', {
+                    message: '无法获取更新信息，请检查网络连接后重试',
+                    hint: '可尝试使用 VPN 或稍后再试'
+                });
                 return;
             }
 
@@ -2321,6 +2415,10 @@ function initAutoUpdater() {
             showUpdateNotification(updateInfo);
         } catch (e) {
             console.error('[Updater] Check failed:', e.message);
+            sendToUpdateUI('update-error', {
+                message: e.message || '检查更新失败',
+                hint: '可尝试使用 VPN 或稍后再试'
+            });
         }
     }, 3000);
 }
@@ -5344,7 +5442,14 @@ ${JSON.stringify(toTranslate, null, 2)}`;
                         const filter = {};
                         if (args.tool_name) filter.toolName = args.tool_name;
                         const logs = ChangeTracker.getAuditLog(filter);
-                        return JSON.stringify({ logs: logs.slice(0, limit), total: logs.length });
+                        let persistedLogs = [];
+                        try {
+                            const logPath = path.join(os.homedir(), '.versepc', 'ai-tool-log.json');
+                            persistedLogs = JSON.parse(fs.readFileSync(logPath, 'utf-8'));
+                            if (filter.toolName) persistedLogs = persistedLogs.filter(l => l.tool === filter.toolName);
+                        } catch (_) {}
+                        const merged = [...persistedLogs.reverse(), ...logs].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                        return JSON.stringify({ logs: merged.slice(0, limit), total: merged.length });
                     }
                     if (action === 'summary') {
                         return JSON.stringify(ChangeTracker.getSessionSummary());
@@ -5803,6 +5908,47 @@ ${JSON.stringify(toTranslate, null, 2)}`;
         }
     });
 
+    ipcMain.handle('skills:list', async () => {
+        const fs = require('fs');
+        const path = require('path');
+        const skillsDir = path.join(app.getPath('home'), '.versepc', 'skills');
+        if (!fs.existsSync(skillsDir)) return [];
+        const entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+        const skills = [];
+        for (const entry of entries) {
+            if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+                const filePath = path.join(skillsDir, entry.name);
+                const content = fs.readFileSync(filePath, 'utf-8');
+                const nameMatch = content.match(/^#\s+(.+)/m);
+                const descMatch = content.match(/^(?:描述|description|## 描述|## Description)[:\s]*(.+)/mi);
+                skills.push({
+                    name: nameMatch ? nameMatch[1].trim() : entry.name.replace(/\.md$/i, ''),
+                    description: descMatch ? descMatch[1].trim().slice(0, 100) : '',
+                    file: entry.name
+                });
+            }
+        }
+        return skills;
+    });
+
+    ipcMain.handle('skills:get', async (event, name) => {
+        const fs = require('fs');
+        const path = require('path');
+        const skillsDir = path.join(app.getPath('home'), '.versepc', 'skills');
+        if (!fs.existsSync(skillsDir)) return null;
+        const files = fs.readdirSync(skillsDir);
+        const match = files.find(f => f.toLowerCase() === `${name.toLowerCase()}.md`) ||
+                      files.find(f => f.toLowerCase().startsWith(name.toLowerCase()));
+        if (!match) return null;
+        const content = fs.readFileSync(path.join(skillsDir, match), 'utf-8');
+        const nameMatch = content.match(/^#\s+(.+)/m);
+        return {
+            name: nameMatch ? nameMatch[1].trim() : name,
+            content,
+            file: match
+        };
+    });
+
     ipcMain.handle('ai:set-permission-mode', async (event, { mode }) => {
         if (!PERMISSION_MODES[mode]) return { error: `无效的权限模式: ${mode}` };
         currentPermissionMode = mode;
@@ -5861,25 +6007,56 @@ ${JSON.stringify(toTranslate, null, 2)}`;
 
     const autoApproveCache = new Map();
 
+    const _DANGEROUS_PATTERNS = [
+        { pattern: /\brm\s+(-[a-zA-Z]*[rf]|-[a-zA-Z]*f[a-zA-Z]*r)\s+[\/~*]/i, label: '递归删除根目录/主目录/通配符' },
+        { pattern: /\bsudo\s+rm\b/i, label: 'sudo 提权删除' },
+        { pattern: /\bsudo\s+mv\s+\//i, label: 'sudo 移动根目录文件' },
+        { pattern: /\bchmod\s+777\s+\//i, label: '开放根目录权限' },
+        { pattern: /\bformat\s+[a-zA-Z]:/i, label: '格式化磁盘' },
+        { pattern: /\bdel\s+\/[sS]\b/, label: '递归删除文件' },
+        { pattern: /\brd\s+\/[sS]\b/, label: '递归删除目录' },
+        { pattern: /\bmkfs\b/i, label: '创建文件系统（格式化）' },
+        { pattern: /\bshutdown\b|\breboot\b|\binit\s+0\b/i, label: '关机/重启系统' },
+        { pattern: /\breg\s+delete\b/i, label: '删除注册表项' },
+        { pattern: /\bnet\s+user\s+.*\/delete\b/i, label: '删除系统用户' },
+    ];
+
+    function _checkDangerousBash(toolName, args) {
+        if (toolName !== 'bash') return null;
+        const cmd = (typeof args === 'string' ? (() => { try { return JSON.parse(args); } catch(e) { return {}; } })() : args)?.command || '';
+        if (!cmd) return null;
+        for (const { pattern, label } of _DANGEROUS_PATTERNS) {
+            if (pattern.test(cmd)) return { dangerous: true, reason: label };
+        }
+        if (/(?:rm|del|rd|rmdir|mv|move)\s+[^\s]*(?:C:\\Windows|C:\\Program\s*Files|\/etc|\/usr|\/bin|\/sbin)/i.test(cmd)) {
+            return { dangerous: true, reason: '修改系统目录' };
+        }
+        return null;
+    }
+
     async function requestApproval(event, toolName, args) {
         const permission = getToolPermission(toolName);
         if (permission === 'allow') return { approved: true };
         if (permission === 'deny') return { approved: false, toolName, reason: `工具 ${toolName} 在当前权限模式下被禁止` };
 
-        const config = TOOL_CONFIG[toolName] || { risk: 'safe' };
-        if (config.risk === 'safe') return { approved: true };
+        const dangerous = _checkDangerousBash(toolName, args);
+        let effectiveRisk = (TOOL_CONFIG[toolName] || { risk: 'safe' }).risk;
+        if (dangerous) effectiveRisk = 'dangerous';
+
+        if (effectiveRisk === 'safe') return { approved: true };
 
         if (autoApproveCache.has(toolName)) {
             if (autoApproveCache.get(toolName)) return { approved: true };
         }
 
         const approvalId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        const autoDenyMs = effectiveRisk === 'dangerous' ? 120000 : 30000;
 
         return new Promise((resolve) => {
             const timeout = setTimeout(() => {
                 pendingApprovals.delete(approvalId);
                 resolve({ approved: false, toolName });
-            }, 60000);
+            }, autoDenyMs);
             pendingApprovals.set(approvalId, {
                 resolve: (result) => { clearTimeout(timeout); resolve(result); },
                 toolName, win: event.sender
@@ -5888,8 +6065,10 @@ ${JSON.stringify(toTranslate, null, 2)}`;
                 type: 'approval_requested',
                 approvalId,
                 toolName,
-                risk: config.risk,
+                risk: effectiveRisk,
                 args,
+                dangerous: dangerous || null,
+                autoDenyMs,
                 autoApproved: autoApproveCache.has(toolName)
             });
         });
@@ -6199,9 +6378,9 @@ ${toolDescriptions}
                         }
                         case 'approval_request':
                             {
-                                const { approvalId, toolName, risk, args } = msg;
-                                const config = TOOL_CONFIG[toolName] || { risk: 'safe' };
-                                if (config.risk === 'safe') {
+                                const { approvalId, toolName, risk, args, dangerous } = msg;
+                                const effectiveRisk = risk || (TOOL_CONFIG[toolName] || {}).risk || 'safe';
+                                if (effectiveRisk === 'safe') {
                                     if (activeWorker) {
                                         activeWorker.postMessage({ type: 'approval_response', approvalId, approved: true, toolName });
                                     }
@@ -6229,6 +6408,7 @@ ${toolDescriptions}
                                 };
                                 pendingApprovals.set(approvalId, pendingRecord);
 
+                                const autoDenyMs = effectiveRisk === 'dangerous' ? 120000 : 30000;
                                 const timeout = setTimeout(() => {
                                     pendingApprovals.delete(approvalId);
                                     if (activeWorker) {
@@ -6239,15 +6419,17 @@ ${toolDescriptions}
                                             toolName
                                         });
                                     }
-                                }, 60000);
+                                }, autoDenyMs);
                                 pendingRecord.timeout = timeout;
 
                                 event.sender.send('ai:chat-chunk', {
                                     type: 'approval_requested',
                                     approvalId,
                                     toolName,
-                                    risk,
-                                    args
+                                    risk: effectiveRisk,
+                                    args,
+                                    dangerous: dangerous || null,
+                                    autoDenyMs
                                 });
                             }
                             break;
@@ -6713,8 +6895,11 @@ function registerUpdaterIPC() {
             sendToUpdateUI('checking-for-update');
             const updateInfo = await fetchUpdateJson();
             if (!updateInfo) {
-                sendToUpdateUI('update-not-available', { version: app.getVersion() });
-                return { available: false };
+                sendToUpdateUI('update-error', {
+                    message: '无法获取更新信息，请检查网络连接后重试',
+                    hint: '可尝试使用 VPN 或稍后再试'
+                });
+                return { available: false, error: '无法获取更新信息' };
             }
             const currentVersion = app.getVersion();
             if (compareVersions(updateInfo.version, currentVersion) > 0) {
@@ -6730,7 +6915,7 @@ function registerUpdaterIPC() {
             sendToUpdateUI('update-not-available', { version: currentVersion });
             return { available: false, version: currentVersion };
         } catch (e) {
-            sendToUpdateUI('update-error', { message: e.message });
+            sendToUpdateUI('update-error', { message: e.message || '检查更新失败' });
             return { available: false, error: e.message };
         }
     });

@@ -233,7 +233,8 @@ const API = {
     // === 游戏版本管理 ===
     getVersions: (refresh = false) => apiGet('/api/versions', { refresh: refresh ? 'true' : '' }),
     getVersionDetails: (url) => apiGet('/api/version-details', { url }),
-    deleteVersion: (versionId) => apiPost('/api/version/delete', { versionId }),
+    deleteVersion: (versionId, permanent) => apiPost('/api/version/delete', { versionId, permanent: !!permanent }),
+    getDeleteChain: (versionId) => apiPost('/api/version/delete-chain', { versionId }),
     renameVersion: (versionId, newName) => apiPost('/api/version/rename', { versionId, newName }),
     deleteVersionById: (versionId) => apiPost('/api/version/delete', { versionId }),
     openVersionFolder: (versionId, folderType) => apiGet('/api/version/open-folder', { versionId, folderType }),
@@ -252,7 +253,7 @@ const API = {
 
     // === 模组管理 ===
     getInstalledMods: () => apiGet('/api/mods'),
-    searchMods: (query, source = 'modrinth', loader = '', version = '', category = '', sort = 'relevance', limit = 15, offset = 0) =>
+    searchMods: (query, source = 'any', loader = '', version = '', category = '', sort = 'relevance', limit = 15, offset = 0) =>
         apiGet('/api/mods/search', { query, source, loader, version, category, sort, limit, offset }),
     downloadMod: (projectId, source = 'modrinth', loader = '', mcVersion = '') =>
         apiPost('/api/mods/download', { projectId, source, loader, mcVersion }),
@@ -269,9 +270,9 @@ const API = {
     },
     getModCategories: (source = 'modrinth') => apiGet('/api/mods/categories', { source }),
     getFeaturedMods: (loader = '', gameVersion = '') => apiGet('/api/mods/featured', { loader, gameVersion }),
-    toggleMod: (modId, enabled) => apiPost('/api/mods/toggle', { modId, enabled }),
+    toggleMod: (modId, enabled, versionId) => apiPost('/api/mods/toggle', { modId, enabled, versionId }),
     deleteMod: (modId) => apiPost('/api/mods/delete', { modId }),
-    toggleModForVersion: (modId, enabled) => apiPost('/api/mods/toggle', { modId, enabled }),
+    toggleModForVersion: (modId, enabled, versionId) => apiPost('/api/mods/toggle', { modId, enabled, versionId }),
     getVersionMods: (versionId) => apiGet('/api/mods/installed', { versionId }),
     selectModFile: () => apiGet('/api/mods/select-file'),
     selectModpackFile: () => apiGet('/api/mods/select-modpack-file'),
@@ -346,8 +347,9 @@ const API = {
         apiPost('/api/optifine/install', { gameVersion, optifineType }),
 
     // === 游戏启动与生命周期 ===
-    launchGame: (versionId) => apiPost('/api/launch', { versionId }),
-    launchCheck: (versionId) => apiPost('/api/launch/check', { versionId }),
+    launchGame: (versionId, options) => apiPost('/api/launch', { versionId, ...(options || {}) }),
+    cancelLaunch: () => apiPost('/api/launch/cancel'),
+    launchCheck: (versionId, externalVersionDir) => apiPost('/api/launch/check', { versionId, externalVersionDir }),
     getLaunchArgsPreview: (versionId) => apiPost('/api/launch/args-preview', { versionId }),
     checkLaunchDeps: (versionId) => apiPost('/api/launch/check', { versionId }),
     downloadLaunchDeps: (versionId, sessionId) =>
@@ -356,6 +358,8 @@ const API = {
     getGameStatus: () => apiGet('/api/game/status'),
     stopGame: () => apiPost('/api/game/stop'),
     stopGameInstance: (sessionId) => apiPost('/api/game/stop', { sessionId }),
+    cleanupScan: () => apiPost('/api/cleanup/scan'),
+    cleanupRun: () => apiPost('/api/cleanup'),
     getGameLog: (count = 100, offset = 0) => apiGet('/api/game/log', { count, offset }),
     getGameLogBySession: (sessionId, count = 100, offset = 0) =>
         apiGet('/api/game/log', { count, offset, sessionId }),
@@ -415,6 +419,7 @@ const API = {
         apiPost('/api/java/auto-install', { requiredVersion }),
     getJavaDownloadSources: () => apiGet('/api/java/download-sources'),
     downloadJava: (majorVersion) => apiPost('/api/java/download', { majorVersion }),
+    cancelJavaDownload: (sessionId) => apiPost('/api/java/cancel', { sessionId }),
     getJavaDownloadStatus: (sessionId) =>
         apiGet('/api/java/download-status', { sessionId }),
     configureJavaEnv: (javaHome, majorVersion) =>

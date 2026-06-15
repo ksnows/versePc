@@ -38,6 +38,7 @@
 // ============================================================================
 const http = require('http');
 const https = require('https');
+const http2 = require('http2');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
@@ -45,6 +46,7 @@ const crypto = require('crypto');
 const { execSync, exec, spawn } = require('child_process');
 const os = require('os');
 const zlib = require('zlib');
+const PKG_VERSION = require('./package.json').version;
 
 function fetchWithProtocol(targetUrl, options = {}) {
     const mod = targetUrl.startsWith('https') ? https : http;
@@ -193,7 +195,9 @@ setInterval(() => { dirCache.clear(); }, 5 * 60 * 1000);
 
 const DATA_DIR = path.join(os.homedir(), '.versepc');
 const APP_DATA_PATH = DATA_DIR;
-const MINECRAFT_DIR = path.join(os.homedir(), '.minecraft');
+const MINECRAFT_DIR = process.platform === 'win32'
+    ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), '.minecraft')
+    : path.join(os.homedir(), '.minecraft');
 const VERSIONS_DIR = path.join(DATA_DIR, 'versions');
 const LIBRARIES_DIR = path.join(DATA_DIR, 'libraries');
 const ASSETS_DIR = path.join(DATA_DIR, 'assets');
@@ -226,6 +230,28 @@ function getSafeJavaDir() {
 const JAVA_DIR = getSafeJavaDir();
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
 const ICON_CACHE_DIR = path.join(DATA_DIR, 'cache', 'mod-icons');
+
+function rotateLogs() {
+    try {
+        if (!fs.existsSync(LOGS_DIR)) return;
+        const MAX_LOG_FILES = 16;
+        const MAX_LOG_SIZE = 32 * 1024 * 1024;
+        const files = fs.readdirSync(LOGS_DIR)
+            .filter(f => f.endsWith('.log') || f.endsWith('.json'))
+            .map(f => {
+                const p = path.join(LOGS_DIR, f);
+                try { const s = fs.statSync(p); return { path: p, time: s.mtimeMs, size: s.size }; } catch (_) { return null; }
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.time - b.time);
+        for (const f of files) {
+            if (f.size > MAX_LOG_SIZE) { try { fs.unlinkSync(f.path); } catch (_) {} }
+        }
+        const remaining = files.filter(f => { try { return fs.existsSync(f.path); } catch (_) { return false; } });
+        while (remaining.length > MAX_LOG_FILES) { try { fs.unlinkSync(remaining.shift().path); } catch (_) {} }
+    } catch (_) {}
+}
+rotateLogs();
 const FAVORITES_FILE = path.join(DATA_DIR, 'favorites.json');
 
 function generateUUID() {
@@ -287,19 +313,13 @@ const BMCLAPI_MIRROR = {
     'https://maven.minecraftforge.net/': 'https://bmclapi2.bangbang93.com/maven/',
     'https://maven.neoforged.net/': 'https://bmclapi2.bangbang93.com/maven/',
     'https://maven.fabricmc.net/': 'https://bmclapi2.bangbang93.com/maven/',
-    'https://cdn.modrinth.com/': 'https://mod.mcimirror.top/',
-    'https://edge.forgecdn.net/': 'https://mod.mcimirror.top/',
-    'https://mediafilez.forgecdn.net/': 'https://mod.mcimirror.top/',
-    'https://media.forgecdn.net/': 'https://mod.mcimirror.top/',
+    'https://cdn.modrinth.com/': 'https://mod.mcimirror.top/modrinth/',
+    'https://edge.forgecdn.net/': 'https://mod.mcimirror.top/curseforge/',
+    'https://mediafilez.forgecdn.net/': 'https://mod.mcimirror.top/curseforge/',
+    'https://media.forgecdn.net/': 'https://mod.mcimirror.top/curseforge/',
 };
 
 const MCIM_MIRROR = {
-    'https://piston-data.mojang.com/': 'https://download.mcbbs.net/',
-    'https://piston-meta.mojang.com/': 'https://download.mcbbs.net/',
-    'https://libraries.minecraft.net/': 'https://download.mcbbs.net/libraries/',
-    'https://resources.download.minecraft.net/': 'https://download.mcbbs.net/assets/',
-    'https://launchermeta.mojang.com/': 'https://download.mcbbs.net/',
-    'https://launcher.mojang.com/': 'https://download.mcbbs.net/',
     'https://cdn.modrinth.com/': 'https://mod.mcimirror.top/',
     'https://edge.forgecdn.net/': 'https://mod.mcimirror.top/',
     'https://mediafilez.forgecdn.net/': 'https://mod.mcimirror.top/',
@@ -1135,6 +1155,15 @@ function saveDiskCache() {
 }
 const installSessions = new Map();
 const javaInstallSessions = new Map();
+const javaDownloadAbortControllers = new Map();
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, session] of installSessions) {
+        if (!session.lastActivity) session.lastActivity = session.startTime || now;
+        if (now - session.lastActivity > 1800000) installSessions.delete(id);
+    }
+}, 300000);
 
 function safeLibPath(artifactPath, baseDir) {
     if (!artifactPath || typeof artifactPath !== 'string') return null;
@@ -1148,12 +1177,42 @@ function safeLibPath(artifactPath, baseDir) {
     return resolved;
 }
 const modDownloadSessions = new Map();
+const customDownloadSessions = new Map();
 const repairSessions = new Map();
 const gameInstances = new Map();
 let gameLogBuffer = [];
 let lastGameExitAnalysis = null;
 let detectedLanPort = null;
 let gameInstanceCounter = 0;
+
+let _cachedSystemInfo = null;
+function getSystemInfo() {
+    if (_cachedSystemInfo) return _cachedSystemInfo;
+    const cpus = os.cpus();
+    const cpuModel = cpus.length > 0 ? cpus[0].model.trim() : 'Unknown';
+    const totalMemMB = Math.round(os.totalmem() / 1024 / 1024);
+    const freeMemMB = Math.round(os.freemem() / 1024 / 1024);
+    const osRelease = os.release();
+    const osType = os.type();
+    const osArch = os.arch();
+    let gpuInfo = 'Unknown';
+    try {
+        const wmic = execSync('wmic path win32_VideoController get Name,DriverVersion,AdapterRAM /format:csv', { encoding: 'utf8', timeout: 5000, windowsHide: true });
+        const lines = wmic.split('\n').filter(l => l.trim() && !l.startsWith('Node'));
+        const gpus = lines.map(l => {
+            const parts = l.trim().split(',');
+            const name = (parts[2] || '').trim();
+            const driver = (parts[1] || '').trim();
+            const ram = parseInt(parts[3], 10);
+            if (!name) return null;
+            const ramMB = ram > 0 ? Math.round(ram / 1024 / 1024) : null;
+            return ramMB ? `${name} (${ramMB}MB, driver: ${driver})` : `${name} (driver: ${driver})`;
+        }).filter(Boolean);
+        if (gpus.length > 0) gpuInfo = gpus.join(' | ');
+    } catch (e) {}
+    _cachedSystemInfo = { cpuModel, totalMemMB, freeMemMB, osRelease, osType, osArch, gpuInfo };
+    return _cachedSystemInfo;
+}
 
 const SENSITIVE_PATTERNS = [
     { pattern: /--accessToken\s+\S+/g, replacement: '--accessToken ***' },
@@ -1184,7 +1243,7 @@ const TERRACOTTA_VERSION = '0.4.2';
 let terracottaProcess = null;
 let terracottaHttpPort = 0;
 let terracottaPortFilePath = '';
-let terracottaStatus = { running: false, mode: null, roomCode: '', virtualIP: '', gamePort: 0, state: null, stateIndex: -1 };
+let terracottaStatus = { running: false, mode: null, roomCode: '', virtualIP: '', guestPort: 25565, gamePort: 0, state: null, stateIndex: -1 };
 let terracottaPublicNodes = null;
 let terracottaPublicNodesExpiry = 0;
 
@@ -1473,12 +1532,11 @@ async function startTerracotta() {
 
 function getPlayerName() {
     try {
-        const accountsPath = path.join(DATA_DIR, 'accounts.json');
-        if (fs.existsSync(accountsPath)) {
-            const accounts = JSON.parse(fs.readFileSync(accountsPath, 'utf-8'));
-            if (Array.isArray(accounts) && accounts.length > 0) {
-                return accounts[0].username || accounts[0].name || 'Player';
-            }
+        const accounts = loadAccounts();
+        if (Array.isArray(accounts) && accounts.length > 0) {
+            const settings = loadSettingsCached();
+            const account = accounts.find(a => a.id === settings.selectedAccount) || accounts[0];
+            return account.username || account.name || 'Player';
         }
     } catch (e) {}
     return 'Player';
@@ -1494,8 +1552,7 @@ async function terracottaStartHost(gamePort, playerName) {
     const name = playerName || getPlayerName();
     const params = {
         player: name,
-        public_nodes: nodes,
-        game_port: gamePort
+        public_nodes: nodes
     };
 
     for (let retry = 0; retry < 3; retry++) {
@@ -1606,7 +1663,7 @@ function stopTerracotta() {
     _terracottaSavedMode = null;
     _terracottaSavedGamePort = 0;
     _terracottaSavedRoomCode = '';
-    terracottaStatus = { running: false, mode: null, roomCode: '', virtualIP: '', gamePort: 0, state: null, stateIndex: -1, profiles: [], difficulty: null, errorType: null, errorMessage: null };
+    terracottaStatus = { running: false, mode: null, roomCode: '', virtualIP: '', guestPort: 25565, gamePort: 0, state: null, stateIndex: -1, profiles: [], difficulty: null, errorType: null, errorMessage: null };
 
     if (terracottaPortFilePath) {
         try {
@@ -1645,10 +1702,14 @@ async function getTerracottaState() {
             terracottaStatus.stateIndex = state.index || -1;
 
             if (state.state === 'host-ok' && state.room) {
-                terracottaStatus.roomCode = state.room;
+                terracottaStatus.roomCode = typeof state.room === 'object' ? (state.room.code || '') : state.room;
             }
             if (state.state === 'guest-ok' && state.url) {
-                terracottaStatus.virtualIP = state.url;
+                const urlStr = state.url;
+                terracottaStatus.virtualIP = urlStr;
+                const portMatch = urlStr.match(/:(\d+)$/);
+                if (portMatch) terracottaStatus.guestPort = parseInt(portMatch[1], 10);
+                else terracottaStatus.guestPort = 25565;
             }
 
             if (state.state === 'exception' && state.type !== undefined) {
@@ -1657,12 +1718,12 @@ async function getTerracottaState() {
                     terracottaStatus.errorType = errInfo.key;
                     terracottaStatus.errorMessage = errInfo.msg;
                 }
-            } else {
+            } else if (state.state !== 'exception') {
                 terracottaStatus.errorType = null;
                 terracottaStatus.errorMessage = null;
             }
 
-            if (state.state !== 'host-ok' && state.state !== 'guest-ok') {
+            if (state.profiles !== undefined) {
                 terracottaStatus.profiles = state.profiles || [];
             }
             if (state.difficulty !== undefined) {
@@ -2322,7 +2383,7 @@ async function applyPerformanceOptimizations(pid) {
 
     let performanceBoost = true;
     try {
-        const storePath = path.join(os.homedir(), '.versepc', 'app-store.json');
+        const storePath = path.join(DATA_DIR, 'app-store.json');
         if (fs.existsSync(storePath)) {
             const store = JSON.parse(fs.readFileSync(storePath, 'utf8'));
             const launchStr = store['versepc_launch_settings'];
@@ -2403,9 +2464,9 @@ function loadSettings() {
 
         downloadSource: 'auto',
         versionSource: 'auto',
-        maxThreads: 32,
+        maxThreads: 64,
         enableChunkDownload: true,
-        maxChunksPerFile: 16,
+        maxChunksPerFile: 64,
         speedLimit: 0,
         targetDir: '',
         sslVerify: false,
@@ -2528,11 +2589,19 @@ async function checkModUpdates(versionId) {
     }
 }
 
+let _accountsCache = null;
+let _accountsCacheTime = 0;
+const ACCOUNTS_CACHE_TTL = 5000;
+
 function loadAccounts() {
+    if (_accountsCache && Date.now() - _accountsCacheTime < ACCOUNTS_CACHE_TTL) {
+        return _accountsCache;
+    }
+    let result;
     try {
         if (fs.existsSync(ACCOUNTS_FILE)) {
             const raw = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf-8'));
-            return raw.map(acc => {
+            result = raw.map(acc => {
                 if (acc.accessToken && acc.accessToken.startsWith('enc:')) {
                     try { acc.accessToken = decryptToken(acc.accessToken.slice(4)); } catch (e) {}
                 }
@@ -2543,7 +2612,10 @@ function loadAccounts() {
             });
         }
     } catch (e) {}
-    return [];
+    if (!result) result = [];
+    _accountsCache = result;
+    _accountsCacheTime = Date.now();
+    return result;
 }
 
 const TOKEN_ENC_ALGO = 'aes-256-cbc';
@@ -2571,6 +2643,8 @@ function decryptToken(data) {
 }
 
 function saveAccounts(accounts) {
+    _accountsCache = null;
+    _accountsCacheTime = 0;
     const toSave = accounts.map(acc => {
         const copy = { ...acc };
         if (copy.accessToken) copy.accessToken = 'enc:' + encryptToken(copy.accessToken);
@@ -2622,68 +2696,110 @@ function saveVersions(versionsData) {
 }
 
 function findVersionChain(versionId) {
-    const toDelete = [versionId];
-    const dvJsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
-    if (fs.existsSync(dvJsonPath)) {
+    const chain = [];
+    const visited = new Set();
+
+    const addWithParents = (id) => {
+        if (visited.has(id)) return;
+        visited.add(id);
+        chain.push(id);
+        const dir = path.join(VERSIONS_DIR, id);
+        const jp = findVersionJson(dir);
+        if (!jp) return;
         try {
-            const dvJson = JSON.parse(fs.readFileSync(dvJsonPath, 'utf-8'));
-            let currentId = dvJson.inheritsFrom;
-            while (currentId) {
-                if (toDelete.includes(currentId)) break;
-                let hasOtherChildren = false;
-                try {
-                    const allDirs = fs.readdirSync(VERSIONS_DIR);
-                    for (const d of allDirs) {
-                        if (toDelete.includes(d)) continue;
-                        const dJsonFile = path.join(VERSIONS_DIR, d, `${d}.json`);
-                        if (fs.existsSync(dJsonFile)) {
-                            try {
-                                const dJson = JSON.parse(fs.readFileSync(dJsonFile, 'utf-8'));
-                                if (dJson.inheritsFrom === currentId) {
-                                    hasOtherChildren = true;
-                                    break;
-                                }
-                            } catch (e) {}
-                        }
-                    }
-                } catch (e) {}
-                if (hasOtherChildren) break;
-                toDelete.push(currentId);
-                const pJsonPath = path.join(VERSIONS_DIR, currentId, `${currentId}.json`);
-                if (fs.existsSync(pJsonPath)) {
-                    try {
-                        const pJson = JSON.parse(fs.readFileSync(pJsonPath, 'utf-8'));
-                        currentId = pJson.inheritsFrom || null;
-                    } catch (e) { currentId = null; }
-                } else { currentId = null; }
+            const data = JSON.parse(fs.readFileSync(jp, 'utf-8'));
+            if (data.inheritsFrom && !visited.has(data.inheritsFrom)) {
+                addWithParents(data.inheritsFrom);
             }
-        } catch (e) {}
-    }
-    return toDelete;
+        } catch (_) {}
+    };
+
+    addWithParents(versionId);
+
+    if (!fs.existsSync(VERSIONS_DIR)) return chain;
+    try {
+        const allDirs = fs.readdirSync(VERSIONS_DIR);
+        for (const dir of allDirs) {
+            if (visited.has(dir)) continue;
+            const verDir = path.join(VERSIONS_DIR, dir);
+            try { if (!fs.statSync(verDir).isDirectory()) continue; } catch (_) { continue; }
+            const jp = findVersionJson(verDir);
+            if (!jp) continue;
+            try {
+                const data = JSON.parse(fs.readFileSync(jp, 'utf-8'));
+                const parentId = data.inheritsFrom;
+                if (parentId) {
+                    let ancestor = parentId;
+                    let depth = 0;
+                    const ancestors = new Set();
+                    while (ancestor && depth < 10) {
+                        ancestors.add(ancestor);
+                        if (visited.has(ancestor)) {
+                            visited.add(dir);
+                            chain.push(dir);
+                            break;
+                        }
+                        const aDir = path.join(VERSIONS_DIR, ancestor);
+                        const aJp = findVersionJson(aDir);
+                        if (!aJp) break;
+                        try {
+                            const aData = JSON.parse(fs.readFileSync(aJp, 'utf-8'));
+                            ancestor = aData.inheritsFrom || null;
+                        } catch (_) { break; }
+                        depth++;
+                    }
+                }
+            } catch (_) {}
+        }
+    } catch (_) {}
+
+    return chain;
 }
 
 function cleanupVersionChain(versionId) {
-    const toDelete = findVersionChain(versionId);
+    const chain = findVersionChain(versionId);
+    const vanillaPattern = /^\d+\.\d+(\.\d+)?(-rc\d+|-pre\d+|-snapshot.*)?$/i;
+    const toDelete = [];
+    for (const id of chain) {
+        if (vanillaPattern.test(id) && id !== versionId) {
+            console.log(`[Cleanup] 跳过原版版本: ${id}`);
+            continue;
+        }
+        toDelete.push(id);
+    }
+    if (!toDelete.includes(versionId)) toDelete.push(versionId);
+
+    console.log(`[Cleanup] 版本链: ${chain.join(' → ')}`);
+    console.log(`[Cleanup] 将删除: ${toDelete.join(', ')}`);
+
+    const results = [];
     for (const id of toDelete) {
+        const dir = path.join(VERSIONS_DIR, id);
+        if (!fs.existsSync(dir)) {
+            results.push({ id, deleted: true, reason: '目录不存在' });
+            continue;
+        }
         let deleted = false;
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= 5; attempt++) {
             try {
-                const dir = path.join(VERSIONS_DIR, id);
-                if (fs.existsSync(dir)) {
-                    fs.rmSync(dir, { recursive: true, force: true });
-                    console.log(`[Cleanup] Deleted version: ${id}`);
-                }
+                fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+                console.log(`[Cleanup] 已删除: ${id}`);
                 deleted = true;
                 break;
             } catch (e) {
-                console.error(`[Cleanup] Failed to delete ${id} (attempt ${attempt}):`, e.message);
-                if (attempt < 3) {
-                    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500); } catch (_e) {}
+                console.error(`[Cleanup] 删除 ${id} 失败 (第${attempt}次): ${e.message}`);
+                if (attempt < 5) {
+                    const delayMs = attempt * 1000;
+                    const start = Date.now();
+                    while (Date.now() - start < delayMs) {}
                 }
             }
         }
+        results.push({ id, deleted, reason: deleted ? '' : '文件可能被占用，请关闭游戏后重试' });
     }
-    return toDelete;
+
+    console.log(`[Cleanup] 完成: ${toDelete.join(', ')}`);
+    return { toDelete, results };
 }
 
 function cleanupIncompleteVersion(versionDir) {
@@ -2724,8 +2840,10 @@ function isVersionComplete(versionId) {
     const mainJarPath = path.join(VERSIONS_DIR, versionId, `${versionId}.jar`);
     if (!versionJson.inheritsFrom && !fs.existsSync(mainJarPath)) return false;
 
-    const isForgeChain = versionId.toLowerCase().includes('forge') ||
-        (versionJson.inheritsFrom && versionJson.inheritsFrom.toLowerCase().includes('forge'));
+    const _vLower = versionId.toLowerCase();
+    const _isNeoForge = _vLower.includes('neoforge') || _vLower.includes('neoforged');
+    const isForgeChain = (_vLower.includes('forge') && !_isNeoForge) ||
+        (versionJson.inheritsFrom && versionJson.inheritsFrom.toLowerCase().includes('forge') && !versionJson.inheritsFrom.toLowerCase().includes('neoforge'));
     if (isForgeChain && versionJson.libraries) {
         let forgeCoreMissing = 0;
         for (const lib of versionJson.libraries) {
@@ -2984,6 +3102,17 @@ async function performRepair(sessionId, versionId) {
     const session = repairSessions.get(sessionId);
     if (!session) return;
 
+    const repairLogPath = path.join(DATA_DIR, 'logs', `repair-${Date.now()}.log`);
+    try { fs.mkdirSync(path.dirname(repairLogPath), { recursive: true }); } catch (_) {}
+    function rlog(msg) {
+        const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        console.log(`[Repair] ${msg}`);
+        try { fs.appendFileSync(repairLogPath, line + '\n'); } catch (_) {}
+    }
+    session._logFile = repairLogPath;
+    rlog(`========== 开始修复 ${versionId} ==========`);
+    rlog(`版本文件夹: ${path.join(VERSIONS_DIR, versionId)}`);
+    rlog(`版本JSON存在: ${fs.existsSync(path.join(VERSIONS_DIR, versionId, `${versionId}.json`))}`);
     const isAborted = () => session.status === 'cancelled' || (session._abortController && session._abortController.signal.aborted);
 
     try {
@@ -3010,6 +3139,7 @@ async function performRepair(sessionId, versionId) {
         session.stage = 'resolve';
         session.message = '正在解析版本JSON...';
         const versionJson = resolveVersionJson(versionId);
+        rlog(`Phase2 版本JSON解析: ${versionJson ? '成功' : '失败'}, inheritsFrom: ${versionJson?.inheritsFrom || '无'}`);
         if (!versionJson) {
             session.status = 'failed';
             session.stage = 'failed';
@@ -3045,6 +3175,7 @@ async function performRepair(sessionId, versionId) {
         }
 
         const allLibs = collectAllLibraries(versionId);
+        rlog(`Phase3 扫描到 ${allLibs.length} 个库文件`);
         session.totalFiles = allLibs.length;
         session.message = `正在扫描 ${allLibs.length} 个库文件...`;
 
@@ -3070,6 +3201,9 @@ async function performRepair(sessionId, versionId) {
         }
         session.missingFiles = missingLibs.length + corruptLibs.length;
         session.checkedFiles = allLibs.length;
+        rlog(`Phase3 扫描完成: 缺失=${missingLibs.length}, 损坏=${corruptLibs.length}`);
+        missingLibs.forEach(m => rlog(`  缺失: ${path.basename(m.path)}`));
+        corruptLibs.forEach(m => rlog(`  损坏: ${path.basename(m.path)}`));
         session.progress = 25;
 
         if (isAborted()) return;
@@ -3088,9 +3222,77 @@ async function performRepair(sessionId, versionId) {
 
         if (isAborted()) return;
 
+        // Phase 4.5: Check Forge core files (patching JARs, FML modules)
+        const _pfLower = (versionId + ' ' + (versionJson.inheritsFrom || '')).toLowerCase();
+        const _pfIsNeo = _pfLower.includes('neoforge') || _pfLower.includes('neoforged');
+        const isForgeRepair = (_pfLower.includes('forge') && !_pfIsNeo);
+        rlog(`Phase4.5 检测到Forge: ${isForgeRepair}, NeoForge: ${_pfIsNeo}`);
+        if (isForgeRepair) {
+            session.message = '正在检查Forge核心文件...';
+            const forgeMatch = (versionJson.inheritsFrom || versionId).match(/^(.+)-[Ff]orge-(.+)$/);
+            if (forgeMatch) {
+                const mcVer = forgeMatch[1];
+                const fVer = forgeMatch[2];
+                rlog(`Phase4.5 Forge匹配: MC=${mcVer}, Forge=${fVer}`);
+                const forgeVerStr = `${mcVer}-${fVer}`;
+                const prefix = 'net/minecraftforge';
+                const coreArtifacts = [
+                    { dir: `${prefix}/fmlcore/${forgeVerStr}`, file: `fmlcore-${forgeVerStr}.jar` },
+                    { dir: `${prefix}/javafmllanguage/${forgeVerStr}`, file: `javafmllanguage-${forgeVerStr}.jar` },
+                    { dir: `${prefix}/mclanguage/${forgeVerStr}`, file: `mclanguage-${forgeVerStr}.jar` },
+                    { dir: `${prefix}/lowcodelanguage/${forgeVerStr}`, file: `lowcodelanguage-${forgeVerStr}.jar` },
+                ];
+                for (const art of coreArtifacts) {
+                    const p = path.join(LIBRARIES_DIR, art.dir, art.file);
+                    if (!fs.existsSync(p) || !isJarIntact(p)) {
+                        const mvnBase = p.includes('minecraft') ? 'https://libraries.minecraft.net/' : 'https://maven.minecraftforge.net/';
+                        missingLibs.push({ lib: { name: art.file.replace('.jar', '').replace(/-/g, ':'), downloads: { artifact: { url: `${mvnBase}${art.dir}/${art.file}` } } }, path: p });
+                        session.missingFiles++;
+                    }
+                }
+                const forgeDir = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', forgeVerStr);
+                const forgeClientJar = path.join(forgeDir, `forge-${forgeVerStr}-client.jar`);
+                const forgeUniversalJar = path.join(forgeDir, `forge-${forgeVerStr}-universal.jar`);
+                const hasForgeJar = (fs.existsSync(forgeClientJar) && isJarIntact(forgeClientJar)) ||
+                    (fs.existsSync(forgeUniversalJar) && isJarIntact(forgeUniversalJar));
+                if (!hasForgeJar) {
+                    missingLibs.push({ lib: { name: `net.minecraftforge:forge:${forgeVerStr}:universal`, downloads: { artifact: { url: `https://maven.minecraftforge.net/net/minecraftforge/forge/${forgeVerStr}/forge-${forgeVerStr}-universal.jar` } } }, path: forgeUniversalJar });
+                    session.missingFiles++;
+                }
+                let mcpVer = '';
+                try {
+                    const ga = versionJson.arguments?.game || [];
+                    const mi = ga.findIndex(a => a === '--fml.mcpVersion');
+                    if (mi >= 0 && mi + 1 < ga.length) mcpVer = ga[mi + 1];
+                } catch (_) {}
+                if (!mcpVer) {
+                    try {
+                        const cbd = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client');
+                        if (fs.existsSync(cbd)) {
+                            const sd = fs.readdirSync(cbd).filter(d => d.startsWith(`${mcVer}-`) && fs.statSync(path.join(cbd, d)).isDirectory());
+                            if (sd.length > 0) mcpVer = sd[0].slice(mcVer.length + 1);
+                        }
+                    } catch (_) {}
+                }
+                rlog(`Phase4.5 MCP版本: ${mcpVer || '未找到'}`);
+                if (mcpVer) {
+                    const clientVerStr = `${mcVer}-${mcpVer}`;
+                    const clientDir = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client', clientVerStr);
+                    for (const suffix of ['srg', 'extra']) {
+                        const jarPath = path.join(clientDir, `client-${clientVerStr}-${suffix}.jar`);
+                        if (!fs.existsSync(jarPath) || !isJarIntact(jarPath)) {
+                            missingLibs.push({ lib: { name: `net.minecraft:client:${clientVerStr}:${suffix}`, _patchingJar: true }, path: jarPath });
+                            session.missingFiles++;
+                        }
+                    }
+                }
+            }
+        }
+
         // Phase 5: Download missing/corrupted files (30-95%)
         session.stage = 'downloading';
         const allMissing = [...corruptLibs, ...missingLibs];
+        rlog(`Phase5 准备下载: 总计=${allMissing.length}个缺失/损坏文件`);
         const uniqueMissing = [];
         const seen = new Set();
         for (const item of allMissing) {
@@ -3115,8 +3317,11 @@ async function performRepair(sessionId, versionId) {
             session.message = `正在修复 (${i+1}/${uniqueMissing.length}): ${session.currentFile}`;
             session.progress = 30 + (i / Math.max(uniqueMissing.length, 1)) * 65;
             session.repairedFiles = repaired;
+            session.lastActivity = Date.now();
 
             if (isJarIntact(libPath)) { repaired++; continue; }
+
+            if (lib._patchingJar) { rlog(`  跳过补丁JAR (Phase5.5处理): ${path.basename(libPath)}`); failed++; failedList.push(path.basename(libPath)); continue; }
 
             let url = null;
             if (lib.downloads?.artifact?.url) {
@@ -3127,8 +3332,9 @@ async function performRepair(sessionId, versionId) {
                     const mg = p[0].replace(/\./g, '/');
                     const cl = p.length >= 4 ? `-${p[3]}` : '';
                     const jn = `${p[1]}-${p[2]}${cl}.jar`;
-                    const base = lib.url || (p[0].includes('forge') || p[0].includes('minecraftforge') || p[0].includes('neoforged') || p[0].includes('minecraft')
-                        ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/');
+                    const base = lib.url || (p[0].includes('neoforged') ? 'https://maven.neoforged.net/'
+                        : (p[0].includes('forge') || p[0].includes('minecraftforge') || p[0].includes('minecraft')
+                        ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/'));
                     url = `${base}${mg}/${p[1]}/${p[2]}/${jn}`;
                 }
             }
@@ -3170,10 +3376,118 @@ async function performRepair(sessionId, versionId) {
 
         if (isAborted()) return;
 
+        // Phase 5.5: Forge patching JARs can only be generated by the Forge installer
+        if (isForgeRepair) {
+            const forgeMatchP = (versionJson.inheritsFrom || versionId).match(/^(\d+\.\d+(?:\.\d+)?)-forge-(.+)$/);
+            if (forgeMatchP) {
+                const pmcVer = forgeMatchP[1];
+                const pfVer = forgeMatchP[2];
+                const patchingStillMissing = uniqueMissing.filter(item =>
+                    item.lib?._patchingJar && (!fs.existsSync(item.path) || !isJarIntact(item.path))
+                );
+                rlog(`Phase5.5 补丁JAR仍缺失: ${patchingStillMissing.length}个`);
+                patchingStillMissing.forEach(p => rlog(`  ${path.basename(p.path)}`));
+                if (patchingStillMissing.length > 0) {
+                    session.stage = 'forge_reinstall';
+                    session.message = '正在重装Forge以生成补丁JAR...';
+                    session.progress = 90;
+                    try {
+                        const baseJar = path.join(VERSIONS_DIR, pmcVer, `${pmcVer}.jar`);
+                        rlog(`Phase5.5 原版JAR: ${baseJar} (存在: ${fs.existsSync(baseJar)})`);
+                        if (!fs.existsSync(baseJar)) {
+                            session.message = '正在下载原版JAR...';
+                            rlog(`Phase5.5 下载原版JAR ${pmcVer}...`);
+                            await ensureBaseVersionInstalled(pmcVer);
+                            rlog(`Phase5.5 原版JAR下载后: ${fs.existsSync(baseJar)}`);
+                        }
+                        const settings = loadSettingsCached();
+                        const gameDir = settings.gameDir || MINECRAFT_DIR;
+                        const forgeVerStr = `${pmcVer}-${pfVer}`;
+                        const installerPath = path.join(DATA_DIR, 'temp', `forge-repair-${forgeVerStr}.jar`);
+                        if (!fs.existsSync(path.dirname(installerPath))) fs.mkdirSync(path.dirname(installerPath), { recursive: true });
+                        const installerUrls = [
+                            `https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/${forgeVerStr}/forge-${forgeVerStr}-installer.jar`,
+                            `https://maven.minecraftforge.net/net/minecraftforge/forge/${forgeVerStr}/forge-${forgeVerStr}-installer.jar`
+                        ];
+                        let installerOk = false;
+                        for (const dlUrl of installerUrls) {
+                            rlog(`Phase5.5 下载Forge安装器: ${dlUrl}`);
+                            try {
+                                await downloadFileWithMirror(dlUrl, installerPath);
+                                if (fs.existsSync(installerPath) && fs.statSync(installerPath).size > 64 * 1024) {
+                                    const fd = fs.openSync(installerPath, 'r');
+                                    const buf = Buffer.alloc(2);
+                                    fs.readSync(fd, buf, 0, 2, 0);
+                                    fs.closeSync(fd);
+                                    if (buf[0] === 0x50 && buf[1] === 0x4B) { installerOk = true; rlog(`Phase5.5 安装器下载成功 (${fs.statSync(installerPath).size} bytes)`); break; }
+                                    else rlog(`Phase5.5 安装器magic不匹配`);
+                                } else {
+                                    rlog(`Phase5.5 安装器文件过小或不存在`);
+                                }
+                            } catch (e) { rlog(`Phase5.5 安装器下载异常: ${e.message}`); }
+                        }
+                        if (installerOk) {
+                            session.message = '正在运行Forge安装器...';
+                            let tempGameDir = null;
+                            let installerGameDir = gameDir;
+                            rlog(`Phase5.5 运行Forge安装器: installerGameDir=${installerGameDir}`);
+                            try {
+                                const fsLibDir = path.join(gameDir, 'libraries');
+                                if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
+                                if (!fs.existsSync(fsLibDir) || path.resolve(fsLibDir) !== path.resolve(LIBRARIES_DIR)) {
+                                    tempGameDir = path.join(os.tmpdir(), `versepc-repair-forge-${Date.now()}`);
+                                    fs.mkdirSync(tempGameDir, { recursive: true });
+                                    const tempLibDir = path.join(tempGameDir, 'libraries');
+                                    try { fs.symlinkSync(LIBRARIES_DIR, tempLibDir, 'junction'); } catch (e) {
+                                        try { fs.rmSync(tempGameDir, { recursive: true, force: true }); } catch (_) {}
+                                        tempGameDir = null;
+                                    }
+                                    if (tempGameDir) {
+                                        installerGameDir = tempGameDir;
+                                        try { fs.mkdirSync(path.join(tempGameDir, 'versions'), { recursive: true }); } catch (_) {}
+                                    }
+                                }
+                            } catch (_) {}
+                            const instResult = await runForgeInstallerJar(installerPath, installerGameDir, (msg, pct) => {
+                                session.progress = 90 + pct * 8;
+                            }, true);
+                            rlog(`Phase5.5 安装器结果: success=${instResult.success}, error=${instResult.error || '无'}`);
+                            if (instResult.success) {
+                                const installerJsonPath = path.join(installerGameDir, 'versions', versionId, `${versionId}.json`);
+                                const targetJsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
+                                if (fs.existsSync(installerJsonPath) && !fs.existsSync(targetJsonPath)) {
+                                    try { fs.copyFileSync(installerJsonPath, targetJsonPath); } catch (_) {}
+                                }
+                            }
+                            try { if (tempGameDir) fs.rmSync(tempGameDir, { recursive: true, force: true }); } catch (_) {}
+                        }
+                        try { if (fs.existsSync(installerPath)) fs.unlinkSync(installerPath); } catch (_) {}
+                    } catch (e) {
+                        console.warn(`[Repair] Forge重装失败: ${e.message}`);
+                    }
+                    let extraRepaired = 0;
+                    for (const item of patchingStillMissing) {
+                        const exists = fs.existsSync(item.path);
+                        const intact = exists && isJarIntact(item.path);
+                        rlog(`Phase5.5 验证: ${path.basename(item.path)} exists=${exists} intact=${intact}`);
+                        if (exists && intact) {
+                            extraRepaired++;
+                            failed = Math.max(0, failed - 1);
+                            const idx = failedList.indexOf(path.basename(item.path));
+                            if (idx >= 0) failedList.splice(idx, 1);
+                        }
+                    }
+                    if (extraRepaired > 0) repaired += extraRepaired;
+                }
+            }
+        }
+
         // Phase 6: Complete (95-100%)
         session.stage = 'complete';
         session.repairedFiles = repaired;
         session.progress = 100;
+        rlog(`========== 修复完成: 成功=${repaired}, 失败=${failed} ==========`);
+        if (failedList.length > 0) rlog(`失败文件: ${failedList.join(', ')}`);
 
         if (failed > 0) {
             session.status = 'completed';
@@ -3184,7 +3498,8 @@ async function performRepair(sessionId, versionId) {
             session.message = `修复完成！共修复/验证 ${repaired} 个文件`;
         }
     } catch (e) {
-        console.error('[Repair] Critical error:', e.stack || e.message || e);
+        rlog(`========== 修复异常 ==========`);
+        rlog(`错误: ${e.stack || e.message || e}`);
         session.status = 'failed';
         session.stage = 'failed';
         session.message = '修复失败: ' + (e.message || '未知错误');
@@ -3230,14 +3545,24 @@ function findVersionJson(versionDir) {
     if (!fs.existsSync(versionDir) || !fs.statSync(versionDir).isDirectory()) return null;
     const dirName = path.basename(versionDir);
     const primaryJson = path.join(versionDir, `${dirName}.json`);
-    if (fs.existsSync(primaryJson)) return primaryJson;
+    if (fs.existsSync(primaryJson)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(primaryJson, 'utf-8'));
+            if (data.id || data.mainClass || data.inheritsFrom || data.libraries || data.minecraftArguments || data.arguments) {
+                return primaryJson;
+            }
+        } catch (e) {}
+    }
     try {
         const jsonFiles = fs.readdirSync(versionDir).filter(f => f.endsWith('.json'));
         for (const jsonFile of jsonFiles) {
             const fullPath = path.join(versionDir, jsonFile);
             try {
                 const data = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
-                if (data.mainClass || data.libraries || data.inheritsFrom || data.minecraftArguments || data.arguments) return fullPath;
+                if (!data.id && !data.inheritsFrom) continue;
+                if (data.mainClass || data.libraries || data.inheritsFrom || data.minecraftArguments || data.arguments) {
+                    return fullPath;
+                }
             } catch (e) { continue; }
         }
     } catch (e) {}
@@ -3260,6 +3585,7 @@ function findVersionJson(versionDir) {
                 };
                 const vjPath = path.join(versionDir, `${dirName}.json`);
                 fs.writeFileSync(vjPath, JSON.stringify(versionJson, null, 2));
+                _invalidateResolvedJsonCache(dirName);
                 console.log(`[findVersionJson] 从 pack-info.json 补建版本JSON: ${dirName}.json inheritsFrom=${inheritsFrom}`);
                 return vjPath;
             }
@@ -3268,17 +3594,69 @@ function findVersionJson(versionDir) {
     return null;
 }
 
+function _findVersionJsonInAnyDir(versionId) {
+    const internalPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
+    if (fs.existsSync(internalPath)) return internalPath;
+    try {
+        const externalFolders = loadExternalFolders();
+        for (const folder of externalFolders) {
+            if (!fs.existsSync(folder.path)) continue;
+            const extPath = path.join(folder.path, 'versions', versionId, `${versionId}.json`);
+            if (fs.existsSync(extPath)) return extPath;
+            const extDir = path.join(folder.path, 'versions', versionId);
+            const altJson = findVersionJson(extDir);
+            if (altJson) return altJson;
+        }
+    } catch (_) {}
+    return null;
+}
+
+function _mergeInheritsChain(data, dirName) {
+    const merged = { ...data };
+    const visited = new Set();
+    visited.add(data.id || dirName);
+    let current = data;
+    let depth = 0;
+    while (current.inheritsFrom && depth < 10) {
+        const parentId = current.inheritsFrom;
+        if (visited.has(parentId)) break;
+        visited.add(parentId);
+        const parentJsonPath = _findVersionJsonInAnyDir(parentId);
+        if (!parentJsonPath || !fs.existsSync(parentJsonPath)) break;
+        try {
+            const parentData = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'));
+            for (const key of Object.keys(parentData)) {
+                if (key === 'id' || key === 'inheritsFrom' || key === 'type') continue;
+                if (merged[key] === undefined) {
+                    merged[key] = parentData[key];
+                } else if (key === 'libraries' && Array.isArray(parentData[key])) {
+                    merged.libraries = [...parentData[key], ...(merged.libraries || [])];
+                } else if (key === 'arguments' && typeof parentData[key] === 'object') {
+                    merged.arguments = merged.arguments || {};
+                    if (parentData[key].game && !merged.arguments.game) merged.arguments.game = parentData[key].game;
+                    if (parentData[key].jvm && !merged.arguments.jvm) merged.arguments.jvm = parentData[key].jvm;
+                }
+            }
+            current = parentData;
+        } catch (_) { break; }
+        depth++;
+    }
+    return merged;
+}
+
 function detectVersionInfo(data, dirName) {
+    const merged = _mergeInheritsChain(data, dirName);
     const versionIdLower = (data.id || dirName).toLowerCase();
-    const mainClassLower = (data.mainClass || '').toLowerCase();
-    const librariesStr = JSON.stringify(data.libraries || []).toLowerCase();
-    const gameArgsStr = JSON.stringify(data.arguments?.game || []).toLowerCase();
+    const mainClassLower = (merged.mainClass || '').toLowerCase();
+    const librariesStr = JSON.stringify(merged.libraries || []).toLowerCase();
+    const gameArgsStr = JSON.stringify(merged.arguments?.game || []).toLowerCase();
     const isBootStrap = mainClassLower.includes('bootstraplauncher');
     const hasNeoForgeGameArg = gameArgsStr.includes('--fml.neoforgeversion');
     const hasForgeGameArg = gameArgsStr.includes('--fml.forgeversion');
     const isFabric = mainClassLower.includes('fabric') || versionIdLower.includes('fabric') ||
         librariesStr.includes('net.fabricmc:fabric-loader') || librariesStr.includes('org.quiltmc:quilt-loader');
     const isForge = (mainClassLower.includes('forge') || mainClassLower.includes('modlauncher') || versionIdLower.includes('forge') ||
+        librariesStr.includes('minecraftforge') ||
         (isBootStrap && (hasForgeGameArg || librariesStr.includes('net.minecraftforge')))) &&
         !versionIdLower.includes('neoforge') && !librariesStr.includes('net.neoforge') && !hasNeoForgeGameArg;
     const isNeoForge = versionIdLower.includes('neoforge') || librariesStr.includes('net.neoforge') ||
@@ -3286,16 +3664,17 @@ function detectVersionInfo(data, dirName) {
         (isBootStrap && hasForgeGameArg && (librariesStr.includes('neoforge') || gameArgsStr.includes('neoforge')));
     const isOptiFine = versionIdLower.includes('optifine') || librariesStr.includes('optifine:optifine');
     const isLiteLoader = versionIdLower.includes('liteloader') || librariesStr.includes('liteloader');
+    const isAprilFools = APRIL_FOOLS_IDS.has(versionIdLower);
 
     const bareMcPattern = /^\d+\.\d+(\.\d+)?(-\d+)?$/;
     const loaderIdPattern = /^(?:fabric-loader-\d|quilt-loader-\d|\d+\.\d+(?:\.\d+)?-(?:forge|neoforge)-\d)/;
     const versionId = data.id || dirName;
     const hasNoLoaderFlags = !isFabric && !isForge && !isNeoForge && !isOptiFine && !isLiteLoader;
+    const hasInheritsFrom = !!data.inheritsFrom;
+    const inheritsFromNonMc = hasInheritsFrom && !bareMcPattern.test(data.inheritsFrom);
     const isContentVanilla = hasNoLoaderFlags && !isBootStrap && !hasForgeGameArg && !hasNeoForgeGameArg &&
         (mainClassLower.includes('net.minecraft.client.main') || mainClassLower === '') &&
         !librariesStr.includes('net.minecraftforge') && !librariesStr.includes('net.fabricmc') && !librariesStr.includes('net.neoforge');
-    const hasInheritsFrom = !!data.inheritsFrom;
-    const inheritsFromNonMc = hasInheritsFrom && !bareMcPattern.test(data.inheritsFrom);
     const isModpack = !bareMcPattern.test(versionId) && !loaderIdPattern.test(versionId) && (!isContentVanilla || inheritsFromNonMc);
 
     if (isModpack) {
@@ -3306,8 +3685,8 @@ function detectVersionInfo(data, dirName) {
         let resolvedIsForge = isForge, resolvedIsFabric = isFabric, resolvedIsNeoForge = isNeoForge;
         let resolvedIsOptiFine = isOptiFine, resolvedIsLiteLoader = isLiteLoader;
         if (!loaderType && data.inheritsFrom) {
-            const parentJsonPath = path.join(VERSIONS_DIR, data.inheritsFrom, `${data.inheritsFrom}.json`);
-            if (fs.existsSync(parentJsonPath)) {
+            const parentJsonPath = _findVersionJsonInAnyDir(data.inheritsFrom);
+            if (parentJsonPath) {
                 try {
                     const parentData = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'));
                     const parentInfo = detectVersionInfo(parentData, data.inheritsFrom);
@@ -3321,10 +3700,10 @@ function detectVersionInfo(data, dirName) {
         }
         let baseVersion = data.inheritsFrom || '';
         if (data.inheritsFrom) {
-            const parentJsonPath = path.join(VERSIONS_DIR, data.inheritsFrom, `${data.inheritsFrom}.json`);
-            if (fs.existsSync(parentJsonPath)) {
+            const parentJsonPath2 = _findVersionJsonInAnyDir(data.inheritsFrom);
+            if (parentJsonPath2 && fs.existsSync(parentJsonPath2)) {
                 try {
-                    const parentData = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'));
+                    const parentData = JSON.parse(fs.readFileSync(parentJsonPath2, 'utf-8'));
                     if (parentData.inheritsFrom && bareMcPattern.test(parentData.inheritsFrom)) {
                         baseVersion = parentData.inheritsFrom;
                     }
@@ -3352,7 +3731,7 @@ function detectVersionInfo(data, dirName) {
                 if (idMatch) baseVersion = idMatch[1];
             }
         }
-        return { isFabric: resolvedIsFabric, isForge: resolvedIsForge, isNeoForge: resolvedIsNeoForge, isOptiFine: resolvedIsOptiFine, isLiteLoader: resolvedIsLiteLoader, isModpack, modpackLoader: loaderType, baseVersion };
+        return { isFabric: resolvedIsFabric, isForge: resolvedIsForge, isNeoForge: resolvedIsNeoForge, isOptiFine: resolvedIsOptiFine, isLiteLoader: resolvedIsLiteLoader, isModpack, modpackLoader: loaderType, baseVersion, isAprilFools };
     }
 
     if (data.inheritsFrom && !isFabric && !isForge && !isNeoForge && !isOptiFine && !isLiteLoader) {
@@ -3362,7 +3741,7 @@ function detectVersionInfo(data, dirName) {
                 const parentData = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'));
                 const parentInfo = detectVersionInfo(parentData, data.inheritsFrom);
                 if (parentInfo.isForge || parentInfo.isFabric || parentInfo.isNeoForge || parentInfo.isOptiFine || parentInfo.isLiteLoader) {
-                    return { ...parentInfo, baseVersion: parentInfo.baseVersion || data.inheritsFrom };
+                    return { ...parentInfo, baseVersion: parentInfo.baseVersion || data.inheritsFrom, isAprilFools: parentInfo.isAprilFools || isAprilFools };
                 }
             } catch (_) {}
         }
@@ -3390,7 +3769,7 @@ function detectVersionInfo(data, dirName) {
             if (idMatch) baseVersion = idMatch[1];
         }
     }
-    return { isFabric, isForge, isNeoForge, isOptiFine, isLiteLoader, isModpack: false, modpackLoader: '', baseVersion };
+    return { isFabric, isForge, isNeoForge, isOptiFine, isLiteLoader, isModpack: false, modpackLoader: '', baseVersion, isAprilFools };
 }
 
 function scanExternalFolder(folderPath) {
@@ -3415,7 +3794,7 @@ function scanExternalFolder(folderPath) {
                 const info = detectVersionInfo(data, dir);
                 versions.push({
                     id: data.id || dir,
-                    type: data.type || 'release',
+                    type: info.isAprilFools ? 'special' : (data.type || 'release'),
                     releaseTime: data.releaseTime || '',
                     mainClass: data.mainClass || '',
                     installed: true,
@@ -3428,9 +3807,16 @@ function scanExternalFolder(folderPath) {
                     isModpack: info.isModpack,
                     modpackLoader: info.modpackLoader,
                     baseVersion: info.baseVersion,
+                    isAprilFools: info.isAprilFools || false,
                     externalPath: folderPath,
                     externalVersionDir: versionDir,
-                    isExternal: true
+                    isExternal: true,
+                    ...(function() {
+                        try {
+                            const vs = loadVersionSettings(data.id || dir);
+                            return { customName: vs.customName || '', description: vs.description || '' };
+                        } catch (e) { return {}; }
+                    })()
                 });
             } catch (e) {
                 versions.push({ id: dir, type: 'release', installed: true, externalPath: folderPath, externalVersionDir: versionDir, isExternal: true });
@@ -3498,7 +3884,7 @@ function saveVersionSettings(versionId, settings) {
             throw new Error('Invalid versionId');
         }
         const versionDir = path.join(VERSIONS_DIR, cleanId);
-        if (!fs.existsSync(versionDir)) return;
+        if (!fs.existsSync(versionDir)) throw new Error(`版本目录不存在: ${cleanId}`);
         settingsFile = path.join(versionDir, 'version-settings.json');
     }
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
@@ -3521,7 +3907,7 @@ function cachedFetchJSON(urlStr, cacheTTL, retriesOrHeaders, timeoutMs) {
 }
 
 
-function _fetchOnce(url, headers, timeout) {
+function _fetchOnce(url, headers, timeout, retries = 0) {
     const mod = url.startsWith('https') ? https : http;
     const agent = url.startsWith('https') ? SHARED_HTTPS_AGENT : SHARED_HTTP_AGENT;
     const reqHeaders = { ...headers, 'Accept-Encoding': 'gzip, deflate, br' };
@@ -3529,7 +3915,19 @@ function _fetchOnce(url, headers, timeout) {
         const req = mod.get(url, { headers: reqHeaders, agent, timeout }, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 req.destroy();
-                return _fetchOnce(res.headers.location, headers, timeout).then(resolve).catch(reject);
+                return _fetchOnce(res.headers.location, headers, timeout, retries).then(resolve).catch(reject);
+            }
+            if (res.statusCode === 429) {
+                res.destroy();
+                const retryAfter = parseInt(res.headers['retry-after'] || '0', 10) || 3;
+                const waitMs = Math.min(retryAfter * 1000, 15000);
+                if (retries < 2) {
+                    console.warn(`[fetchOnce] 429 限流，等待 ${waitMs}ms 后重试 (${url.substring(0, 60)}...)`);
+                    setTimeout(() => _fetchOnce(url, headers, timeout, retries + 1).then(resolve).catch(reject), waitMs);
+                } else {
+                    reject(new Error(`HTTP 429 限流，已重试 ${retries} 次`));
+                }
+                return;
             }
             if (res.statusCode !== 200) { res.destroy(); reject(new Error(`HTTP ${res.statusCode}`)); return; }
             const encoding = (res.headers['content-encoding'] || '').toLowerCase();
@@ -3561,10 +3959,10 @@ function _isMirrorAvailable() {
 }
 function _mirrorFailed() {
     _mirrorHealth.fails++;
-    if (_mirrorHealth.fails >= 1) {
+    if (_mirrorHealth.fails >= 3) {
         _mirrorHealth.down = true;
-        _mirrorHealth.until = Date.now() + 3 * 60 * 1000;
-        console.warn(`[Mirror] 镜像连续失败${_mirrorHealth.fails}次，暂停使用3分钟`);
+        _mirrorHealth.until = Date.now() + 60 * 1000;
+        console.warn(`[Mirror] 镜像连续失败${_mirrorHealth.fails}次，暂停使用1分钟`);
     }
 }
 function _mirrorSuccess() {
@@ -3589,10 +3987,8 @@ async function fetchJSON(urlStr, retriesOrHeaders = 3, timeoutMs) {
     const headers = { 'User-Agent': 'VersePC/2.0 (PCL2)', 'Connection': 'keep-alive', ...extraHeaders };
     const useMirror = mirrorUrl && _isMirrorAvailable();
     const steps = useMirror
-        ? [{ url: mirrorUrl, t: 5000, isMirror: true }, { url: urlStr, t: 8000 }, { url: mirrorUrl, t: 12000, isMirror: true }, { url: urlStr, t: reqTimeout }]
-        : mirrorUrl
-            ? [{ url: urlStr, t: Math.min(reqTimeout, 10000) }, { url: urlStr, t: reqTimeout }]
-            : [{ url: urlStr, t: Math.min(reqTimeout, 12000) }, { url: urlStr, t: reqTimeout }];
+        ? [{ url: mirrorUrl, t: 4000, isMirror: true }, { url: urlStr, t: Math.min(reqTimeout, 10000) }, { url: urlStr, t: reqTimeout }]
+        : [{ url: urlStr, t: Math.min(reqTimeout, 10000) }, { url: urlStr, t: reqTimeout }];
 
     let lastErr = null;
     for (const step of steps) {
@@ -3603,7 +3999,7 @@ async function fetchJSON(urlStr, retriesOrHeaders = 3, timeoutMs) {
         } catch (e) {
             lastErr = e;
             if (step.isMirror) _mirrorFailed();
-            console.warn(`[fetchJSON] ${step.url.substring(0, 60)}... 超时${step.t}ms失败: ${e.message}`);
+            console.warn(`[fetchJSON] ${step.url.substring(0, 80)}... 失败: ${e.message} (超时${step.t}ms)`);
         }
     }
     throw lastErr || new Error('fetchJSON failed: ' + urlStr.substring(0, 80));
@@ -3627,6 +4023,19 @@ function fetchText(urlStr) {
         req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
         req.on('error', reject);
     });
+}
+
+async function fetchWithRacing(tasks, timeout = 15000) {
+    return Promise.any(tasks.map(async ({ fetchFn, label }) => {
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`${label} timeout`)), timeout)
+        );
+        const result = await Promise.race([fetchFn(), timeoutPromise]);
+        if (!result || (Array.isArray(result) && result.length === 0)) {
+            throw new Error(`${label} returned empty`);
+        }
+        return result;
+    }));
 }
 
 // ============================================================================
@@ -3654,14 +4063,28 @@ const DownloadManager = {
     failedFiles: 0,
     skippedFiles: 0,
     startTime: 0,
+    _speedTimer: null,
 
+    _startSpeedTimer() {
+        if (this._speedTimer) return;
+        this._speedTimer = setInterval(() => { this.refreshSpeed(); }, 100);
+    },
+    _stopSpeedTimer() {
+        if (this._speedTimer) {
+            clearInterval(this._speedTimer);
+            this._speedTimer = null;
+            this.currentSpeed = 0;
+            this.speedHistory = [];
+        }
+    },
     acquireConnection() {
-        // PCL2 style: no strict connection limit, just track
         this.activeConnections++;
+        this._startSpeedTimer();
         return true;
     },
     releaseConnection() {
         this.activeConnections = Math.max(0, this.activeConnections - 1);
+        if (this.activeConnections <= 0) this._stopSpeedTimer();
     },
     recordProgress(bytes) {
         this.totalBytesDownloaded += bytes;
@@ -3755,18 +4178,25 @@ const DownloadManager = {
         this.startTime = Date.now();
     }
 };
-setInterval(() => DownloadManager.refreshSpeed(), 100);
 
-function httpGet(urlStr, opts = {}) {
+function httpGet(urlStr, opts = {}, _redirectCount = 0) {
+    if (_redirectCount > 5) return Promise.reject(new Error('Too many redirects'));
     return new Promise((resolve, reject) => {
         const isHttps = urlStr.startsWith('https');
         const mod = isHttps ? https : http;
-        const agent = isHttps ? SHARED_HTTPS_AGENT : SHARED_HTTP_AGENT;
+        const agent = opts.agent || (isHttps ? SHARED_HTTPS_AGENT : SHARED_HTTP_AGENT);
         const headers = { 'User-Agent': 'VersePC/2.0 (PCL2)', 'Connection': 'keep-alive', ...opts.headers };
         if (opts.start !== undefined) {
             headers['Range'] = opts.end !== undefined ? `bytes=${opts.start}-${opts.end}` : `bytes=${opts.start}-`;
         }
         const req = mod.get(urlStr, { headers, agent }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                res.destroy();
+                const nu = res.headers.location.startsWith('http')
+                    ? res.headers.location
+                    : new URL(res.headers.location, urlStr).toString();
+                return httpGet(nu, opts, _redirectCount + 1).then(resolve).catch(reject);
+            }
             resolve({ stream: res, statusCode: res.statusCode, headers: res.headers,
                 contentLength: parseInt(res.headers['content-length'] || '0', 10), request: req });
         });
@@ -3777,13 +4207,129 @@ function httpGet(urlStr, opts = {}) {
 
 const NO_CHUNK_HOSTS = ['github.com', 'raw.githubusercontent.com', 'githubusercontent.com'];
 
+async function downloadFileH2(url, destPath, options = {}) {
+    const { onProgress = null, timeout = 600000, abortSignal = null } = options;
+    await fs.promises.mkdir(path.dirname(destPath), { recursive: true });
+
+    const _pclAgent = new https.Agent({
+        keepAlive: true,
+        maxSockets: 200,
+        maxFreeSockets: 128,
+        timeout: timeout || 120000,
+        keepAliveMsecs: 300000,
+        scheduling: 'fifo'
+    });
+
+    try {
+        const probeRes = await new Promise((resolve, reject) => {
+            const req = https.get(url, {
+                method: 'HEAD',
+                agent: _pclAgent,
+                headers: { 'User-Agent': 'VersePC/2.0 (PCL2)' }
+            }, (res) => { resolve({ statusCode: res.statusCode, headers: res.headers }); res.destroy(); });
+            req.on('error', reject);
+            req.setTimeout(15000, () => { req.destroy(); reject(new Error('probe timeout')); });
+        });
+
+        let fileSize = 0, supportsRange = false;
+        if (probeRes.statusCode === 206) {
+            supportsRange = true;
+            const cr = probeRes.headers['content-range'] || '';
+            const m = cr.match(/\/(\d+)/);
+            fileSize = m ? parseInt(m[1], 10) : parseInt(probeRes.headers['content-length'] || '0', 10);
+        } else if (probeRes.statusCode === 200) {
+            supportsRange = (probeRes.headers['accept-ranges'] === 'bytes');
+            fileSize = parseInt(probeRes.headers['content-length'] || '0', 10);
+        }
+        if (fileSize <= 0) throw new Error('H2: 无法获取文件大小');
+
+        if (!supportsRange || fileSize <= 8 * 1024 * 1024) {
+            await new Promise((resolve, reject) => {
+                if (abortSignal && abortSignal.aborted) { reject(new Error('已取消')); return; }
+                const req = https.get(url, {
+                    agent: _pclAgent,
+                    headers: { 'User-Agent': 'VersePC/2.0 (PCL2)' }
+                }, (res) => {
+                    if (res.statusCode >= 400) { res.destroy(); reject(new Error(`H2 HTTP ${res.statusCode}`)); return; }
+                    let dl = 0;
+                    const ws = fs.createWriteStream(destPath);
+                    res.on('data', (chunk) => {
+                        dl += chunk.length;
+                        ws.write(chunk);
+                        DownloadManager.recordProgress(chunk.length);
+                        if (onProgress && fileSize > 0) onProgress({ progress: Math.round((dl / fileSize) * 100), downloaded: dl, total: fileSize, speed: DownloadManager.getSpeed() });
+                    });
+                    res.on('end', () => { ws.end(); ws.on('finish', resolve); });
+                    res.on('error', reject);
+                });
+                req.on('error', reject);
+                if (abortSignal) abortSignal.addEventListener('abort', () => { req.destroy(); reject(new Error('已取消')); }, { once: true });
+            });
+            return;
+        }
+
+        const cCount = Math.min(16, Math.ceil(fileSize / (512 * 1024)));
+        const cSize = Math.ceil(fileSize / cCount);
+        const chunks = [];
+        for (let i = 0; i < cCount; i++) {
+            chunks.push({ i, s: i * cSize, e: Math.min((i + 1) * cSize - 1, fileSize - 1), tmp: `${destPath}.c${i}` });
+        }
+        const cProg = new Array(cCount).fill(0);
+        let lastProgUpdate = Date.now();
+
+        const dlChunk = (c) => new Promise((resolve, reject) => {
+            if (abortSignal && abortSignal.aborted) { reject(new Error('已取消')); return; }
+            const req = https.get(url, {
+                agent: _pclAgent,
+                headers: { 'Range': `bytes=${c.s}-${c.e}`, 'User-Agent': 'VersePC/2.0 (PCL2)' }
+            }, (res) => {
+                if (res.statusCode !== 206 && res.statusCode !== 200) { res.destroy(); reject(new Error(`H2 chunk ${c.i}: HTTP ${res.statusCode}`)); return; }
+                let dl = 0;
+                const ws = fs.createWriteStream(c.tmp);
+                let stalled = setTimeout(() => { res.destroy(); reject(new Error(`chunk ${c.i} stall`)); }, 60000);
+                res.on('data', (chunk) => {
+                    clearTimeout(stalled);
+                    stalled = setTimeout(() => { res.destroy(); reject(new Error(`chunk ${c.i} stall`)); }, 60000);
+                    dl += chunk.length;
+                    ws.write(chunk);
+                    cProg[c.i] = dl;
+                    const now = Date.now();
+                    if (now - lastProgUpdate >= 200) {
+                        lastProgUpdate = now;
+                        const total = cProg.reduce((a, b) => a + b, 0);
+                        DownloadManager.recordProgress(total - (downloadFileH2._lastTotal || 0));
+                        downloadFileH2._lastTotal = total;
+                        if (onProgress) onProgress({ progress: Math.round((total / fileSize) * 100), downloaded: total, total: fileSize, speed: DownloadManager.getSpeed() });
+                    }
+                });
+                res.on('end', () => { clearTimeout(stalled); ws.end(); ws.on('finish', resolve); });
+                res.on('error', (e) => { clearTimeout(stalled); reject(e); });
+            });
+            req.on('error', reject);
+            if (abortSignal) abortSignal.addEventListener('abort', () => { req.destroy(); reject(new Error('已取消')); }, { once: true });
+        });
+
+        downloadFileH2._lastTotal = 0;
+        await Promise.all(chunks.map(c => dlChunk(c)));
+        const buffers = [];
+        for (const c of chunks) {
+            buffers.push(await fs.promises.readFile(c.tmp));
+            try { fs.unlinkSync(c.tmp); } catch (_) {}
+        }
+        await fs.promises.writeFile(destPath, Buffer.concat(buffers));
+    } finally {
+        try { _pclAgent.destroy(); } catch (_) {}
+    }
+}
+
 async function downloadFileChunked(url, destPath, options = {}) {
-    const { retries = 3, onProgress = null, sha1 = null, timeout = 120000, mirrors = null, abortSignal = null } = options;
+    const { retries = 3, onProgress = null, sha1 = null, timeout = 120000, mirrors = null, abortSignal = null, agent: customAgent = null } = options;
     const minChunkSize = 512 * 1024;
     const CHUNK_THRESHOLD = 8 * 1024 * 1024;
     await fs.promises.mkdir(path.dirname(destPath), { recursive: true });
 
     const allUrls = mirrors ? [url, ...mirrors.filter(m => m !== url)] : getMirrorUrls(url);
+    const _agent = customAgent || undefined;
 
     for (let ra = 0; ra <= retries; ra++) {
         if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
@@ -3792,7 +4338,7 @@ async function downloadFileChunked(url, destPath, options = {}) {
             const currentUrl = allUrls[urlIdx];
             try {
                 let fileSize = 0, supportsRange = false, workingUrl = currentUrl;
-                const probeR = await httpGet(currentUrl, { start: 0, end: 0, timeout: 2000 });
+                const probeR = await httpGet(currentUrl, { start: 0, end: 0, timeout: 2000, agent: _agent });
                 probeR.stream.destroy();
                 if (probeR.statusCode === 206) {
                     supportsRange = true;
@@ -3807,7 +4353,7 @@ async function downloadFileChunked(url, destPath, options = {}) {
                 if (fileSize <= 0) {
                     for (let probeIdx = urlIdx + 1; probeIdx < allUrls.length; probeIdx++) {
                         try {
-                            const r2 = await httpGet(allUrls[probeIdx], { start: 0, end: 0, timeout: 2000 });
+                            const r2 = await httpGet(allUrls[probeIdx], { start: 0, end: 0, timeout: 2000, agent: _agent });
                             r2.stream.destroy();
                             if (r2.statusCode === 206) {
                                 supportsRange = true;
@@ -3826,9 +4372,9 @@ async function downloadFileChunked(url, destPath, options = {}) {
                 const settings = loadSettingsCached();
                 const useChunk = settings.enableChunkDownload && supportsRange && fileSize > CHUNK_THRESHOLD;
                 if (!useChunk || fileSize <= 0) {
-                    return await _dlSingle(workingUrl, destPath, { onProgress, sha1, timeout, abortSignal });
+                    return await _dlSingle(workingUrl, destPath, { onProgress, sha1, timeout, abortSignal, agent: customAgent });
                 }
-                const maxC = Math.min(parseInt(settings.maxChunksPerFile, 10) || 16, 64);
+                const maxC = Math.min(parseInt(settings.maxChunksPerFile, 10) || 64, 64);
                 const cCount = Math.min(maxC, Math.ceil(fileSize / minChunkSize));
                 const cSize = Math.ceil(fileSize / cCount);
                 const chunks = [];
@@ -3844,7 +4390,7 @@ async function downloadFileChunked(url, destPath, options = {}) {
                         await new Promise(r => setTimeout(r, 50));
                     }
                     try {
-                        const cr = await httpGet(workingUrl, { start: c.s, end: c.e, timeout });
+                        const cr = await httpGet(workingUrl, { start: c.s, end: c.e, timeout, agent: _agent });
                         if (abortSignal && abortSignal.aborted) {
                             cr.stream.destroy();
                             throw new Error('下载已中止');
@@ -3858,21 +4404,25 @@ async function downloadFileChunked(url, destPath, options = {}) {
                             if (stallTimer) clearTimeout(stallTimer);
                             stallTimer = setTimeout(() => {
                                 if (!aborted) {
-                                    console.warn(`[Java] Chunk ${c.i} stall timeout (30s), aborting...`);
+                                    console.warn(`[Java] Chunk ${c.i} stall timeout (60s), aborting...`);
                                     try { cr.stream.destroy(); } catch (_) {}
                                     try { ws.destroy(); } catch (_) {}
+                                    if (_chunkReject) { try { _chunkReject(new Error(`Chunk ${c.i} stall timeout`)); } catch (_) {} _chunkReject = null; }
                                 }
-                            }, 30000);
+                            }, 60000);
                         };
                         resetStall();
+                        let _chunkReject = null;
                         const onAbort = () => {
                             aborted = true;
                             if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
-                            if (cr.stream) cr.stream.destroy();
-                            if (ws) ws.destroy();
+                            if (cr.stream) try { cr.stream.destroy(); } catch (_) {}
+                            if (ws) try { ws.destroy(); } catch (_) {}
+                            if (_chunkReject) { try { _chunkReject(new Error('下载已中止')); } catch (_) {} _chunkReject = null; }
                         };
                         if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
                         return new Promise((resolve, reject) => {
+                            _chunkReject = reject;
                             cr.stream.on('data', (d) => {
                                 dl += d.length;
                                 DownloadManager.recordProgress(d.length);
@@ -3887,6 +4437,7 @@ async function downloadFileChunked(url, destPath, options = {}) {
                             });
                             cr.stream.pipe(ws);
                             ws.on('finish', () => {
+                                _chunkReject = null;
                                 if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
                                 ws.close();
                                 if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
@@ -3894,11 +4445,13 @@ async function downloadFileChunked(url, destPath, options = {}) {
                                 resolve();
                             });
                             ws.on('error', (err) => {
+                                _chunkReject = null;
                                 if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
                                 if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
                                 reject(err);
                             });
                             cr.stream.on('error', (err) => {
+                                _chunkReject = null;
                                 if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
                                 if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
                                 reject(err);
@@ -3977,13 +4530,14 @@ async function downloadFileChunked(url, destPath, options = {}) {
 }
 
 async function _dlSingle(urlStr, destPath, options = {}) {
-    const { onProgress = null, sha1 = null, timeout = 60000, retries = 3, abortSignal = null, stallTimeout = 30000 } = options;
+    const { onProgress = null, sha1 = null, timeout = 60000, retries = 3, abortSignal = null, stallTimeout = 60000, agent: customAgent = null } = options;
     const isHttps = urlStr.startsWith('https');
-    const agent = isHttps ? SHARED_HTTPS_AGENT : SHARED_HTTP_AGENT;
+    const agent = customAgent || (isHttps ? SHARED_HTTPS_AGENT : SHARED_HTTP_AGENT);
     while (!DownloadManager.acquireConnection()) {
         if (abortSignal && abortSignal.aborted) throw new Error('下载已中止');
         await new Promise(r => setTimeout(r, 50));
     }
+    const tmpPath = destPath + '.downloading';
     let settled = false;
     try {
         if (abortSignal && abortSignal.aborted) throw new Error('下载已中止');
@@ -4010,6 +4564,7 @@ async function _dlSingle(urlStr, destPath, options = {}) {
                 const clean = () => {
                     if (cleaned) return; cleaned = true;
                     try { if (ws) ws.destroy(); } catch (_) {}
+                    fs.promises.unlink(tmpPath).catch(() => {});
                     fs.promises.unlink(destPath).catch(() => {});
                     if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
                 };
@@ -4017,7 +4572,7 @@ async function _dlSingle(urlStr, destPath, options = {}) {
                     if (stallTimer) clearTimeout(stallTimer);
                     stallTimer = setTimeout(() => {
                         if (!settled && !cleaned) {
-                            if (onProgress) onProgress({ bytesDownloaded: 0, totalBytes: 0, speed: 0, progress: 0, stall: true });
+                            try { if (onProgress) onProgress({ bytesDownloaded: 0, totalBytes: 0, speed: 0, progress: 0, stall: true }); } catch (_) {}
                             try { req.destroy(); } catch (_) {}
                             clean();
                             if (rc > 0) {
@@ -4049,21 +4604,39 @@ async function _dlSingle(urlStr, destPath, options = {}) {
                     if (res.statusCode !== 200) { clean(); doReject(new Error(`HTTP ${res.statusCode} for ${urlStr}`)); return; }
                     const tSz = parseInt(res.headers['content-length'] || '0', 10);
                     let dl = 0;
-                    ws = fs.createWriteStream(destPath);
+                    ws = fs.createWriteStream(tmpPath);
                     res.on('data', (ch) => {
                         if (settled) { res.destroy(); return; }
                         dl += ch.length; DownloadManager.recordProgress(ch.length);
                         resetStall();
-                        if (onProgress) onProgress({ bytesDownloaded: dl, totalBytes: tSz, speed: DownloadManager.getSpeed(), progress: tSz > 0 ? (dl / tSz * 100) : 0, downloaded: dl });
+                        try { if (onProgress) onProgress({ bytesDownloaded: dl, totalBytes: tSz, speed: DownloadManager.getSpeed(), progress: tSz > 0 ? (dl / tSz * 100) : 0, downloaded: dl }); } catch (_) {}
                     });
                     res.pipe(ws);
                     ws.on('finish', async () => {
-                        if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
-                        ws.close();
-                        if (settled) return;
-                        if (sha1) { const a = await calculateSHA1(destPath); if (a !== sha1) { clean(); if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); } else { doReject(new Error(`SHA1 mismatch: ${path.basename(destPath)}`)); } return; } }
-                        if (tSz > 0 && dl !== tSz) { clean(); if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); } else { doReject(new Error(`Size mismatch: ${path.basename(destPath)} expected=${tSz} got=${dl}`)); } return; }
-                        doResolve({ size: dl, path: destPath });
+                        try {
+                            if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+                            ws.close();
+                            if (settled) return;
+                            if (sha1) { const a = await calculateSHA1(tmpPath); if (a !== sha1) { clean(); if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); } else { doReject(new Error(`SHA1 mismatch: ${path.basename(destPath)}`)); } return; } }
+                            if (tSz > 0 && dl !== tSz) { clean(); if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); } else { doReject(new Error(`Size mismatch: ${path.basename(destPath)} expected=${tSz} got=${dl}`)); } return; }
+                            if (dl === 0) { clean(); if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); } else { doReject(new Error(`Empty file: ${path.basename(destPath)}`)); } return; }
+                            if (destPath.toLowerCase().endsWith('.jar') && !isJarIntact(tmpPath)) {
+                                const fileSize = dl || (fs.existsSync(tmpPath) ? fs.statSync(tmpPath).size : 0);
+                                if (fileSize > 1000) {
+                                    console.warn(`[Download] JAR文件ZIP结构不完整: ${path.basename(destPath)} (${fileSize} bytes)，尝试重新下载`);
+                                    clean();
+                                    if (rc > 0 && !settled) { setTimeout(() => attempt(rc - 1), 1000); }
+                                    else { doResolve({ size: dl, path: destPath, jarWarning: true }); }
+                                    return;
+                                }
+                            }
+                            fs.renameSync(tmpPath, destPath);
+                            doResolve({ size: dl, path: destPath });
+                        } catch (e) {
+                            console.error(`[Download] finish处理异常: ${e.message}`);
+                            clean();
+                            if (!settled) doReject(e);
+                        }
                     });
                     ws.on('error', (e) => {
                         clean();
@@ -4111,9 +4684,9 @@ function isJarIntact(filePath) {
         fs.readSync(fd, hdr, 0, 4, 0);
         const stat = fs.fstatSync(fd);
         fs.closeSync(fd);
-        if (stat.size < 4) return false;
+        if (stat.size < 200) return false;
         if (hdr[0] !== 0x50 || hdr[1] !== 0x4B || hdr[2] !== 0x03 || hdr[3] !== 0x04) return false;
-        if (stat.size < 22) return stat.size >= 4;
+        if (stat.size < 22) return stat.size >= 200;
         const buf = Buffer.alloc(Math.min(65557, stat.size));
         const searchStart = Math.max(0, stat.size - buf.length);
         const fd2 = fs.openSync(filePath, 'r');
@@ -4229,6 +4802,183 @@ function getMirrorUrl(originalUrl) {
     return urls.length > 1 ? urls[1] : originalUrl;
 }
 
+async function downloadPCLStyle(urls, destPath, { onProgress = null, maxChunks = 16, abortSignal = null, stallTimeout = 45000 } = {}) {
+    await fs.promises.mkdir(path.dirname(destPath), { recursive: true }).catch(() => {});
+    const cleanTemp = async (base) => {
+        try { if (fs.existsSync(base)) await fs.promises.unlink(base); } catch (_) {}
+        for (let i = 0; i < 100; i++) { try { await fs.promises.unlink(`${base}.c${i}`); } catch (_) {} }
+    };
+    const httpGetFollow = (u, opts, cb, depth = 0) => {
+        if (depth > 10) { cb(null); return; }
+        const mod = u.startsWith('https') ? https : http;
+        const agent = u.startsWith('https') ? SHARED_HTTPS_AGENT : SHARED_HTTP_AGENT;
+        const req = mod.get(u, { ...opts, agent }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                res.resume();
+                const loc = res.headers.location.startsWith('http') ? res.headers.location : new URL(res.headers.location, u).toString();
+                httpGetFollow(loc, opts, cb, depth + 1);
+                return;
+            }
+            cb(res);
+        });
+        return req;
+    };
+    let lastErr = null;
+    for (const url of urls) {
+        if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
+        try {
+            await cleanTemp(destPath);
+            let totalSize = 0;
+            let chunkFailed = false;
+            const chunkSize = 512 * 1024;
+            const tryChunk0 = await new Promise((resolve, reject) => {
+                let settled = false;
+                const done = (v) => { if (settled) return; settled = true; resolve(v); };
+                const req = httpGetFollow(url, { headers: { 'User-Agent': 'VersePC/2.0', Range: `bytes=0-${chunkSize - 1}` } }, (res) => {
+                    if (!res) { done({ ok: false }); return; }
+                    if (res.statusCode === 206) {
+                        const cm = (res.headers['content-range'] || '').match(/\/(\d+)/);
+                        totalSize = cm ? parseInt(cm[1], 10) : 0;
+                        const ws = fs.createWriteStream(`${destPath}.c0`);
+                        let bytes = 0;
+                        res.on('data', (d) => { bytes += d.length; DownloadManager.recordProgress(d.length); });
+                        res.pipe(ws);
+                        ws.on('finish', () => { ws.close(); done({ ok: true, bytes }); });
+                        ws.on('error', () => { try { ws.destroy(); } catch (_) {} done({ ok: false }); });
+                        res.on('error', () => { try { ws.destroy(); } catch (_) {} done({ ok: false }); });
+                    } else if (res.statusCode === 200) {
+                        res.resume();
+                        const cl = parseInt(res.headers['content-length'] || '0', 10);
+                        done({ ok: false, single: true, totalSize: cl });
+                    } else {
+                        res.resume();
+                        done({ ok: false });
+                    }
+                });
+                if (req) { req.on('error', () => done({ ok: false })); req.on('timeout', () => { req.destroy(); done({ ok: false }); }); }
+                if (abortSignal) abortSignal.addEventListener('abort', () => done({ ok: false }), { once: true });
+                setTimeout(() => done({ ok: false }), 8000);
+            });
+            if (tryChunk0.ok && totalSize > 8 * 1024 * 1024 && maxChunks > 1) {
+                const chunkCount = Math.min(maxChunks, Math.ceil(totalSize / chunkSize));
+                const chunks = [{ i: 0, s: 0, e: chunkSize - 1, tmp: `${destPath}.c0`, done: true, bytes: tryChunk0.bytes }];
+                for (let i = 1; i < chunkCount; i++) {
+                    chunks.push({ i, s: i * chunkSize, e: Math.min((i + 1) * chunkSize - 1, totalSize - 1), tmp: `${destPath}.c${i}`, done: false, bytes: 0 });
+                }
+                const cProg = chunks.map(c => c.bytes);
+                let lastProg = Date.now();
+                const dlChunk = async (c) => {
+                    if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
+                    while (!DownloadManager.acquireConnection()) {
+                        if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
+                        await new Promise(r => setTimeout(r, 50));
+                    }
+                    try {
+                        let chunkBytes = 0;
+                        await new Promise((resolve, reject) => {
+                            let settled = false;
+                            const doneC = (err) => { if (settled) return; settled = true; if (err) reject(err); else resolve(); };
+                            const req = httpGetFollow(url, { headers: { 'User-Agent': 'VersePC/2.0', Range: `bytes=${c.s}-${c.e}` } }, (res) => {
+                                if (!res) { doneC(new Error('Too many redirects')); return; }
+                                if (res.statusCode !== 206 && res.statusCode !== 200) { res.resume(); doneC(new Error(`Chunk ${c.i} HTTP ${res.statusCode}`)); return; }
+                                const ws = fs.createWriteStream(c.tmp);
+                                let lastTime = Date.now();
+                                const t = setInterval(() => {
+                                    if (Date.now() - lastTime > stallTimeout) { try { res.destroy(); ws.destroy(); } catch (_) {} clearInterval(t); doneC(new Error(`Chunk ${c.i} stall`)); }
+                                }, 10000);
+                                res.pipe(ws);
+                                res.on('data', (d) => {
+                                    chunkBytes += d.length;
+                                    cProg[c.i] = chunkBytes;
+                                    lastTime = Date.now();
+                                    DownloadManager.recordProgress(d.length);
+                                    if (onProgress && Date.now() - lastProg > 50) {
+                                        lastProg = Date.now();
+                                        const total = cProg.reduce((a, b) => a + b, 0);
+                                        try { onProgress({ bytesDownloaded: total, totalBytes: totalSize, speed: DownloadManager.getSpeed(), progress: Math.min(99.9, total / totalSize * 100) }); } catch (_) {}
+                                    }
+                                });
+                                ws.on('finish', () => { clearInterval(t); ws.close(); doneC(null); });
+                                ws.on('error', (e) => { clearInterval(t); doneC(e); });
+                                res.on('error', (e) => { clearInterval(t); try { ws.destroy(); } catch (_) {} doneC(e); });
+                            });
+                            if (req) { req.on('error', (e) => doneC(e)); }
+                            if (abortSignal) abortSignal.addEventListener('abort', () => { try { if (req) req.destroy(); } catch (_) {} }, { once: true });
+                        });
+                    } finally { DownloadManager.releaseConnection(); }
+                };
+                try {
+                    await Promise.all(chunks.filter(c => !c.done).map(c => dlChunk(c)));
+                    await new Promise((resolve, reject) => {
+                        const ws = fs.createWriteStream(destPath);
+                        let idx = 0;
+                        const writeNext = () => {
+                            if (idx >= chunks.length) { ws.end(); return; }
+                            const rs = fs.createReadStream(chunks[idx].tmp);
+                            rs.on('end', () => { idx++; writeNext(); });
+                            rs.on('error', reject);
+                            rs.pipe(ws, { end: false });
+                        };
+                        ws.on('finish', () => { ws.close(); resolve(); });
+                        ws.on('error', reject);
+                        writeNext();
+                    });
+                } catch (e) {
+                    chunkFailed = true;
+                    console.warn(`[PCLStyle] 分块下载失败, 回退单流: ${e.message}`);
+                } finally {
+                    for (const c of chunks) { try { await fs.promises.unlink(c.tmp); } catch (_) {} }
+                }
+            } else if (tryChunk0.single) {
+                totalSize = tryChunk0.totalSize;
+            } else {
+                chunkFailed = true;
+            }
+            if (chunkFailed || !fs.existsSync(destPath) || fs.statSync(destPath).size === 0) {
+                await cleanTemp(destPath);
+                await new Promise((resolve, reject) => {
+                    ensureDir(destPath);
+                    const ws = fs.createWriteStream(destPath);
+                    let bytes = 0, lastTime = Date.now();
+                    let settled = false;
+                    const timer = setInterval(() => {
+                        if (Date.now() - lastTime > stallTimeout && totalSize > 0 && bytes < totalSize) {
+                            try { ws.destroy(); } catch (_) {}
+                            clearInterval(timer);
+                            if (!settled) { settled = true; reject(new Error('Stall')); }
+                        }
+                    }, 10000);
+                    const done = (err) => { if (settled) return; settled = true; clearInterval(timer); if (err) reject(err); else resolve(); };
+                    const req = httpGetFollow(url, { headers: { 'User-Agent': 'VersePC/2.0' } }, (res) => {
+                        if (!res) { try { ws.destroy(); } catch (_) {} done(new Error('Too many redirects')); return; }
+                        if (res.statusCode !== 200) { try { ws.destroy(); } catch (_) {} done(new Error(`HTTP ${res.statusCode}`)); return; }
+                        const cl = parseInt(res.headers['content-length'] || '0', 10);
+                        if (cl > 0 && totalSize === 0) totalSize = cl;
+                        res.pipe(ws);
+                        res.on('data', (c) => { bytes += c.length; lastTime = Date.now(); DownloadManager.recordProgress(c.length); if (onProgress) try { onProgress({ bytesDownloaded: bytes, totalBytes: cl || totalSize, speed: DownloadManager.getSpeed(), progress: (cl || totalSize) > 0 ? Math.min(99.9, bytes / (cl || totalSize) * 100) : 0 }); } catch (_) {} });
+                        res.on('end', () => ws.end(() => done(null)));
+                        res.on('error', (e) => { try { ws.destroy(); } catch (_) {} done(e); });
+                    });
+                    if (req) { req.on('error', (e) => { try { ws.destroy(); } catch (_) {} done(e); }); }
+                    if (abortSignal) abortSignal.addEventListener('abort', () => { try { if (req) req.destroy(); ws.destroy(); } catch (_) {} }, { once: true });
+                });
+            }
+            if (fs.existsSync(destPath) && fs.statSync(destPath).size > 0) {
+                if (onProgress) try { onProgress({ bytesDownloaded: fs.statSync(destPath).size, totalBytes: totalSize || fs.statSync(destPath).size, speed: 0, progress: 100 }); } catch (_) {}
+                return { size: fs.statSync(destPath).size, path: destPath };
+            }
+            throw new Error('文件为空');
+        } catch (e) {
+            lastErr = e;
+            if (abortSignal && abortSignal.aborted) throw e;
+            console.warn(`[PCLStyle] ${url.substring(0, 60)} 失败: ${e.message}`);
+            await cleanTemp(destPath);
+            continue;
+        }
+    }
+    throw lastErr || new Error('所有下载源均失败');
+}
+
 async function downloadFileWithMirror(urlStr, destPath, onProgress, retries = 3, abortSignal = null, customTimeout = null) {
     const allUrls = getMirrorUrls(urlStr);
 
@@ -4247,7 +4997,7 @@ async function downloadFileWithMirror(urlStr, destPath, onProgress, retries = 3,
 
     const isSmallAsset = (destPath.includes('/assets/') || destPath.includes('\\assets\\')) && !destPath.endsWith('.jar');
     if (isSmallAsset) {
-        return _dlSingle(urlStr, destPath, { onProgress, retries, abortSignal, timeout: customTimeout || 30000, stallTimeout: 15000 });
+        return _dlSingle(urlStr, destPath, { onProgress, retries, abortSignal, timeout: customTimeout || 30000, stallTimeout: 60000 });
     }
 
     if (!NO_CHUNK_HOSTS.some(d => urlStr.includes(d))) {
@@ -4293,68 +5043,283 @@ async function downloadFileWithMirror(urlStr, destPath, onProgress, retries = 3,
 const launchSessions = new Map();
 
 function getRequiredJavaVersion(versionId, versionJson = null) {
-    if (!versionId) return 8;
-    
+    const range = getJavaVersionRange(versionId, versionJson);
+    return range.min;
+}
+
+function _parseMcVersion(verStr) {
+    if (!verStr) return null;
+    const parts = String(verStr).split(/[-_]/)[0].split('.').map(Number);
+    if (parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) return null;
+    return { major: parts[0], minor: parts[1], patch: parts[2] || 0 };
+}
+
+function _compareVersion(aStr, bStr) {
+    const a = _parseMcVersion(aStr);
+    const b = _parseMcVersion(bStr);
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    if (a.major !== b.major) return a.major - b.major;
+    if (a.minor !== b.minor) return a.minor - b.minor;
+    return a.patch - b.patch;
+}
+
+function getLoaderInfoForJava(versionId, versionJson) {
+    const result = { isForge: false, isNeoForge: false, isFabric: false, isOptiFine: false, isLiteLoader: false, isLegacyLaunchwrapper: false, baseVersion: '', forgeVersion: '' };
+    if (!versionJson) return result;
+
+    const versionIdLower = (versionId || '').toLowerCase();
+    const mainClassLower = (versionJson.mainClass || '').toLowerCase();
+    const libsArr = versionJson.libraries || [];
+    const gameArgsArr = versionJson.arguments?.game || [];
+    const gameArgsStr = JSON.stringify(gameArgsArr).toLowerCase();
+    const isBootStrap = mainClassLower.includes('bootstraplauncher');
+
+    // 参照 PCL2 ModMinecraft.cs:1195 — 扫描整个合并后 JSON 文本检测 Forge
+    // 不仅检查 libraries 数组，还检查 arguments、mainClass 等所有字段
+    // PCL2 使用 realJson.Contains("minecraftforge")，这里等价实现
+    const fullJsonStr = JSON.stringify(versionJson).toLowerCase();
+
+    // launchwrapper 是 Java 9+ 不兼容的旧版加载器主类
+    result.isLegacyLaunchwrapper = mainClassLower === 'net.minecraft.launchwrapper.launch' ||
+        mainClassLower.includes('launchwrapper');
+
+    result.isFabric = mainClassLower.includes('fabric') || versionIdLower.includes('fabric') ||
+        fullJsonStr.includes('net.fabricmc:fabric-loader') || fullJsonStr.includes('org.quiltmc:quilt-loader');
+    result.isOptiFine = versionIdLower.includes('optifine') || fullJsonStr.includes('optifine:optifine');
+    result.isLiteLoader = versionIdLower.includes('liteloader') || fullJsonStr.includes('liteloader');
+
+    // NeoForge 检测
+    result.isNeoForge = versionIdLower.includes('neoforge') || fullJsonStr.includes('net.neoforge') ||
+        gameArgsStr.includes('--fml.neoforgeversion') ||
+        (isBootStrap && fullJsonStr.includes('neoforged'));
+
+    // Forge 检测 — 参照 PCL2: realJson.Contains("minecraftforge") && !realJson.Contains("net.neoforge")
+    result.isForge = !result.isNeoForge && (
+        mainClassLower.includes('forge') || mainClassLower.includes('modlauncher') ||
+        versionIdLower.includes('forge') || fullJsonStr.includes('minecraftforge') ||
+        (isBootStrap && (gameArgsStr.includes('--fml.forgeversion') || fullJsonStr.includes('net.minecraftforge')))
+    );
+
+    // 参照 PCL2: 如果 mainClass 是 launchwrapper 但未通过其他方式检测到 Forge
+    // 这类版本（旧版 Forge / LiteLoader / 自定义整合包）仍需要 Java 8
+    if (result.isLegacyLaunchwrapper && !result.isForge && !result.isLiteLoader && !result.isOptiFine && !result.isFabric && !result.isNeoForge) {
+        result.isForge = fullJsonStr.includes('forge') || gameArgsStr.includes('fml');
+    }
+
+    // 解析基础 MC 版本 — 使用 fullJsonStr（整个合并后 JSON）确保匹配继承链中的 Forge 库
+    if (result.isForge || result.isNeoForge) {
+        const forgeMatch = fullJsonStr.match(/net\.minecraftforge:(?:forge|fmlloader)[^"]*?:(\d+\.\d+(?:\.\d+)?)/);
+        if (forgeMatch) {
+            result.baseVersion = forgeMatch[1];
+            const forgeVerMatch = fullJsonStr.match(/net\.minecraftforge:(?:forge|fmlloader):([\d.]+(?:-\d+)?)/);
+            result.forgeVersion = forgeVerMatch ? forgeVerMatch[1] : '';
+        } else {
+            const fmlArg = gameArgsArr.find(a => typeof a === 'string' && a.startsWith('--fml.mcVersion'));
+            if (fmlArg) {
+                const idx = gameArgsArr.indexOf(fmlArg);
+                if (idx >= 0 && idx + 1 < gameArgsArr.length) result.baseVersion = gameArgsArr[idx + 1];
+            }
+            const forgeVerArg = gameArgsArr.find(a => typeof a === 'string' && a.startsWith('--fml.forgeVersion'));
+            if (forgeVerArg) {
+                const idx = gameArgsArr.indexOf(forgeVerArg);
+                if (idx >= 0 && idx + 1 < gameArgsArr.length) result.forgeVersion = gameArgsArr[idx + 1];
+            }
+        }
+    } else if (result.isFabric) {
+        const fabricMatch = fullJsonStr.match(/net\.fabricmc:(?:fabric-loader|intermediary):(\d+\.\d+(?:\.\d+)?)/);
+        if (fabricMatch) result.baseVersion = fabricMatch[1];
+    }
+
+    if (!result.baseVersion) {
+        if (versionJson.inheritsFrom) result.baseVersion = versionJson.inheritsFrom;
+        else {
+            const idMatch = (versionId || '').match(/(\d+\.\d+(?:\.\d+)?)/);
+            if (idMatch) result.baseVersion = idMatch[1];
+        }
+    }
+
+    console.log(`[JavaDetect] versionId=${versionId}, isForge=${result.isForge}, isLegacyLaunchwrapper=${result.isLegacyLaunchwrapper}, baseVersion=${result.baseVersion}, forgeVersion=${result.forgeVersion}, mainClass=${versionJson.mainClass || 'none'}`);
+    return result;
+}
+
+function getJavaVersionRange(versionId, versionJson = null) {
+    const result = { min: 8, max: 999, source: 'default' };
+
+    const loader = getLoaderInfoForJava(versionId, versionJson);
+    const ver = _parseMcVersion(loader.baseVersion);
+
+    // 1. JSON 中明确要求的 javaVersion（PCL2 优先级最高）
     if (versionJson && versionJson.javaVersion && versionJson.javaVersion.majorVersion) {
         const majorVer = parseInt(versionJson.javaVersion.majorVersion, 10);
-        if (majorVer > 0) return majorVer;
+        if (majorVer > 0) {
+            if (majorVer <= 8) {
+                result.min = Math.max(result.min, 8);
+            } else {
+                result.min = Math.max(result.min, majorVer);
+            }
+            result.source = 'json';
+        }
     }
-    
+
     if (versionJson && versionJson.complianceLevel !== undefined) {
         const level = parseInt(versionJson.complianceLevel, 10);
-        if (level === 0) return 8;
-        if (level >= 1 && level <= 6) return 8;
-        if (level === 7) return 17;
-        if (level >= 8) return 21;
+        if (level === 0) { result.min = Math.max(result.min, 8); }
+        else if (level >= 1 && level <= 6) { result.min = Math.max(result.min, 8); }
+        else if (level === 7) { result.min = Math.max(result.min, 17); }
+        else if (level >= 8) { result.min = Math.max(result.min, 21); }
     }
 
-    function parseMcVersion(verStr) {
-        const parts = verStr.split('.').map(Number);
-        if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-            const major = parts[0];
-            const minor = parts[1];
-            const patch = parts[2] || 0;
-            if (major >= 2 || (major === 1 && minor > 20) || (major === 1 && minor === 20 && patch >= 5)) return 21;
-            if (major === 1 && minor >= 17) return 16;
+    if (ver) {
+        // 1.20.5+：Java 21+
+        if (ver.major >= 2 || (ver.major === 1 && ver.minor > 20) || (ver.major === 1 && ver.minor === 20 && ver.patch >= 5)) {
+            result.min = Math.max(result.min, 21);
+            result.source = 'mc-version';
         }
-        return 0;
+        // 1.18+：Java 17+
+        else if (ver.major === 1 && ver.minor >= 18) {
+            result.min = Math.max(result.min, 17);
+            result.source = 'mc-version';
+        }
+        // 1.17+：Java 16+
+        else if (ver.major === 1 && ver.minor === 17) {
+            result.min = Math.max(result.min, 16);
+            result.source = 'mc-version';
+        }
+        // 1.12+：Java 8+
+        else if (ver.major === 1 && ver.minor >= 12) {
+            result.min = Math.max(result.min, 8);
+            if (result.source === 'default') result.source = 'mc-version';
+        }
     }
 
-    // 尝试从 versionId 的前半段解析 MC 版本（如 "1.21-forge-51.0.0"）
-    const baseVer = versionId.split('-')[0].split('_')[0];
-    let result = parseMcVersion(baseVer);
-    if (result > 0) return result;
-
-    // 尝试从 versionId 的所有分段中查找 MC 版本（如 "fabric-loader-0.16.10-1.21"）
-    const segments = versionId.split(/[-_]/);
-    for (const seg of segments) {
-        result = parseMcVersion(seg);
-        if (result > 0) return result;
+    // 2. LiteLoader：最高 Java 8（与 launchwrapper 一样使用旧版 class loader）
+    if (loader.isLiteLoader) {
+        result.max = Math.min(result.max, 8);
+        result.source = 'liteloader';
     }
 
-    const loaderPart = versionId.split('-').slice(1).join('-').toLowerCase();
-    const parts = baseVer.split('.').map(Number);
-    if (loaderPart.includes('forge') && parts.length >= 2 && parts[0] === 1 && parts[1] >= 16) return 11;
-    return 8;
+    // 3. Forge 分支
+    if (loader.isForge || loader.isNeoForge) {
+        if (ver) {
+            if (ver.major === 1 && ((ver.minor === 6 && ver.patch >= 1) || ver.minor === 7 && ver.patch <= 2)) {
+                // 1.6.1 - 1.7.2：必须 Java 7
+                result.min = Math.max(result.min, 7);
+                result.max = Math.min(result.max, 7);
+                result.source = 'forge';
+            } else if (ver.major === 1 && ver.minor <= 12) {
+                // <= 1.12.2：Java 8（launchwrapper 与 Java 9+ 不兼容）
+                result.min = Math.min(result.min, 8);
+                result.max = Math.min(result.max, 8);
+                if (result.source === 'default' || result.source === 'mc-version') result.source = 'forge';
+            } else if (ver.major === 1 && ver.minor === 13) {
+                // 1.13 - 1.14：Java 8 - 10
+                result.max = Math.min(result.max, 10);
+                if (result.source === 'default' || result.source === 'mc-version') result.source = 'forge';
+            } else if (ver.major === 1 && ver.minor === 14) {
+                result.max = Math.min(result.max, 10);
+                if (result.source === 'default' || result.source === 'mc-version') result.source = 'forge';
+            } else if (ver.major === 1 && ver.minor === 15) {
+                // 1.15：Java 8 - 15
+                result.max = Math.min(result.max, 15);
+                if (result.source === 'default' || result.source === 'mc-version') result.source = 'forge';
+            } else if (ver.major === 1 && ver.minor === 16) {
+                // 1.16：Forge 34.x ~ 36.2.25 最高 Java 8u321；高版本（36.2.26+）支持 Java 17
+                const forgeVer = String(loader.forgeVersion || '');
+                const cmMin = _compareVersion(forgeVer, '34.0.0');
+                const cmMax = _compareVersion('36.2.25', forgeVer);
+                if (cmMin >= 0 && cmMax >= 0) {
+                    // 1.16 Forge 34.x ~ 36.2.25：必须 Java 8u141 ~ 8u320
+                    result.min = Math.max(result.min, 8);
+                    result.max = Math.min(result.max, 8);
+                    result.source = 'forge';
+                }
+            } else if (ver.major === 1 && ver.minor >= 17) {
+                // 1.17+：Forge 已支持 Java 16+/17+
+                if (ver.minor >= 18) result.min = Math.max(result.min, 17);
+                else if (ver.minor === 17) result.min = Math.max(result.min, 16);
+                if (result.source === 'default' || result.source === 'mc-version') result.source = 'forge';
+            }
+        }
+    }
+
+    // 4. OptiFine 强制约束
+    if (loader.isOptiFine && ver) {
+        if (ver.major === 1 && ver.minor < 7) {
+            // <1.7：至多 Java 8
+            result.max = Math.min(result.max, 8);
+            result.source = 'optifine';
+        } else if (ver.major === 1 && ver.minor >= 8 && ver.minor <= 11) {
+            // 1.8 - 1.11：必须 Java 8
+            result.min = Math.max(result.min, 8);
+            result.max = Math.min(result.max, 8);
+            result.source = 'optifine';
+        } else if (ver.major === 1 && ver.minor === 12) {
+            // 1.12：最高 Java 8
+            result.max = Math.min(result.max, 8);
+            result.source = 'optifine';
+        } else if (ver.major === 1 && ver.minor === 18) {
+            // 1.18 + OptiFine：最高 Java 18
+            result.max = Math.min(result.max, 18);
+            result.source = 'optifine';
+        }
+    }
+
+    // 5. 参照 PCL2: launchwrapper（旧版 Forge / LiteLoader / 自定义整合包）与 Java 9+ 不兼容
+    //    AppClassLoader → URLClassLoader 强转在 Java 9+ 会崩溃
+    //    这是最高优先级的安全约束，必须无条件生效
+    if (loader.isLegacyLaunchwrapper) {
+        result.max = Math.min(result.max, 8);
+        result.source = 'launchwrapper';
+    }
+
+    // 兜底
+    if (result.min > result.max) result.max = result.min;
+    return result;
 }
 
 function getJavaMajorVersion(javaPath) {
+    return getJavaVersionInfo(javaPath).major;
+}
+
+function getJavaVersionInfo(javaPath) {
+    const result = { major: 0, minor: 0, version: 'unknown' };
+    if (!javaPath || !fs.existsSync(javaPath)) return result;
     try {
-        const output = execSync(`"${javaPath}" -version`, { encoding: 'utf8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] });
-        const match = (output || '').match(/version "(\d+)/);
-        if (match) {
-            const ver = parseInt(match[1], 10);
-            return ver === 1 ? 8 : ver;
+        const output = execSync(`"${javaPath}" -version 2>&1`, { encoding: 'utf8', timeout: 10000 });
+        const m = (output || '').match(/version "([^"]+)"/) || (output || '').match(/version (\S+)/);
+        if (m) {
+            const versionStr = m[1];
+            result.version = versionStr;
+            if (versionStr.startsWith('1.')) {
+                result.major = parseInt(versionStr.split('.')[1], 10) || 0;
+                const upd = versionStr.match(/_(\d+)/);
+                if (upd) result.minor = parseInt(upd[1], 10);
+            } else {
+                result.major = parseInt(versionStr.split('.')[0], 10) || 0;
+                const minorPart = versionStr.split('.')[1];
+                if (minorPart) result.minor = parseInt(minorPart, 10) || 0;
+            }
         }
     } catch (e) {
-        const errOutput = (e.stderr || e.stdout || '').toString();
-        const match = errOutput.match(/version "(\d+)/);
-        if (match) {
-            const ver = parseInt(match[1], 10);
-            return ver === 1 ? 8 : ver;
+        const errOutput = (e.stderr || e.stdout || e.output?.[2] || '').toString();
+        const m = errOutput.match(/version "([^"]+)"/) || errOutput.match(/version (\S+)/);
+        if (m) {
+            const versionStr = m[1];
+            result.version = versionStr;
+            if (versionStr.startsWith('1.')) {
+                result.major = parseInt(versionStr.split('.')[1], 10) || 0;
+                const upd = versionStr.match(/_(\d+)/);
+                if (upd) result.minor = parseInt(upd[1], 10);
+            } else {
+                result.major = parseInt(versionStr.split('.')[0], 10) || 0;
+                const minorPart = versionStr.split('.')[1];
+                if (minorPart) result.minor = parseInt(minorPart, 10) || 0;
+            }
         }
     }
-    return 8;
+    return result;
 }
 
 function createClasspathWrapperJar(classpathStr, wrapperJarPath, mainClass) {
@@ -4403,77 +5368,282 @@ function createClasspathWrapperJar(classpathStr, wrapperJarPath, mainClass) {
     }
 }
 
-function selectJavaForVersion(versionId, settings, versionJson = null) {
-    const systemJava = detectSystemJava();
-    const bundledJava = detectBundledJava();
-    
+function selectJavaForVersion(versionId, settings, versionJson = null, externalVersionDir = null) {
     if (!versionJson) {
-        versionJson = resolveVersionJson(versionId);
+        versionJson = resolveVersionJson(versionId, externalVersionDir);
     }
-    const requiredVersion = getRequiredJavaVersion(versionId, versionJson);
-    console.log(`[Java] 版本 ${versionId} 需要Java ${requiredVersion}+`);
-    console.log(`[Java] 检测到 bundled Java: ${bundledJava.length}个, system Java: ${systemJava.length}个`);
-    
-    let candidates = [...bundledJava, ...systemJava];
-    console.log(`[Java] 合并后候选Java总数: ${candidates.length}`);
+    const range = getJavaVersionRange(versionId, versionJson);
+    const requiredVersion = range.min;
+    const maxVersion = range.max;
+    console.log(`[Java] 版本 ${versionId} 需要Java ${requiredVersion}${maxVersion < 999 ? '~' + maxVersion : '+'} (来源: ${range.source})`);
+
+    let candidates = [];
+    const javaExeName = process.platform === 'win32' ? 'java.exe' : 'java';
+
+    if (settings.javaPath && fs.existsSync(settings.javaPath)) {
+        const info = getJavaVersionInfo(settings.javaPath);
+        console.log(`[Java] 用户设置: ${settings.javaPath} (版本=${info.major})`);
+        candidates.push({ path: settings.javaPath, majorVersion: info.major, minorVersion: info.minor, is64Bit: true, isJdk: true, source: 'user_setting' });
+    }
+
+    console.log(`[Java] 直接扫描 JAVA_DIR...`);
+    if (fs.existsSync(JAVA_DIR)) {
+        try {
+            const javaDirs = fs.readdirSync(JAVA_DIR, { withFileTypes: true }).filter(d => d.isDirectory());
+            for (const jd of javaDirs) {
+                const javaExe = path.join(JAVA_DIR, jd.name, 'bin', javaExeName);
+                if (!fs.existsSync(javaExe)) continue;
+                const info = getJavaVersionInfo(javaExe);
+                if (info.major > 0) {
+                    const norm = javaExe.toLowerCase().replace(/\\/g, '/');
+                    if (!candidates.some(c => c.path.toLowerCase().replace(/\\/g, '/') === norm)) {
+                        candidates.push({ path: javaExe, majorVersion: info.major, minorVersion: info.minor, is64Bit: true, isJdk: true, source: 'bundled' });
+                        console.log(`[Java]   JAVA_DIR发现: ${javaExe} (版本=${info.major})`);
+                    }
+                }
+            }
+        } catch (e) {}
+    }
+
+    const runtimeDir = path.join(DATA_DIR, 'runtime');
+    if (fs.existsSync(runtimeDir)) {
+        const _scanRuntimeDir = (dir, depth) => {
+            if (depth <= 0 || !fs.existsSync(dir)) return;
+            try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    const subDir = path.join(dir, entry.name);
+                    if (entry.name.toLowerCase() === 'bin') {
+                        const javaExe = path.join(subDir, javaExeName);
+                        if (fs.existsSync(javaExe)) {
+                            const info = getJavaVersionInfo(javaExe);
+                            if (info.major > 0) {
+                                const norm = javaExe.toLowerCase().replace(/\\/g, '/');
+                                if (!candidates.some(c => c.path.toLowerCase().replace(/\\/g, '/') === norm)) {
+                                    candidates.push({ path: javaExe, majorVersion: info.major, minorVersion: info.minor, is64Bit: true, isJdk: true, source: 'bundled' });
+                                    console.log(`[Java]   runtime发现: ${javaExe} (版本=${info.major})`);
+                                }
+                            }
+                        }
+                    } else {
+                        _scanRuntimeDir(subDir, depth - 1);
+                    }
+                }
+            } catch (e) {}
+        };
+        _scanRuntimeDir(runtimeDir, 5);
+    }
+
+    const mcRuntime = path.join(MINECRAFT_DIR, 'runtime');
+    if (fs.existsSync(mcRuntime)) {
+        const _scanMcRuntime = (dir, depth) => {
+            if (depth <= 0 || !fs.existsSync(dir)) return;
+            try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    const subDir = path.join(dir, entry.name);
+                    if (entry.name.toLowerCase() === 'bin') {
+                        const javaExe = path.join(subDir, javaExeName);
+                        if (fs.existsSync(javaExe)) {
+                            const info = getJavaVersionInfo(javaExe);
+                            if (info.major > 0) {
+                                const norm = javaExe.toLowerCase().replace(/\\/g, '/');
+                                if (!candidates.some(c => c.path.toLowerCase().replace(/\\/g, '/') === norm)) {
+                                    candidates.push({ path: javaExe, majorVersion: info.major, minorVersion: info.minor, is64Bit: true, isJdk: true, source: 'bundled' });
+                                    console.log(`[Java]   .minecraft/runtime发现: ${javaExe} (版本=${info.major})`);
+                                }
+                            }
+                        }
+                    } else {
+                        _scanMcRuntime(subDir, depth - 1);
+                    }
+                }
+            } catch (e) {}
+        };
+        _scanMcRuntime(mcRuntime, 5);
+    }
+
+    console.log(`[Java] 快速扫描完成，找到 ${candidates.length} 个候选Java`);
+
+    if (candidates.some(j => j.majorVersion >= requiredVersion && j.majorVersion <= maxVersion)) {
+        console.log(`[Java] 快速扫描已找到满足要求的Java，跳过系统扫描`);
+    } else {
+        console.log(`[Java] 快速扫描未找到，执行系统扫描...`);
+        const systemJava = detectSystemJava();
+        const bundledJava = detectBundledJava();
+        console.log(`[Java] 系统扫描: bundled=${bundledJava.length}, system=${systemJava.length}`);
+        for (const j of [...bundledJava, ...systemJava]) {
+            const norm = j.path.toLowerCase().replace(/\\/g, '/');
+            if (!candidates.some(c => c.path.toLowerCase().replace(/\\/g, '/') === norm)) {
+                candidates.push(j);
+            }
+        }
+    }
+
+    console.log(`[Java] 合并后候选总数: ${candidates.length}`);
     candidates.forEach((j, i) => {
         console.log(`  ${i+1}. ${j.path} - 主版本: ${j.majorVersion}, 64位: ${j.is64Bit}, 来源: ${j.source}`);
     });
-    
-    let userJavaInfo = null;
-    if (settings.javaPath && fs.existsSync(settings.javaPath)) {
-        const setMajorVer = getJavaMajorVersion(settings.javaPath);
-        console.log(`[Java] 用户设置的Java路径: ${settings.javaPath}, 主版本: ${setMajorVer}`);
-        userJavaInfo = {
-            path: settings.javaPath,
-            majorVersion: setMajorVer,
-            is64Bit: true,
-            isJdk: true,
-            source: 'user_setting'
-        };
-    }
-    
-    if (userJavaInfo && userJavaInfo.majorVersion >= requiredVersion) {
-        candidates.push(userJavaInfo);
-    } else if (userJavaInfo && userJavaInfo.majorVersion < requiredVersion) {
-        console.warn(`[Java] ⚠️ 用户设置的Java版本(${userJavaInfo.majorVersion})低于要求(${requiredVersion}+)，将自动选择其他Java`);
-    }
-    
-    const suitable = candidates.filter(j => j.majorVersion >= requiredVersion);
-    console.log(`[Java] 满足要求的Java (${suitable.length}个):`);
+
+    const suitable = candidates.filter(j => j.majorVersion >= requiredVersion && j.majorVersion <= maxVersion);
+    console.log(`[Java] 满足范围要求的Java (${suitable.length}个):`);
     suitable.forEach((j, i) => {
         console.log(`  ${i+1}. ${j.path} - 主版本: ${j.majorVersion}, 来源: ${j.source}`);
     });
-    
+
     if (suitable.length === 0) {
-        console.log('[Java] 未找到满足要求的Java');
-        if (userJavaInfo) {
-            console.log(`[Java] 用户设置的Java(${userJavaInfo.majorVersion})不满足要求(${requiredVersion}+)`);
+        console.log(`[Java] ====== Java 选择失败诊断 ======`);
+        console.log(`[Java] 版本: ${versionId}, 需求范围: ${requiredVersion}~${maxVersion} (来源: ${range.source})`);
+        console.log(`[Java] bundled检测: ${bundledJava.length}个, system检测: ${systemJava.length}个, 合计候选: ${candidates.length}`);
+        candidates.forEach((j, i) => {
+            console.log(`[Java]   候选${i+1}: ${j.path} (主版本=${j.majorVersion}, 64位=${j.is64Bit}, 来源=${j.source})`);
+        });
+
+        console.log(`[Java] 尝试备用检测: where java...`);
+        try {
+            const { execSync } = require('child_process');
+            const whereOut = execSync('where java 2>nul', { encoding: 'utf8', timeout: 5000, windowsHide: true });
+            const whereLines = whereOut.split(/\r?\n/).filter(l => l.trim());
+            for (const line of whereLines) {
+                const trimmed = line.trim();
+                if (trimmed && fs.existsSync(trimmed)) {
+                    const info = getJavaVersionInfo(trimmed);
+                    console.log(`[Java]   where发现: ${trimmed} (版本=${info.major})`);
+                    if (info.major >= requiredVersion && info.major <= maxVersion) {
+                        console.log(`[Java] ====== 备用检测成功 ======`);
+                        return trimmed;
+                    }
+                }
+            }
+        } catch (e) {}
+
+        console.log(`[Java] 尝试备用检测: 注册表...`);
+        if (process.platform === 'win32') {
+            try {
+                const { execSync: _execSync } = require('child_process');
+                const regOutput = _execSync(
+                    'reg query "HKLM\\SOFTWARE\\JavaSoft\\Java Runtime Environment" /s 2>nul',
+                    { encoding: 'utf8', timeout: 5000, windowsHide: true }
+                );
+                const javaHomeMatches = regOutput.matchAll(/JavaHome\s+REG_SZ\s+(.+)/gi);
+                for (const m of javaHomeMatches) {
+                    const javaHome = m[1].trim();
+                    const javaExe = path.join(javaHome, 'bin', 'java.exe');
+                    if (fs.existsSync(javaExe)) {
+                        const info = getJavaVersionInfo(javaExe);
+                        console.log(`[Java]   注册表发现: ${javaExe} (版本=${info.major})`);
+                        if (info.major >= requiredVersion && info.major <= maxVersion) return javaExe;
+                    }
+                }
+            } catch (e) {}
+            try {
+                const { execSync: _execSync } = require('child_process');
+                const regOutput64 = _execSync(
+                    'reg query "HKLM\\SOFTWARE\\Wow6432Node\\JavaSoft\\Java Runtime Environment" /s 2>nul',
+                    { encoding: 'utf8', timeout: 5000, windowsHide: true }
+                );
+                const javaHomeMatches64 = regOutput64.matchAll(/JavaHome\s+REG_SZ\s+(.+)/gi);
+                for (const m of javaHomeMatches64) {
+                    const javaHome = m[1].trim();
+                    const javaExe = path.join(javaHome, 'bin', 'java.exe');
+                    if (fs.existsSync(javaExe)) {
+                        const info = getJavaVersionInfo(javaExe);
+                        console.log(`[Java]   注册表(32位)发现: ${javaExe} (版本=${info.major})`);
+                        if (info.major >= requiredVersion && info.major <= maxVersion) return javaExe;
+                    }
+                }
+            } catch (e) {}
         }
+
+        console.log(`[Java] 尝试备用检测: 扫描常见路径和 .minecraft/runtime...`);
+        const appData = process.env['APPDATA'] || '';
+        const localAppData = process.env['LOCALAPPDATA'] || '';
+        const fallbackSearchPaths = [
+            'C:\\Program Files\\Java', 'C:\\Program Files (x86)\\Java',
+            'C:\\Program Files\\Eclipse Adoptium', 'C:\\Program Files\\AdoptOpenJDK',
+            'C:\\Program Files\\Zulu', 'C:\\Program Files\\BellSoft',
+            'D:\\Java', 'E:\\Java',
+            path.join(process.env.USERPROFILE || '', '.jdks'),
+            path.join(process.env.USERPROFILE || '', 'scoop', 'apps'),
+            path.join(appData, '.minecraft', 'runtime'),
+            path.join(appData, '.hmcl', 'runtime'),
+            path.join(localAppData, 'BakaXL', 'JavaRuntime'),
+            path.join(appData, '.versepc', 'runtime'),
+        ];
+        const javaExeName = process.platform === 'win32' ? 'java.exe' : 'java';
+        const checkedPaths = new Set();
+        function _fallbackDeepSearch(dir, depth) {
+            if (depth <= 0 || !fs.existsSync(dir)) return null;
+            const normDir = dir.toLowerCase().replace(/\\/g, '/');
+            if (checkedPaths.has(normDir)) return null;
+            checkedPaths.add(normDir);
+            try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    const subDir = path.join(dir, entry.name);
+                    if (entry.name.toLowerCase() === 'bin') {
+                        const javaExe = path.join(subDir, javaExeName);
+                        if (fs.existsSync(javaExe)) {
+                            const info = getJavaVersionInfo(javaExe);
+                            console.log(`[Java]   深度扫描发现: ${javaExe} (版本=${info.major})`);
+                            if (info.major >= requiredVersion && info.major <= maxVersion) return javaExe;
+                        }
+                    } else {
+                        const result = _fallbackDeepSearch(subDir, depth - 1);
+                        if (result) return result;
+                    }
+                }
+            } catch (e) {}
+            return null;
+        }
+        for (const sp of fallbackSearchPaths) {
+            if (!fs.existsSync(sp)) continue;
+            const found = _fallbackDeepSearch(sp, 6);
+            if (found) {
+                console.log(`[Java] ====== 备用深度扫描成功 ======`);
+                return found;
+            }
+        }
+
+        console.log(`[Java] ====== 所有检测均失败 ======`);
         return null;
     }
-    
+
+    // 排序策略参照 PCL2：
+    // 1) 主版本距离要求最近
+    // 2) 启动器自带 Java 优先
+    // 3) 64 位优先
+    // 4) 用户设置优先
+    // 5) 范围内最高小版本号（PCL2: ThenByDescending j.Installation.Version）
     suitable.sort((a, b) => {
         const aDist = Math.abs(a.majorVersion - requiredVersion) - (a.source === 'user_setting' ? 1 : 0);
         const bDist = Math.abs(b.majorVersion - requiredVersion) - (b.source === 'user_setting' ? 1 : 0);
         if (aDist !== bDist) return aDist - bDist;
-        
+
         const aInLauncher = (a.path || '').toLowerCase().includes(DATA_DIR.toLowerCase()) ? 0 : 1;
         const bInLauncher = (b.path || '').toLowerCase().includes(DATA_DIR.toLowerCase()) ? 0 : 1;
         if (aInLauncher !== bInLauncher) return aInLauncher - bInLauncher;
-        
+
         if (a.is64Bit !== b.is64Bit) return a.is64Bit ? -1 : 1;
         if (a.source === 'user_setting' && b.source !== 'user_setting') return -1;
         if (b.source === 'user_setting' && a.source !== 'user_setting') return 1;
-        if (a.isJdk !== b.isJdk) return a.isJdk ? 1 : -1;
+        // 同主版本优先选较高小版本（如 Java 8u362 > 8u51）
+        if (a.majorVersion === b.majorVersion) {
+            return (b.minorVersion || 0) - (a.minorVersion || 0);
+        }
+        // 不同主版本优先选择较低的（避免 Java 17 跑 1.12 兼容问题）
         return a.majorVersion - b.majorVersion;
     });
-    
+
     const chosen = suitable[0];
     console.log(`[Java] 选择Java: ${chosen.path} (主版本: ${chosen.majorVersion}, 来源: ${chosen.source})`);
-    
-    if (userJavaInfo && chosen.path !== userJavaInfo.path) {
-        console.log(`[Java] 注意: 自动选择了更匹配的Java ${chosen.majorVersion}，而非用户设置的Java ${userJavaInfo.majorVersion}`);
+
+    const userSetting = candidates.find(j => j.source === 'user_setting');
+    if (userSetting && chosen.path !== userSetting.path) {
+        console.log(`[Java] 注意: 自动选择了更匹配的Java ${chosen.majorVersion}，而非用户设置的Java ${userSetting.majorVersion}`);
     }
     
     return chosen.path;
@@ -4510,7 +5680,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
     }
     
     const result = {
-        java: { ok: false, path: '', version: '', required: 8, message: '' },
+        java: { ok: false, path: '', version: '', required: 8, maxVersion: 999, rangeSource: 'default', message: '' },
         versionJson: { ok: false, message: '' },
         mainJar: { ok: false, message: '' },
         libraries: { ok: true, missing: [], total: 0, message: '' },
@@ -4534,16 +5704,29 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
         console.log(`[DepCheck] version.json中的javaVersion字段:`, JSON.stringify(versionJson.javaVersion));
     }
 
-    const requiredJavaVer = getRequiredJavaVersion(versionId, versionJson);
+    const range = getJavaVersionRange(versionId, versionJson);
+    const requiredJavaVer = range.min;
+    const maxJavaVer = range.max;
     result.java.required = requiredJavaVer;
-    console.log(`[DepCheck] 需要的Java版本: ${requiredJavaVer}`);
+    result.java.maxVersion = maxJavaVer;
+    result.java.rangeSource = range.source;
+    console.log(`[DepCheck] 需要的Java版本: ${requiredJavaVer}${maxJavaVer < 999 ? '~' + maxJavaVer : '+'} (来源: ${range.source})`);
 
     const javaPath = selectJavaForVersion(versionId, settings, versionJson);
     console.log(`[DepCheck] 选择的Java路径: ${javaPath}`);
     
     if (!javaPath) {
         result.java.ok = false;
-        result.java.message = `未找到Java ${requiredJavaVer}+，请安装Java或配置Java路径`;
+        const rangeDesc = maxJavaVer < 999 ? `${requiredJavaVer}~${maxJavaVer}` : `${requiredJavaVer}+`;
+        const sysJava = detectSystemJava();
+        const bunJava = detectBundledJava();
+        const totalDetected = sysJava.length + bunJava.length;
+        if (totalDetected > 0) {
+            const detectedList = [...bunJava, ...sysJava].map(j => `Java ${j.majorVersion} (${j.path})`).join(', ');
+            result.java.message = `未找到合适版本的Java（需要 ${rangeDesc}，检测到 ${totalDetected} 个但版本不匹配: ${detectedList}），请前往 Java 管理页面安装或配置`;
+        } else {
+            result.java.message = `未找到Java运行环境（需要 ${rangeDesc}），请前往 Java 管理页面安装或配置`;
+        }
         console.log(`[DepCheck] 未找到Java，消息: ${result.java.message}`);
     } else {
         result.java.path = javaPath;
@@ -4557,15 +5740,19 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
             const majorVer = parseInt(majorStr, 10);
             console.log(`[DepCheck] 检测到的Java版本: ${result.java.version}, 主版本: ${majorVer}`);
             
-            if (majorVer >= requiredJavaVer) {
+            const maxJavaVer = range.max;
+            if (majorVer >= requiredJavaVer && majorVer <= maxJavaVer) {
                 result.java.ok = true;
-                result.java.message = `Java ${result.java.version} (满足要求 ${requiredJavaVer}+)`;
+                result.java.message = maxJavaVer < 999
+                    ? `Java ${result.java.version} (满足要求 ${requiredJavaVer}~${maxJavaVer})`
+                    : `Java ${result.java.version} (满足要求 ${requiredJavaVer}+)`;
                 console.log(`[DepCheck] Java满足要求`);
             } else {
                 result.java.ok = false;
-                result.java.message = `Java ${result.java.version} 不满足要求(需要 ${requiredJavaVer}+)，请在版本设置中更换Java或使用文件修复功能自动安装`;
+                const rangeDesc = maxJavaVer < 999 ? `${requiredJavaVer}~${maxJavaVer}` : `${requiredJavaVer}+`;
+                result.java.message = `Java ${result.java.version} 不满足要求(需要 ${rangeDesc})，请在版本设置中更换Java或使用文件修复功能自动安装`;
                 result.java.warning = true;
-                console.log(`[DepCheck] Java不满足要求`);
+                console.log(`[DepCheck] Java不满足要求: ${majorVer} 不在范围 ${requiredJavaVer}~${maxJavaVer} 内`);
             }
         } catch (e) {
             result.java.ok = false;
@@ -4868,7 +6055,9 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                     if (!baseUrl) {
                         if (lib.name.includes('fabric') || lib.name.includes('fabricmc')) {
                             baseUrl = 'https://maven.fabricmc.net/';
-                        } else if (lib.name.includes('forge') || lib.name.includes('minecraftforge') || lib.name.includes('neoforged') || lib.name.startsWith('net.minecraft')) {
+                        } else if (lib.name.includes('neoforged')) {
+                            baseUrl = 'https://maven.neoforged.net/';
+                        } else if (lib.name.includes('forge') || lib.name.includes('minecraftforge') || lib.name.startsWith('net.minecraft')) {
                             baseUrl = 'https://maven.minecraftforge.net/';
                         } else {
                             baseUrl = 'https://libraries.minecraft.net/';
@@ -4946,7 +6135,8 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
     const scanInheritsForge = (vid, visited) => {
         if (!vid || (visited && visited.has(vid))) return false;
         if (!visited) visited = new Set();
-        if (vid.toLowerCase().includes('forge')) return true;
+        const vl = vid.toLowerCase();
+        if (vl.includes('forge') && !vl.includes('neoforge') && !vl.includes('neoforged')) return true;
         visited.add(vid);
         const vjPath = path.join(VERSIONS_DIR, vid, `${vid}.json`);
         if (!fs.existsSync(vjPath)) return false;
@@ -4962,22 +6152,32 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
     const hasForgeLibs = (libs) => (libs || []).some(l =>
         l.name && (l.name.startsWith('net.minecraftforge:forge:') ||
                     l.name.startsWith('net.minecraftforge:fmlloader:') ||
+                    l.name.startsWith('net.neoforged:neoforge:') ||
+                    l.name.startsWith('net.neoforged.fancymodloader:') ||
                     (l.name.startsWith('net.minecraft:client:') && (l.name.endsWith(':srg') || l.name.endsWith(':extra')))));
 
-    const isForgeVersion = versionId.toLowerCase().includes('forge') ||
-        scanInheritsForge(versionId) ||
-        hasForgeLibs(versionJson.libraries);
+    const _depVLower = versionId.toLowerCase();
+    const _depIsNeo = _depVLower.includes('neoforge') || _depVLower.includes('neoforged');
+    const _depHasForgeId = _depVLower.includes('forge') && !_depIsNeo;
+    const _depHasForgeLibOnly = (versionJson.libraries || []).some(l =>
+        l.name && (l.name.startsWith('net.minecraftforge:forge:') || l.name.startsWith('net.minecraftforge:fmlloader:')));
+    const isForgeVersion = _depHasForgeId || scanInheritsForge(versionId) || _depHasForgeLibOnly;
     result.forgeCore = { ok: true, missing: [], message: '' };
 
     if (isForgeVersion) {
         const forgeCoreLibs = [];
         const forgeLibraries = versionJson.libraries || [];
 
+        const isNeoForgeVersion = (versionJson.libraries || []).some(l => l.name && (l.name.startsWith('net.neoforged:neoforge:') || l.name.startsWith('net.neoforged.fancymodloader:')));
+        const hasNeoForgeLibs = (versionJson.libraries || []).some(l => l.name && l.name.startsWith('net.neoforged'));
+
         const forgeClientLib = forgeLibraries.find(l =>
             l.name && /^net\.minecraftforge:forge:\d/.test(l.name) &&
             (l.name.endsWith(':client') || l.name.split(':').length === 3));
         const forgeMainLib = forgeLibraries.find(l =>
             l.name && /^net\.minecraftforge:forge:\d/.test(l.name) && l.name.split(':').length === 3);
+        const neoForgeLib = forgeLibraries.find(l => l.name && l.name.startsWith('net.neoforged:neoforge:'));
+        const neoFmlLib = forgeLibraries.find(l => l.name && l.name.startsWith('net.neoforged.fancymodloader:loader:'));
         const srgLib = forgeLibraries.find(l =>
             l.name && l.name.startsWith('net.minecraft:client:') && l.name.endsWith(':srg'));
         const extraLib = forgeLibraries.find(l =>
@@ -5036,9 +6236,28 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                 desc: 'Minecraft额外客户端'
             });
         }
+        if (neoForgeLib) {
+            const fp = neoForgeLib.name.split(':');
+            forgeCoreLibs.push({
+                name: neoForgeLib.name,
+                path: findForgeCoreFile(fp, `${fp[1]}-${fp[2]}.jar`),
+                desc: 'NeoForge核心'
+            });
+        }
+        if (neoFmlLib) {
+            const fp = neoFmlLib.name.split(':');
+            forgeCoreLibs.push({
+                name: neoFmlLib.name,
+                path: findForgeCoreFile(fp, `${fp[1]}-${fp[2]}.jar`),
+                desc: 'NeoForge FML加载器'
+            });
+        }
 
         if (forgeCoreLibs.length === 0) {
-            const forgeVerMatch = versionId.match(/^(.+)-forge-(.+)$/);
+            let forgeVerMatch = versionId.match(/^(.+)-[Nn]eo[Ff]orge-(.+)$/) || versionId.match(/^(.+)-[Ff]orge-(.+)$/);
+            if (!forgeVerMatch && versionJson.inheritsFrom) {
+                forgeVerMatch = versionJson.inheritsFrom.match(/^(.+)-[Nn]eo[Ff]orge-(.+)$/) || versionJson.inheritsFrom.match(/^(.+)-[Ff]orge-(.+)$/);
+            }
             if (forgeVerMatch) {
                 const mcVer = forgeVerMatch[1];
                 const fVer = forgeVerMatch[2];
@@ -5052,6 +6271,17 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                             const files = fs.readdirSync(forgeDir);
                             const clientJar = files.find(f => f.endsWith('-client.jar'));
                             if (clientJar) { forgeCoreLibs.push({ name: `forge-client:${mcVer}-${fVer}`, path: path.join(forgeDir, clientJar), desc: 'Forge客户端核心' }); forgeDirFound = true; }
+                        } catch (_) {}
+                        break;
+                    }
+                }
+                for (const base of forgeSearchBases) {
+                    const neoDir = path.join(base, 'net', 'neoforged', 'neoforge', fVer);
+                    if (fs.existsSync(neoDir)) {
+                        try {
+                            const files = fs.readdirSync(neoDir);
+                            const neoJar = files.find(f => f.endsWith('.jar') && !f.endsWith('-sources.jar') && !f.endsWith('-javadoc.jar'));
+                            if (neoJar) { forgeCoreLibs.push({ name: `net.neoforged:neoforge:${fVer}`, path: path.join(neoDir, neoJar), desc: 'NeoForge核心' }); forgeDirFound = true; }
                         } catch (_) {}
                         break;
                     }
@@ -5073,10 +6303,31 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                         if (forgeCoreLibs.length > 0) break;
                     }
                 }
-                if (forgeCoreLibs.length === 0) {
-                    forgeCoreLibs.push({ name: `net.minecraftforge:forge:${mcVer}-${fVer}:client`, path: path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', `${mcVer}-${fVer}`, `forge-${mcVer}-${fVer}-client.jar`), desc: 'Forge客户端核心' });
-                    forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:srg`, path: path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client', `${mcVer}-20230612.114412`, `client-${mcVer}-20230612.114412-srg.jar`), desc: 'Minecraft SRG映射客户端' });
-                    forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:extra`, path: path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client', `${mcVer}-20230612.114412`, `client-${mcVer}-20230612.114412-extra.jar`), desc: 'Minecraft额外客户端' });
+                // 新式Forge (1.13+, bootstraplauncher): 检查模块化核心库
+                if ((versionJson.mainClass || '').includes('bootstraplauncher')) {
+                    const fmlVersion = `${mcVer}-${fVer}`;
+                    const moduleNames = ['fmlcore', 'javafmllanguage', 'mclanguage', 'lowcodelanguage'];
+                    for (const modName of moduleNames) {
+                        const modPath = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', modName, fmlVersion, `${modName}-${fmlVersion}.jar`);
+                        if (!forgeCoreLibs.some(f => f.path === modPath)) forgeCoreLibs.push({ name: `net.minecraftforge:${modName}:${fmlVersion}`, path: modPath, desc: `Forge模块:${modName}` });
+                    }
+                }
+                // Forge patching JARs (client-srg, client-extra, forge-client)
+                forgeCoreLibs.push({ name: `net.minecraftforge:forge:${mcVer}-${fVer}:client`, path: path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', `${mcVer}-${fVer}`, `forge-${mcVer}-${fVer}-client.jar`), desc: 'Forge客户端核心' });
+                const clientBaseDir = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client');
+                let mcpDirName = null;
+                try {
+                    if (fs.existsSync(clientBaseDir)) {
+                        const subdirs = fs.readdirSync(clientBaseDir).filter(d => d.startsWith(`${mcVer}-`) && fs.statSync(path.join(clientBaseDir, d)).isDirectory());
+                        if (subdirs.length > 0) mcpDirName = subdirs[0];
+                    }
+                } catch (_) {}
+                if (mcpDirName) {
+                    forgeCoreLibs.push({ name: `net.minecraft:client:${mcpDirName}:srg`, path: path.join(clientBaseDir, mcpDirName, `client-${mcpDirName}-srg.jar`), desc: 'Minecraft SRG映射客户端' });
+                    forgeCoreLibs.push({ name: `net.minecraft:client:${mcpDirName}:extra`, path: path.join(clientBaseDir, mcpDirName, `client-${mcpDirName}-extra.jar`), desc: 'Minecraft额外客户端' });
+                } else {
+                    forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:srg`, path: path.join(clientBaseDir, `${mcVer}-mcp`, `client-${mcVer}-mcp-srg.jar`), desc: 'Minecraft SRG映射客户端' });
+                    forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:extra`, path: path.join(clientBaseDir, `${mcVer}-mcp`, `client-${mcVer}-mcp-extra.jar`), desc: 'Minecraft额外客户端' });
                 }
             }
         }
@@ -5290,10 +6541,10 @@ async function downloadMissingDependencies(missingFiles, onProgress, versionJson
     }
 
     const settings = loadSettingsCached();
-    const CONCURRENT_DOWNLOADS = maxThreads || parseInt(settings.maxThreads, 10) || 32;
+    const CONCURRENT_DOWNLOADS = maxThreads || parseInt(settings.maxThreads, 10) || 64;
     const PRELOAD_QUEUE_SIZE = CONCURRENT_DOWNLOADS * 2;
 
-    DownloadManager.connectionLimit = Math.max(CONCURRENT_DOWNLOADS * 2, 32);
+    DownloadManager.connectionLimit = Math.max(CONCURRENT_DOWNLOADS * 4, 64);
     DownloadManager.reset();
     DownloadManager.totalFiles = allFiles.length;
 
@@ -5559,7 +6810,6 @@ async function getVersionManifest(forceRefresh = false) {
     const urls = [
         VERSION_MANIFEST_MIRROR,
         'https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json',
-        'https://download.mcbbs.net/mc/game/version_manifest_v2.json',
         'https://bmclapi2.bangbang93.com/mc/game/version_manifest.json',
         VERSION_MANIFEST_URL
     ];
@@ -5626,13 +6876,38 @@ function fixModpackInheritsFrom(installed, loaderIdPattern) {
         if (loaderIdPattern.test(v.id)) continue;
         if (!bareMcVersionPattern.test(v.inheritsFrom)) continue;
         const baseMcId = v.inheritsFrom;
-        const parentLoader = installed.find(l =>
+        const candidates = installed.filter(l =>
             l.inheritsFrom === baseMcId &&
             !l.isExternal &&
             l.id !== v.id &&
             (l.isForge || l.isFabric || l.isNeoForge || l.isOptiFine || l.isLiteLoader)
         );
-        if (!parentLoader) continue;
+        if (candidates.length === 0) continue;
+        let parentLoader = candidates[0];
+        if (candidates.length > 1) {
+            const modpackJsonPath = path.join(VERSIONS_DIR, v.id, `${v.id}.json`);
+            if (fs.existsSync(modpackJsonPath)) {
+                try {
+                    const modpackData = JSON.parse(fs.readFileSync(modpackJsonPath, 'utf-8'));
+                    const libsStr = JSON.stringify(modpackData.libraries || []);
+                    const mainClass = modpackData.mainClass || '';
+                    const gameArgs = JSON.stringify(modpackData.arguments?.game || []);
+                    const isFabricModpack = libsStr.includes('net.fabricmc') || mainClass.includes('fabric') || gameArgs.includes('fabric');
+                    const isForgeModpack = libsStr.includes('net.minecraftforge') || mainClass.includes('forge') || gameArgs.includes('forge');
+                    const isNeoForgeModpack = libsStr.includes('net.neoforged') || mainClass.includes('neoforged') || gameArgs.includes('neoforge');
+                    if (isFabricModpack) {
+                        const fabricCandidate = candidates.find(c => c.isFabric);
+                        if (fabricCandidate) parentLoader = fabricCandidate;
+                    } else if (isNeoForgeModpack) {
+                        const neoCandidate = candidates.find(c => c.isNeoForge);
+                        if (neoCandidate) parentLoader = neoCandidate;
+                    } else if (isForgeModpack) {
+                        const forgeCandidate = candidates.find(c => c.isForge);
+                        if (forgeCandidate) parentLoader = forgeCandidate;
+                    }
+                } catch (e) {}
+            }
+        }
         const modpackJsonPath = path.join(VERSIONS_DIR, v.id, `${v.id}.json`);
         if (!fs.existsSync(modpackJsonPath)) continue;
         try {
@@ -5644,6 +6919,54 @@ function fixModpackInheritsFrom(installed, loaderIdPattern) {
             }
         } catch (e) {}
     }
+}
+
+const APRIL_FOOLS_IDS = new Set([
+    '2point0_blue', '2point0_red', '2point0_purple',
+    '20w14infinite', '20w14\u221E',
+    '3d shareware v1.34',
+    '1.rv-pre1',
+    '15w14a',
+    '22w13oneblockatatime',
+    '23w13a_or_b',
+    '24w14potato',
+    '25w14craftmine',
+    '26w14a'
+]);
+
+function correctVersionType(v) {
+    const id = v.id || '';
+    const idLower = id.toLowerCase();
+    const type = v.type || 'release';
+
+    if (APRIL_FOOLS_IDS.has(idLower)) {
+        return 'special';
+    }
+
+    if (type === 'snapshot' || type === 'pending') {
+        if (id.startsWith('1.') &&
+            !idLower.includes('combat') &&
+            !idLower.includes('rc') &&
+            !idLower.includes('experimental') &&
+            !idLower.includes('pre') &&
+            idLower !== '1.2') {
+            return 'release';
+        }
+    }
+
+    if (type === 'snapshot' || type === 'pending') {
+        if (v.releaseTime) {
+            try {
+                const d = new Date(v.releaseTime);
+                const utc2 = new Date(d.getTime() + 2 * 3600 * 1000);
+                if (utc2.getUTCMonth() === 3 && utc2.getUTCDate() === 1) {
+                    return 'special';
+                }
+            } catch (_) {}
+        }
+    }
+
+    return type;
 }
 
 function getInstalledVersions(forceRefresh) {
@@ -5672,7 +6995,7 @@ function getInstalledVersions(forceRefresh) {
                     const hasResourcepacksDir = fs.existsSync(path.join(versionDir, 'resourcepacks'));
                     installed.push({
                         id: data.id || dir,
-                        type: data.type || 'release',
+                        type: info.isAprilFools ? 'special' : (data.type || 'release'),
                         releaseTime: data.releaseTime || '',
                         mainClass: data.mainClass || '',
                         installed: true,
@@ -5685,14 +7008,21 @@ function getInstalledVersions(forceRefresh) {
                         isModpack: info.isModpack,
                         modpackLoader: info.modpackLoader,
                         baseVersion: info.baseVersion,
+                        isAprilFools: info.isAprilFools || false,
                         isExternal: false,
                         isolation: true,
                         hasMods: hasModsDir,
                         hasSaves: hasSavesDir,
-                        hasResourcepacks: hasResourcepacksDir
+                        hasResourcepacks: hasResourcepacksDir,
+                        ...(function() {
+                            try {
+                                const vs = loadVersionSettings(data.id || dir);
+                                return { customName: vs.customName || '', description: vs.description || '' };
+                            } catch (e) { return {}; }
+                        })()
                     });
                 } catch (e) {
-                    installed.push({ id: dir, type: 'release', installed: true, isExternal: false });
+                    console.log(`[Versions] 跳过无效版本目录 ${dir}: ${e.message}`);
                 }
             }
         }
@@ -5705,8 +7035,14 @@ function getInstalledVersions(forceRefresh) {
         for (const ev of externalVersions) {
             const existingIdx = installed.findIndex(v => v.id === ev.id);
             if (existingIdx >= 0) {
-                ev.id = ev.id + ' [外部]';
-                ev.originalId = ev.id.replace(' [外部]', '');
+                let suffix = 2;
+                let newId = ev.id + ' [外部' + (suffix > 1 ? suffix : '') + ']';
+                while (installed.some(v => v.id === newId)) {
+                    suffix++;
+                    newId = ev.id + ' [外部' + suffix + ']';
+                }
+                ev.id = newId;
+                ev.originalId = ev.id.replace(/ \[外部\d*\]/, '');
             }
             installed.push(ev);
         }
@@ -5719,8 +7055,8 @@ function getInstalledVersions(forceRefresh) {
     const installedMap = new Map();
     for (const v of installed) {
         installedMap.set(v.id, v);
-        if (v.isExternal && v.id.includes(' [外部]')) {
-            installedMap.set(v.id.replace(' [外部]', ''), v);
+        if (v.isExternal && v.id.includes(' [外部')) {
+            installedMap.set(v.id.replace(/ \[外部\d*\]/, ''), v);
         }
     }
 
@@ -5739,8 +7075,8 @@ function getInstalledVersions(forceRefresh) {
 
     const externalIdMap = new Map();
     for (const v of installed) {
-        if (v.isExternal && v.id.includes(' [外部]')) {
-            externalIdMap.set(v.id.replace(' [外部]', ''), v.id);
+        if (v.isExternal && v.id.includes(' [外部')) {
+            externalIdMap.set(v.id.replace(/ \[外部\d*\]/, ''), v.id);
         }
     }
     for (const baseId of [...inheritsFromIds]) {
@@ -6023,15 +7359,18 @@ function getInstalledMods() {
     scanModsDir(modsPath, '本地');
 
     if (modsPath) {
-        const settings = loadSettingsCached();
-        const sharedGameDir = settings.gameDir || DATA_DIR;
-        const sharedModsDir = path.join(sharedGameDir, 'mods');
-        if (sharedModsDir !== modsPath) {
-            scanModsDir(sharedModsDir, '共享');
-        }
-        const homeMinecraftMods = path.join(os.homedir(), 'AppData', 'Roaming', '.minecraft', 'mods');
-        if (homeMinecraftMods !== modsPath && homeMinecraftMods !== sharedModsDir) {
-            scanModsDir(homeMinecraftMods, '.minecraft');
+        const isolated = resolveVersionIsolation(versionId);
+        if (!isolated) {
+            const settings = loadSettingsCached();
+            const sharedGameDir = settings.gameDir || DATA_DIR;
+            const sharedModsDir = path.join(sharedGameDir, 'mods');
+            if (sharedModsDir !== modsPath) {
+                scanModsDir(sharedModsDir, '共享');
+            }
+            const homeMinecraftMods = path.join(os.homedir(), 'AppData', 'Roaming', '.minecraft', 'mods');
+            if (homeMinecraftMods !== modsPath && homeMinecraftMods !== sharedModsDir) {
+                scanModsDir(homeMinecraftMods, '.minecraft');
+            }
         }
     }
 
@@ -6142,39 +7481,74 @@ function detectSystemJava() {
         if (!fs.existsSync(javaExe)) return;
 
         try {
-            const versionOutput = execSync(`"${javaExe}" -version 2>&1`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
-            const versionMatch = versionOutput.match(/version "([^"]+)"/) || versionOutput.match(/version (\S+)/);
-            if (!versionMatch) return;
-            const version = versionMatch[1];
-
-            let majorVersion = 0;
-            if (version.startsWith('1.')) {
-                majorVersion = parseInt(version.split('.')[1], 10);
-            } else {
-                majorVersion = parseInt(version.split('.')[0], 10);
-            }
-            if (isNaN(majorVersion) || majorVersion <= 0) return;
-
-            const javaHome = path.dirname(path.dirname(javaExe));
-            const isJdk = fs.existsSync(path.join(javaHome, 'bin', process.platform === 'win32' ? 'javac.exe' : 'javac'));
-
-            let is64Bit = false;
-            try {
-                const archOutput = execSync(`"${javaExe}" -XshowSettings:properties -version 2>&1`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
-                is64Bit = archOutput.includes('os.arch = x86_64') || archOutput.includes('os.arch = amd64') || archOutput.includes('64-bit');
-            } catch (e) {
-                is64Bit = versionOutput.includes('64-Bit') || versionOutput.includes('64-bit');
-            }
-
             const folder = path.dirname(javaExe);
             const folderLower = folder.toLowerCase();
             if (folderLower.includes('finalshell') || folderLower.includes('paranoia')) return;
             if (fs.existsSync(path.join(folder, 'pdf-bookmark'))) return;
 
+            let version = 'unknown';
+            let majorVersion = 0;
+            let minorVersion = 0;
+
+            const javaHome = path.dirname(folder);
+            const releaseFile = path.join(javaHome, 'release');
+            if (fs.existsSync(releaseFile)) {
+                try {
+                    const content = fs.readFileSync(releaseFile, 'utf8');
+                    const match = content.match(/JAVA_VERSION="([^"]+)"/);
+                    if (match) {
+                        version = match[1];
+                        if (version.startsWith('1.')) {
+                            majorVersion = parseInt(version.split('.')[1], 10);
+                            const upd = version.match(/_(\d+)/);
+                            if (upd) minorVersion = parseInt(upd[1], 10);
+                        } else {
+                            majorVersion = parseInt(version.split('.')[0], 10);
+                            const minorPart = version.split('.')[1];
+                            if (minorPart) minorVersion = parseInt(minorPart, 10) || 0;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            if (majorVersion <= 0) {
+                try {
+                    const versionOutput = execSync(`"${javaExe}" -version 2>&1`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
+                    const versionMatch = versionOutput.match(/version "([^"]+)"/) || versionOutput.match(/version (\S+)/);
+                    if (!versionMatch) return;
+                    version = versionMatch[1];
+                    if (version.startsWith('1.')) {
+                        majorVersion = parseInt(version.split('.')[1], 10);
+                        const upd = version.match(/_(\d+)/);
+                        if (upd) minorVersion = parseInt(upd[1], 10);
+                    } else {
+                        majorVersion = parseInt(version.split('.')[0], 10);
+                        const minorPart = version.split('.')[1];
+                        if (minorPart) minorVersion = parseInt(minorPart, 10) || 0;
+                    }
+                } catch (e) {}
+            }
+
+            if (isNaN(majorVersion) || majorVersion <= 0) return;
+
+            const isJdk = fs.existsSync(path.join(javaHome, 'bin', process.platform === 'win32' ? 'javac.exe' : 'javac'));
+
+            let is64Bit = true;
+            try {
+                const archOutput = execSync(`"${javaExe}" -XshowSettings:properties -version 2>&1`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
+                is64Bit = archOutput.includes('os.arch = x86_64') || archOutput.includes('os.arch = amd64') || archOutput.includes('64-bit');
+            } catch (e) {
+                try {
+                    const vOutput = execSync(`"${javaExe}" -version 2>&1`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
+                    is64Bit = vOutput.includes('64-Bit') || vOutput.includes('64-bit');
+                } catch (e2) {}
+            }
+
             results.push({
                 path: javaExe,
                 version: version,
                 majorVersion: majorVersion,
+                minorVersion: minorVersion,
                 is64Bit: is64Bit,
                 isJdk: isJdk,
                 source: source,
@@ -6201,7 +7575,7 @@ function detectSystemJava() {
                     continue;
                 }
 
-                const isJavaRelated = ['java', 'jdk', 'jre', 'jvm', 'runtime', 'adopt', 'temurin', 'corretto', 'zulu', 'openjdk', 'graalvm', 'liberica', 'microsoft', 'amazon', 'sapmachine', 'dragonwell', 'bisheng'].some(kw => dirName.includes(kw));
+                const isJavaRelated = ['java', 'jdk', 'jre', 'jvm', 'runtime', 'adopt', 'temurin', 'corretto', 'zulu', 'openjdk', 'graalvm', 'liberica', 'microsoft', 'amazon', 'sapmachine', 'dragonwell', 'bisheng', 'windows-x64', 'windows-arm64', 'windows-x86'].some(kw => dirName.includes(kw));
                 const isVersionDir = /^jdk[-_]?\d/i.test(dirName) || /^jre[-_]?\d/i.test(dirName) || /^\d+([._]\d+)*$/i.test(dirName);
 
                 if (isJavaRelated || isVersionDir) {
@@ -6326,9 +7700,33 @@ function detectSystemJava() {
 
         for (const searchPath of additionalPaths) {
             if (fs.existsSync(searchPath)) {
-                searchFolderForJava(searchPath, 2);
+                searchFolderForJava(searchPath, 3);
             }
         }
+
+        if (userProfile) searchFolderForJava(userProfile, 2);
+
+        const msStorePaths = [
+            path.join(localAppData, 'Packages', 'Microsoft.4297127D64EC6_8wekyb3d8bbwe', 'LocalCache', 'Local', 'runtime'),
+            path.join(localAppData, 'Packages', 'Microsoft.4297127D64EC6_8wekyb3d8bbwe', 'LocalCache', 'Local', 'runtime', 'java-runtime-gamma', 'windows-x64'),
+            path.join(localAppData, 'Packages', 'Microsoft.4297127D64EC6_8wekyb3d8bbwe', 'LocalCache', 'Local', 'runtime', 'java-runtime-gold', 'windows-x64'),
+        ];
+        for (const msPath of msStorePaths) {
+            if (fs.existsSync(msPath)) {
+                searchFolderForJava(msPath, 3);
+            }
+        }
+
+        try {
+            const whereOutput = execSync('where java 2>nul', { encoding: 'utf8', timeout: 5000, windowsHide: true });
+            const whereLines = whereOutput.split(/\r?\n/).filter(l => l.trim());
+            for (const line of whereLines) {
+                const trimmed = line.trim();
+                if (trimmed && fs.existsSync(trimmed)) {
+                    addJavaEntry(trimmed, 'system');
+                }
+            }
+        } catch (e) {}
 
         try {
             const drives = execSync('wmic logicaldisk get caption /value 2>nul', { encoding: 'utf8', timeout: 5000, windowsHide: true });
@@ -6446,7 +7844,9 @@ async function getLibericaLatestVersion(majorVersion) {
     }
 }
 
-async function downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorIndex = 0) {
+async function downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorIndex = 0, abortSignal = null) {
+    const isAborted = () => abortSignal && abortSignal.aborted;
+    const checkAbort = (msg) => { if (isAborted()) throw new Error(msg || '下载已取消'); };
     const updateStatus = (status, progress, message = '', speed = 0, downloadedBytes = 0, totalBytes = 0) => {
         try {
             fs.writeFileSync(sessionFile, JSON.stringify({
@@ -6589,7 +7989,7 @@ async function downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorInd
 
         console.log(`[Java] 文件大小: ${totalSize} bytes`);
 
-        const tempFile = path.join(DATA_DIR, fileName);
+        const tempFile = path.join(os.tmpdir(), fileName);
 
         const jdkSource = downloadUrl.includes('bell-sw.com') ? 'Liberica' : 'Temurin';
         updateStatus('downloading', 10, `正在下载${jdkSource} JDK ${majorVersion}...`);
@@ -6634,14 +8034,16 @@ async function downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorInd
             updateStatus('downloading', calcPct(progress), formatProgress(progress), Math.max(_smoothSpeed, speed), progress.bytesDownloaded, progress.totalBytes || totalSize);
         };
 
-        await downloadFileChunked(downloadMirrors.length > 0 ? downloadMirrors[0] : downloadUrl, tempFile, { onProgress: onDlProgress, timeout: 600000, retries: 3, mirrors: downloadMirrors.length > 0 ? downloadMirrors : null }).catch(async (err) => {
+        await downloadFileChunked(downloadMirrors.length > 0 ? downloadMirrors[0] : downloadUrl, tempFile, { onProgress: onDlProgress, timeout: 600000, retries: 3, mirrors: downloadMirrors.length > 0 ? downloadMirrors : null, abortSignal }).catch(async (err) => {
+            checkAbort('下载已取消');
             console.log(`[Java] 分块下载失败: ${err.message}，回退单线程`);
             const fallbackUrls = downloadMirrors.length > 0 ? [...downloadMirrors, downloadUrl] : [downloadUrl];
             let lastErr = err;
             for (const url of fallbackUrls) {
                 try {
+                    checkAbort('下载已取消');
                     console.log(`[Java] 尝试单线程下载: ${url.substring(0, 80)}...`);
-                    await _dlSingle(url, tempFile, { onProgress: onDlProgress, timeout: 600000, retries: 2, stallTimeout: 30000 });
+                    await _dlSingle(url, tempFile, { onProgress: onDlProgress, timeout: 600000, retries: 2, stallTimeout: 30000, abortSignal });
                     return;
                 } catch (e) {
                     console.warn(`[Java] 单线程下载失败: ${e.message}`);
@@ -6651,6 +8053,7 @@ async function downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorInd
             throw lastErr;
         });
         
+        checkAbort('下载已取消');
         updateStatus('extracting', 85, '正在解压JDK...');
         
         if (!fs.existsSync(JAVA_DIR)) fs.mkdirSync(JAVA_DIR, { recursive: true });
@@ -6750,7 +8153,13 @@ async function downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorInd
         
     } catch (e) {
         console.error('[Java] 下载失败:', e.message);
-        updateStatus('error', lastPct, `安装失败: ${e.message}`);
+        if (isAborted()) {
+            updateStatus('cancelled', lastPct, '下载已取消');
+        } else {
+            updateStatus('error', lastPct, `安装失败: ${e.message}`);
+        }
+    } finally {
+        javaDownloadAbortControllers.delete(sessionId);
     }
 }
 
@@ -6864,59 +8273,62 @@ function detectBundledJava() {
     const results = [];
     if (!fs.existsSync(JAVA_DIR)) return results;
 
+    const javaExeNames = process.platform === 'win32' ? ['java.exe', 'javaw.exe'] : ['java'];
+
     const findJavaInDir = (dir, maxDepth, currentDepth = 0) => {
         if (currentDepth > maxDepth || !fs.existsSync(dir)) return;
         try {
-            const javaExeName = process.platform === 'win32' ? 'java.exe' : 'java';
-            const directJavaExe = path.join(dir, 'bin', javaExeName);
-            if (fs.existsSync(directJavaExe)) {
-                const javaHome = dir;
-                const versionFile = path.join(javaHome, 'release');
-                let version = 'unknown';
-                let majorVersion = 0;
+            for (const javaExeName of javaExeNames) {
+                const directJavaExe = path.join(dir, 'bin', javaExeName);
+                if (fs.existsSync(directJavaExe)) {
+                    const javaHome = dir;
+                    const versionFile = path.join(javaHome, 'release');
+                    let version = 'unknown';
+                    let majorVersion = 0;
+                    let minorVersion = 0;
 
-                if (fs.existsSync(versionFile)) {
-                    const content = fs.readFileSync(versionFile, 'utf8');
-                    const match = content.match(/JAVA_VERSION="([^"]+)"/);
-                    if (match) {
-                        version = match[1];
-                        if (version.startsWith('1.')) {
-                            majorVersion = parseInt(version.split('.')[1], 10);
-                        } else {
-                            majorVersion = parseInt(version.split('.')[0], 10);
-                        }
-                    }
-                }
-
-                if (majorVersion <= 0) {
-                    try {
-                        const versionOutput = execSync(`"${directJavaExe}" -version 2>&1`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
-                        const versionMatch = versionOutput.match(/version "([^"]+)"/) || versionOutput.match(/version (\S+)/);
-                        if (versionMatch) {
-                            version = versionMatch[1];
+                    if (fs.existsSync(versionFile)) {
+                        const content = fs.readFileSync(versionFile, 'utf8');
+                        const match = content.match(/JAVA_VERSION="([^"]+)"/);
+                        if (match) {
+                            version = match[1];
                             if (version.startsWith('1.')) {
                                 majorVersion = parseInt(version.split('.')[1], 10);
+                                const upd = version.match(/_(\d+)/);
+                                if (upd) minorVersion = parseInt(upd[1], 10);
                             } else {
                                 majorVersion = parseInt(version.split('.')[0], 10);
+                                const minorPart = version.split('.')[1];
+                                if (minorPart) minorVersion = parseInt(minorPart, 10) || 0;
                             }
                         }
-                    } catch (e) {}
-                }
+                    }
 
-                const isJdk = fs.existsSync(path.join(javaHome, 'bin', process.platform === 'win32' ? 'javac.exe' : 'javac'));
-                const normalized = directJavaExe.toLowerCase().replace(/\\/g, '/');
-                if (!results.some(r => r.path.toLowerCase().replace(/\\/g, '/') === normalized)) {
-                    results.push({
-                        path: directJavaExe,
-                        version: version,
-                        majorVersion: majorVersion || 17,
-                        is64Bit: true,
-                        isJdk: isJdk,
-                        source: 'bundled',
-                        javaHome: javaHome
-                    });
+                    if (majorVersion <= 0) {
+                        const info = getJavaVersionInfo(directJavaExe);
+                        version = info.version;
+                        majorVersion = info.major;
+                        minorVersion = info.minor;
+                    }
+
+                    if (majorVersion > 0) {
+                        const isJdk = fs.existsSync(path.join(javaHome, 'bin', process.platform === 'win32' ? 'javac.exe' : 'javac'));
+                        const normalized = directJavaExe.toLowerCase().replace(/\\/g, '/');
+                        if (!results.some(r => r.path.toLowerCase().replace(/\\/g, '/') === normalized)) {
+                            results.push({
+                                path: directJavaExe,
+                                version: version,
+                                majorVersion: majorVersion,
+                                minorVersion: minorVersion,
+                                is64Bit: true,
+                                isJdk: isJdk,
+                                source: 'bundled',
+                                javaHome: javaHome
+                            });
+                        }
+                    }
+                    return;
                 }
-                return;
             }
             const entries = fs.readdirSync(dir, { withFileTypes: true });
             for (const entry of entries) {
@@ -7169,7 +8581,7 @@ function findMainJar(versionJson, versionId, externalVersionDir = null, _visited
     }
 
     // Follow inheritsFrom chain recursively
-    if (versionJson.inheritsFrom && !isExternal) {
+    if (versionJson.inheritsFrom) {
         if (!_visited) _visited = new Set();
         if (_visited.has(versionJson.inheritsFrom)) {
             console.warn(`[FindMainJar] 继承链循环: ${[..._visited].join(' -> ')} -> ${versionJson.inheritsFrom}`);
@@ -7177,30 +8589,34 @@ function findMainJar(versionJson, versionId, externalVersionDir = null, _visited
         }
         _visited.add(versionJson.inheritsFrom);
         
-        const parentJsonPath = path.join(VERSIONS_DIR, versionJson.inheritsFrom, `${versionJson.inheritsFrom}.json`);
-        if (fs.existsSync(parentJsonPath)) {
+        const parentJsonPath = _findVersionJsonInAnyDir(versionJson.inheritsFrom);
+        if (parentJsonPath && fs.existsSync(parentJsonPath)) {
+            const parentBaseDir = path.dirname(parentJsonPath);
             try {
                 const parentJson = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'));
-                const parentJar = findMainJar(parentJson, versionJson.inheritsFrom, null, _visited);
+                const parentJar = findMainJar(parentJson, versionJson.inheritsFrom, parentBaseDir, _visited);
                 if (parentJar) return parentJar;
             } catch (e) {}
-        }
-        
-        const parentDir = path.join(VERSIONS_DIR, versionJson.inheritsFrom);
-        if (fs.existsSync(parentDir)) {
             try {
-                const jars = fs.readdirSync(parentDir).filter(f => f.endsWith('.jar') && !f.endsWith('-sources.jar'));
-                if (jars.length > 0) return path.join(parentDir, jars[0]);
+                const jars = fs.readdirSync(parentBaseDir).filter(f => f.endsWith('.jar') && !f.endsWith('-sources.jar'));
+                if (jars.length > 0) return path.join(parentBaseDir, jars[0]);
             } catch (e) {}
         }
     }
 
     // Final fallback: scan all version dirs for a base client jar
-    if (!isExternal) {
+    {
         const allDirs = [
             path.join(VERSIONS_DIR, actualVersionId),
             ...(versionJson.inheritsFrom ? [path.join(VERSIONS_DIR, versionJson.inheritsFrom)] : [])
         ];
+        if (isExternal && externalVersionDir) {
+            allDirs.push(externalVersionDir);
+            if (versionJson.inheritsFrom) {
+                const parentJson = _findVersionJsonInAnyDir(versionJson.inheritsFrom);
+                if (parentJson) allDirs.push(path.dirname(parentJson));
+            }
+        }
         const visitedParents = _visited || new Set();
         for (const d of allDirs) {
             if (visitedParents.has(path.basename(d))) continue;
@@ -7368,10 +8784,25 @@ function detectModLoaderParent(data, externalVersionDir) {
     }
 }
 
+const _resolvedJsonCache = new Map();
+const _resolvedJsonCacheTime = new Map();
+const RESOLVED_JSON_CACHE_TTL = 60000;
+
+function _invalidateResolvedJsonCache(versionId) {
+    _resolvedJsonCache.delete(versionId);
+    _resolvedJsonCacheTime.delete(versionId);
+}
+
 function resolveVersionJson(versionId, externalVersionDir = null, visited = null) {
     if (!visited) visited = new Set();
     if (visited.has(versionId)) return null;
     visited.add(versionId);
+
+    const cached = _resolvedJsonCache.get(versionId);
+    const cachedTime = _resolvedJsonCacheTime.get(versionId);
+    if (cached && cachedTime && (Date.now() - cachedTime < RESOLVED_JSON_CACHE_TTL)) {
+        return JSON.parse(JSON.stringify(cached));
+    }
 
     let versionDir, jsonFile;
     if (externalVersionDir) {
@@ -7419,11 +8850,20 @@ function resolveVersionJson(versionId, externalVersionDir = null, visited = null
             const isParentExternal = parentVersionDir !== path.join(VERSIONS_DIR, data.inheritsFrom);
             const parentJson = resolveVersionJson(data.inheritsFrom, isParentExternal ? parentVersionDir : null, visited);
             if (parentJson) {
-                return mergeVersionJson(parentJson, data);
+                const result = mergeVersionJson(parentJson, data);
+                if (result && !result.error) {
+                    _resolvedJsonCache.set(versionId, JSON.parse(JSON.stringify(result)));
+                    _resolvedJsonCacheTime.set(versionId, Date.now());
+                }
+                return result;
             }
         }
 
         console.warn(`[ResolveVersion] Parent version not found: ${data.inheritsFrom}`);
+    }
+    if (data && !data.error) {
+        _resolvedJsonCache.set(versionId, JSON.parse(JSON.stringify(data)));
+        _resolvedJsonCacheTime.set(versionId, Date.now());
     }
     return data;
 }
@@ -7758,6 +9198,136 @@ function compareVersions(v1, v2) {
         if (p1 < p2) return -1;
     }
     return 0;
+}
+
+const FORGE_MAVEN_BASES = [
+    'https://maven.minecraftforge.net',
+    'https://bmclapi2.bangbang93.com/maven',
+];
+
+async function downloadForgeCoreLibsFromMaven(forgeVersionStr, onProgress) {
+    const prefix = 'net/minecraftforge';
+    const coreArtifacts = [
+        { dir: `${prefix}/fmlcore/${forgeVersionStr}`, file: `fmlcore-${forgeVersionStr}.jar` },
+        { dir: `${prefix}/javafmllanguage/${forgeVersionStr}`, file: `javafmllanguage-${forgeVersionStr}.jar` },
+        { dir: `${prefix}/mclanguage/${forgeVersionStr}`, file: `mclanguage-${forgeVersionStr}.jar` },
+        { dir: `${prefix}/lowcodelanguage/${forgeVersionStr}`, file: `lowcodelanguage-${forgeVersionStr}.jar` },
+    ];
+
+    let downloaded = 0;
+    let failed = 0;
+
+    for (const artifact of coreArtifacts) {
+        const targetPath = path.join(LIBRARIES_DIR, artifact.dir, artifact.file);
+        if (fs.existsSync(targetPath) && isJarIntact(targetPath)) continue;
+
+        let ok = false;
+        for (const mavenBase of FORGE_MAVEN_BASES) {
+            const url = `${mavenBase}/${artifact.dir}/${artifact.file}`;
+            try {
+                if (!fs.existsSync(path.dirname(targetPath))) fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+                await downloadFileWithMirror(url, targetPath);
+                if (fs.existsSync(targetPath) && isJarIntact(targetPath)) {
+                    ok = true;
+                    downloaded++;
+                    console.log(`[Forge] Maven下载成功: ${artifact.file} (from ${mavenBase})`);
+                    break;
+                }
+            } catch (_) {}
+            try { if (fs.existsSync(targetPath) && !isJarIntact(targetPath)) fs.unlinkSync(targetPath); } catch (_) {}
+        }
+        if (!ok) {
+            failed++;
+            console.warn(`[Forge] Maven下载失败: ${artifact.file}`);
+        }
+    }
+
+    if (downloaded > 0 || failed === 0) {
+        console.log(`[Forge] 核心库Maven补全: 下载${downloaded}个, 失败${failed}个`);
+    } else {
+        console.warn(`[Forge] 核心库Maven补全失败: ${failed}个文件无法下载`);
+    }
+
+    return { downloaded, failed, total: coreArtifacts.length };
+}
+
+async function downloadForgePatchingJars(mcVersion, forgeVersion, mcpVersion) {
+    if (!mcVersion || !forgeVersion) return { ok: false, reason: '缺少版本号' };
+
+    const verStr = `${mcVersion}-${forgeVersion}`;
+    const forgeDir = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', verStr);
+    const forgeClientJar = path.join(forgeDir, `forge-${verStr}-client.jar`);
+    const forgeUniversalJar = path.join(forgeDir, `forge-${verStr}-universal.jar`);
+    const hasForge = (fs.existsSync(forgeClientJar) && isJarIntact(forgeClientJar)) ||
+        (fs.existsSync(forgeUniversalJar) && isJarIntact(forgeUniversalJar));
+
+    const missing = [];
+
+    if (!hasForge) {
+        const forgePath = `net/minecraftforge/forge/${verStr}`;
+        const candidates = [
+            { dir: forgePath, file: `forge-${verStr}-client.jar` },
+            { dir: forgePath, file: `forge-${verStr}-universal.jar` },
+        ];
+        let gotForge = false;
+        const FORGE_JAR_DL_TIMEOUT = 20000;
+        for (const art of candidates) {
+            const targetPath = path.join(LIBRARIES_DIR, art.dir, art.file);
+            if (fs.existsSync(targetPath) && isJarIntact(targetPath)) { gotForge = true; break; }
+            for (const mavenBase of FORGE_MAVEN_BASES) {
+                const url = `${mavenBase}/${art.dir}/${art.file}`;
+                try {
+                    if (!fs.existsSync(path.dirname(targetPath))) fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+                    await downloadFileWithMirror(url, targetPath, null, 1, null, FORGE_JAR_DL_TIMEOUT);
+                    if (fs.existsSync(targetPath) && isJarIntact(targetPath)) {
+                        console.log(`[Forge] Maven下载成功: ${art.file}`);
+                        gotForge = true;
+                        break;
+                    }
+                } catch (_) {}
+                try { if (fs.existsSync(targetPath) && !isJarIntact(targetPath)) fs.unlinkSync(targetPath); } catch (_) {}
+            }
+            if (gotForge) break;
+        }
+        if (!gotForge) missing.push(`forge-${verStr}-client.jar/universal.jar`);
+    }
+
+    if (mcpVersion) {
+        const clientVerStr = `${mcVersion}-${mcpVersion}`;
+        const clientDir = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client', clientVerStr);
+        const clientJars = [
+            `client-${clientVerStr}-srg.jar`,
+            `client-${clientVerStr}-extra.jar`,
+        ];
+        for (const jarName of clientJars) {
+            const targetPath = path.join(clientDir, jarName);
+            if (fs.existsSync(targetPath) && isJarIntact(targetPath)) continue;
+            let ok = false;
+            const clientPath = `net/minecraft/client/${clientVerStr}`;
+            const PATCHING_DL_TIMEOUT = 15000;
+            for (const mavenBase of FORGE_MAVEN_BASES) {
+                const url = `${mavenBase}/${clientPath}/${jarName}`;
+                try {
+                    if (!fs.existsSync(clientDir)) fs.mkdirSync(clientDir, { recursive: true });
+                    await downloadFileWithMirror(url, targetPath, null, 1, null, PATCHING_DL_TIMEOUT);
+                    if (fs.existsSync(targetPath) && isJarIntact(targetPath)) {
+                        console.log(`[Forge] Maven下载成功: ${jarName}`);
+                        ok = true;
+                        break;
+                    }
+                } catch (_) {}
+                try { if (fs.existsSync(targetPath) && !isJarIntact(targetPath)) fs.unlinkSync(targetPath); } catch (_) {}
+            }
+            if (!ok) missing.push(jarName);
+        }
+    }
+
+    if (missing.length > 0) {
+        console.warn(`[Forge] Forge关键JAR补全失败: ${missing.join(', ')}`);
+        return { ok: false, reason: `缺失: ${missing.join(', ')}` };
+    }
+    console.log(`[Forge] Forge关键JAR补全检查通过`);
+    return { ok: true, reason: 'Forge关键JAR已就绪' };
 }
 
 function findForgeCoreJars(versionJson, searchBases) {
@@ -8247,14 +9817,11 @@ function buildClasspath(versionJson, versionId, externalVersionDir = null) {
                         if (fs.existsSync(path.join(base, artifact.dir, artifact.file))) { found = true; break; }
                     }
                     if (!found) {
-                        const placeholderPath = path.join(searchBases[searchBases.length - 1] || LIBRARIES_DIR, artifact.dir, artifact.file);
-                        classpath.push(placeholderPath);
                         _missingNames.push(artifact.name);
-                        missingCount++;
                     }
                 }
                 if (_missingNames.length > 0) {
-                    console.warn(`[Classpath] Forge核心库缺失(已加入占位路径): ${_missingNames.join(', ')} — 文件不存在于磁盘, JVM启动后Forge引导程序可能报Invalid paths argument`);
+                    console.warn(`[Classpath] Forge核心库缺失(不加入classpath): ${_missingNames.join(', ')} — JVM启动后Forge引导程序可能报Invalid paths argument，启动器将在启动前尝试自动补全`);
                 }
             }
         }
@@ -8305,7 +9872,7 @@ function getNativesFolder(versionId) {
     const isAscii = /^[\x00-\x7F]*$/.test(primary);
     if (isAscii) return primary;
 
-    const fallback1 = path.join(os.homedir(), '.versepc', 'bin', 'natives');
+    const fallback1 = path.join(DATA_DIR, 'bin', 'natives');
     if (/^[\x00-\x7F]*$/.test(fallback1)) return fallback1;
 
     const fallback2 = path.join(os.homedir(), '.minecraft', 'bin', 'natives');
@@ -8322,6 +9889,8 @@ function extractNatives(versionJson, versionId, externalVersionDir = null) {
         try { fs.rmSync(nativesDir, { recursive: true, force: true }); } catch (e) {}
     }
     fs.mkdirSync(nativesDir, { recursive: true });
+
+    const nativeJars = [];
 
     const libraries = versionJson.libraries || [];
     const currentPlatform = process.platform === 'win32' ? 'windows' :
@@ -8341,7 +9910,7 @@ function extractNatives(versionJson, versionId, externalVersionDir = null) {
     }
     nativeSearchBases.push(LIBRARIES_DIR);
     // PCL2策略: 整合包的LWJGL natives可能来自用户已有的 .minecraft 目录
-    const mcLibDir = path.join(MINECRAFT_DIR, '.minecraft', 'libraries');
+    const mcLibDir = path.join(MINECRAFT_DIR, 'libraries');
     if (mcLibDir !== LIBRARIES_DIR && fs.existsSync(mcLibDir)) {
         nativeSearchBases.push(mcLibDir);
     }
@@ -8375,6 +9944,12 @@ function extractNatives(versionJson, versionId, externalVersionDir = null) {
                 if (isNative) {
                     const fileName = path.basename(entryName);
                     const destPath = path.join(nativesDir, fileName);
+                    if (fs.existsSync(destPath)) {
+                        try {
+                            const existingStat = fs.statSync(destPath);
+                            if (existingStat.size === entry.header.size) continue;
+                        } catch (_) {}
+                    }
                     try {
                         const data = entry.getData();
                         if (data && data.length > 0) {
@@ -8494,6 +10069,7 @@ function extractNatives(versionJson, versionId, externalVersionDir = null) {
         if (!nativePath || !fs.existsSync(nativePath)) continue;
 
         console.log(`[Natives] 提取: ${path.basename(nativePath)}`);
+        nativeJars.push(nativePath);
         extractNativeJar(nativePath);
     }
 
@@ -8560,6 +10136,7 @@ function extractNatives(versionJson, versionId, externalVersionDir = null) {
                 }
                 if (!nativePath || !fs.existsSync(nativePath)) continue;
                 console.log(`[Natives] 提取(父版本): ${path.basename(nativePath)}`);
+                nativeJars.push(nativePath);
                 extractNativeJar(nativePath);
             }
         } catch (e) { console.error(`[Natives] 父版本加载失败: ${e.message}`); break; }
@@ -8567,7 +10144,32 @@ function extractNatives(versionJson, versionId, externalVersionDir = null) {
 
     const extractedFiles = fs.existsSync(nativesDir) ? fs.readdirSync(nativesDir) : [];
     console.log(`[Natives] 提取完成，共 ${extractedFiles.length} 个文件: ${extractedFiles.join(', ')}`);
-    
+
+    try {
+        const AdmZipCleanup = require('adm-zip');
+        const existingFiles = new Set();
+        for (const nativeJar of nativeJars) {
+            const zip = new AdmZipCleanup(nativeJar);
+            for (const entry of zip.getEntries()) {
+                if (entry.isDirectory) continue;
+                const en = entry.entryName.toLowerCase();
+                if (en.endsWith('.dll') || en.endsWith('.so') || en.endsWith('.dylib') || en.endsWith('.jnilib')) {
+                    const fileName = path.basename(entry.entryName);
+                    existingFiles.add(fileName.toLowerCase());
+                }
+            }
+        }
+        if (fs.existsSync(nativesDir)) {
+            for (const f of fs.readdirSync(nativesDir)) {
+                const fl = f.toLowerCase();
+                if ((fl.endsWith('.dll') || fl.endsWith('.so') || fl.endsWith('.dylib') || fl.endsWith('.jnilib')) && !existingFiles.has(fl)) {
+                    console.log('[Natives] Cleaned stale:', f);
+                    try { fs.unlinkSync(path.join(nativesDir, f)); } catch (_) {}
+                }
+            }
+        }
+    } catch (_) {}
+
     return nativesDir;
 }
 
@@ -8694,6 +10296,8 @@ function restoreOfflineSkin(backups) {
     }
 }
 
+
+
 function buildLaunchArguments(versionJson, settings, account, versionId, customGameDir = null, externalVersionDir = null) {
     const actualVersionId = versionId || versionJson.id || 'unknown';
     const isExternal = !!externalVersionDir;
@@ -8807,7 +10411,7 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
 
     let maxMemMB = settings.maxMemory || 4096;
     try {
-        const storePath = path.join(require('os').homedir(), '.versepc', 'app-store.json');
+        const storePath = path.join(DATA_DIR, 'app-store.json');
         if (fs.existsSync(storePath)) {
             const store = JSON.parse(fs.readFileSync(storePath, 'utf8'));
             const launchStr = store['versepc_launch_settings'];
@@ -8835,7 +10439,9 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
         }
     } catch (e) {}
     const minMemMB = Math.min(1024, maxMemMB);
-    jvmArgs.push(`-Xmx${maxMemMB}M`, `-Xms${minMemMB}M`);
+    jvmArgs.push(`-Xmn${Math.floor(maxMemMB * 0.15)}M`, `-Xmx${maxMemMB}M`, `-Xms${minMemMB}M`);
+    jvmArgs.push('-Dlog4j2.formatMsgNoLookups=true');
+    jvmArgs.push('-Djava.net.preferIPv4Stack=true');
 
     const hasUserGc = jvmArgs.some(a => /^-XX:\+?Use/.test(a) || /-XX:Use/.test(a));
     if (!hasUserGc) {
@@ -9107,7 +10713,7 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
     } else {
         if (!jvmArgs.some(a => a.includes('minecraft.launcher.brand'))) {
             jvmArgs.push('-Dminecraft.launcher.brand=VersePC');
-            jvmArgs.push('-Dminecraft.launcher.version=1.0.0');
+            jvmArgs.push(`-Dminecraft.launcher.version=${PKG_VERSION}`);
         }
         if (!jvmArgs.some(a => a.includes('log4j2.formatMsgNoLookups'))) {
             jvmArgs.push('-Dlog4j2.formatMsgNoLookups=true');
@@ -9132,7 +10738,7 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
     }
     if (!jvmArgs.some(a => a.includes('minecraft.launcher.brand'))) {
         jvmArgs.push('-Dminecraft.launcher.brand=VersePC');
-        jvmArgs.push('-Dminecraft.launcher.version=1.0.0');
+        jvmArgs.push(`-Dminecraft.launcher.version=${PKG_VERSION}`);
     }
     if (!jvmArgs.some(a => a.includes('log4j2.formatMsgNoLookups'))) {
         jvmArgs.push('-Dlog4j2.formatMsgNoLookups=true');
@@ -9232,8 +10838,21 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
     let versionTypeIdx = gameArgs.indexOf('--versionType');
     if (versionTypeIdx === -1) {
         const ci = (settings.customInfo || '').trim();
-        if (ci) {
-            gameArgs.push('--versionType', ci);
+        const wt = (settings.windowTitle || '').trim();
+        gameArgs.push('--versionType', wt || ci || 'VersePC');
+    }
+
+    if (!gameArgs.some((a, i) => a === '--gameDir' && i + 1 < gameArgs.length)) {
+        gameArgs.push('--gameDir', gameDir);
+        console.log(`[Launch] 补充 --gameDir ${gameDir}`);
+    } else {
+        const gdi = gameArgs.indexOf('--gameDir');
+        if (gdi !== -1 && gdi + 1 < gameArgs.length) {
+            const existingGd = gameArgs[gdi + 1];
+            if (existingGd.includes('${') || existingGd.includes('$game_directory')) {
+                gameArgs[gdi + 1] = gameDir;
+                console.log(`[Launch] 修复未替换的 gameDir 变量 -> ${gameDir}`);
+            }
         }
     }
 
@@ -9245,7 +10864,7 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
     console.log(`[Launch] gameDir: ${gameDir}`);
     console.log(`[Launch] nativesDir: ${nativesDir}`);
     console.log(`[Launch] loader: ${isForge ? 'Forge' : isNeoForge ? 'NeoForge' : isFabric ? 'Fabric' : 'Vanilla'}`);
-    return [...jvmArgs, ...finalGameArgs];
+    return { args: [...jvmArgs, ...finalGameArgs], maxMemMB };
 }
 
 function setGameLanguage(gameDir, versionJson, settings) {
@@ -9396,7 +11015,7 @@ function replaceVariables(str, vars) {
 // 游戏启动核心 - JVM参数构建、Natives提取、进程启动和生命周期管理
 // ============================================================================
 
-async function launchGame(versionId, settings, account) {
+async function launchGame(versionId, settings, account, checkOnly = false) {
     try {
     let externalVersionDir = null;
     const cleanVersionId = versionId.replace(' [外部]', '');
@@ -9415,6 +11034,15 @@ async function launchGame(versionId, settings, account) {
     }
 
     console.log(`[LaunchGame] 版本: ${versionId}, 外部目录: ${externalVersionDir || '无'}`);
+
+    const versionDirPath = externalVersionDir || path.join(VERSIONS_DIR, cleanVersionId);
+    if (versionDirPath.includes('!') || versionDirPath.includes(';')) {
+        return { success: false, error: '版本路径包含非法字符' };
+    }
+
+    if (cleanVersionId.includes('!') || cleanVersionId.includes(';')) {
+        return { success: false, error: '版本路径包含非法字符（! 或 ;），可能导致启动失败，请修改版本名称后重试' };
+    }
 
     let actualGameDir;
     if (externalVersionDir) {
@@ -9546,8 +11174,8 @@ async function launchGame(versionId, settings, account) {
                 const mg = group.replace(/\./g, '/');
                 const cl = classifier ? `-${classifier}` : '';
                 const jn = `${artifact}-${version}${cl}.jar`;
-                const base = (group.includes('forge') || group.includes('neoforged'))
-                    ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/';
+                const base = group.includes('neoforged') ? 'https://maven.neoforged.net/'
+                    : (group.includes('forge') ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/');
                 dlUrl = `${base}${mg}/${artifact}/${version}/${jn}`;
             }
             if (dlUrl) {
@@ -9583,6 +11211,61 @@ async function launchGame(versionId, settings, account) {
         console.warn(`[LaunchGame] Forge核心库缺失 (${depCheck.forgeCore.missing.length}个)，尝试自动修复...`);
 
         let forgeRepaired = false;
+
+        {
+            let mvForgeVer = '';
+            let mvMcVer = '';
+            for (const chainId of [cleanVersionId, versionJson.inheritsFrom].filter(Boolean)) {
+                if (chainId.toLowerCase().includes('forge')) {
+                    const m = chainId.match(/^(.+)-neoforge-(.+)$/) || chainId.match(/^(.+)-forge-(.+)$/);
+                    if (m) { mvMcVer = m[1]; mvForgeVer = m[2]; break; }
+                }
+            }
+            if (!mvForgeVer) {
+                const gArgs = versionJson.arguments?.game || [];
+                const fvi = gArgs.findIndex(a => typeof a === 'string' && (a === '--fml.forgeVersion' || a === '--fml.neoForgeVersion'));
+                const mvi = gArgs.findIndex(a => typeof a === 'string' && a === '--fml.mcVersion');
+                if (fvi >= 0 && fvi + 1 < gArgs.length) mvForgeVer = gArgs[fvi + 1];
+                if (mvi >= 0 && mvi + 1 < gArgs.length) mvMcVer = gArgs[mvi + 1];
+            }
+            if (mvForgeVer && mvMcVer) {
+                console.log(`[LaunchGame] 尝试Maven直接下载Forge核心库 (${mvMcVer}-forge-${mvForgeVer})...`);
+                const mvResult = await downloadForgeCoreLibsFromMaven(`${mvMcVer}-${mvForgeVer}`);
+                if (mvResult.failed === 0) {
+                    const stillMissing = (depCheck.forgeCore.missing || []).filter(m => !fs.existsSync(m.path));
+                    if (stillMissing.length === 0) {
+                        console.log(`[LaunchGame] Maven直接下载修复成功!`);
+                        forgeRepaired = true;
+                    }
+                } else {
+                    console.warn(`[LaunchGame] Maven直接下载仍有${mvResult.failed}个缺失，继续尝试其他方式...`);
+                }
+
+                if (!forgeRepaired) {
+                    console.log(`[LaunchGame] 补丁JAR不在Maven上，重装Forge以重新生成...`);
+                    try {
+                        const baseJar = path.join(VERSIONS_DIR, mvMcVer, `${mvMcVer}.jar`);
+                        if (!fs.existsSync(baseJar)) {
+                            console.log(`[LaunchGame] 原版JAR缺失，先下载 ${mvMcVer}.jar...`);
+                            try { await ensureBaseVersionInstalled(mvMcVer); } catch (e) { console.warn(`[LaunchGame] 下载原版JAR失败: ${e.message}`); }
+                        }
+                        const fiResult = await installForge(mvMcVer, mvForgeVer, (p, msg) => {});
+                        if (fiResult && fiResult.success) {
+                            const stillMissing = (depCheck.forgeCore.missing || []).filter(m => !fs.existsSync(m.path));
+                            if (stillMissing.length === 0) {
+                                console.log(`[LaunchGame] Forge重装修复成功!`);
+                                forgeRepaired = true;
+                            } else {
+                                console.warn(`[LaunchGame] Forge重装后仍有${stillMissing.length}个缺失文件`);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`[LaunchGame] Forge重装失败: ${e.message}`);
+                    }
+                }
+            }
+        }
+
         for (const chainId of [cleanVersionId, versionJson.inheritsFrom].filter(Boolean)) {
             if (forgeRepaired) break;
             if (!chainId.toLowerCase().includes('forge')) continue;
@@ -9601,6 +11284,11 @@ async function launchGame(versionId, settings, account) {
                 if (!forgeMatch) continue;
                 const mcVer = forgeMatch[1];
                 const forgeVer = forgeMatch[2];
+                const baseJarPath = path.join(VERSIONS_DIR, mcVer, `${mcVer}.jar`);
+                if (!fs.existsSync(baseJarPath)) {
+                    console.log(`[LaunchGame] 原版JAR缺失 (${mcVer}.jar)，先下载再重装Forge...`);
+                    try { await ensureBaseVersionInstalled(mcVer); } catch (e) { console.warn(`[LaunchGame] 下载原版JAR失败: ${e.message}`); }
+                }
                 console.log(`[LaunchGame] 尝试重新安装Forge ${mcVer}-${forgeVer}来修复核心文件`);
                 let repairResult = await installForge(mcVer, forgeVer, (p, msg) => {
                     console.log(`[LaunchGame] 修复进度: ${Math.round(p * 100)}% - ${msg || ''}`);
@@ -9881,7 +11569,7 @@ async function launchGame(versionId, settings, account) {
 
     const nonForgeCoreMissing = depCheck.missingFiles.filter(f => f.type !== 'forge_core');
     if (nonForgeCoreMissing.length > 0) {
-        const _LAUNCH_CORE_PREFIXES = ['net.minecraftforge', 'cpw.mods', 'net.minecraft'];
+        const _LAUNCH_CORE_PREFIXES = ['net.minecraftforge', 'net.neoforged', 'cpw.mods', 'net.minecraft'];
         const criticalMissing = nonForgeCoreMissing.filter(f => f.type === 'main_jar' || f.type === 'parent_version' || f.type === 'native' || f.type === 'asset' || f.type === 'asset_index');
         const nonCoreLibMissing = nonForgeCoreMissing.filter(f => f.type === 'library' && f.name && !_LAUNCH_CORE_PREFIXES.some(p => f.name.split(':')[0].startsWith(p)));
         const coreLibMissing = nonForgeCoreMissing.filter(f => f.type === 'library' && f.name && _LAUNCH_CORE_PREFIXES.some(p => f.name.split(':')[0].startsWith(p)));
@@ -9904,77 +11592,59 @@ async function launchGame(versionId, settings, account) {
             versionId
         });
 
-        console.log(`[LaunchGame] 自动下载 ${nonForgeCoreMissing.length} 个缺失文件...`);
-        try {
-            await downloadMissingDependencies(nonForgeCoreMissing, (p) => {
-                if (!launchSessions.has(sessionId)) return;
+        console.log(`[LaunchGame] 缺失 ${nonForgeCoreMissing.length} 个文件，启动后台下载...`);
+        const _bgDlVersionJson = versionJson;
+        const _bgDlExternalDir = externalVersionDir;
+        const _bgDlCleanId = cleanVersionId;
+        (async () => {
+            try {
+                await downloadMissingDependencies(nonForgeCoreMissing, (p) => {
+                    if (!launchSessions.has(sessionId)) return;
+                    const sess = launchSessions.get(sessionId);
+                    if (p.progress !== undefined) sess.progress = p.progress;
+                    if (p.file) sess.currentFile = p.file;
+                    if (p.current !== undefined) sess.completedFiles = p.current;
+                    if (p.total !== undefined) sess.totalFiles = p.total;
+                    if (p.speed !== undefined) sess.speed = p.speed;
+                    if (p.msg) sess.message = p.msg;
+                    if (p.message) sess.message = p.message;
+                    if (p.activeDownloads) sess.activeDownloads = p.activeDownloads;
+                    if (p.failed !== undefined) sess.failed = p.failed;
+                    if (p.status === 'completed' || p.status === 'completed_with_errors') sess.status = 'completed';
+                    if (p.status === 'failed') {
+                        sess.status = 'failed';
+                        sess.message = p.message || p.msg || '下载失败';
+                    }
+                }, _bgDlVersionJson, null, _bgDlExternalDir);
                 const sess = launchSessions.get(sessionId);
-                if (p.progress !== undefined) sess.progress = p.progress;
-                if (p.file) sess.currentFile = p.file;
-                if (p.current !== undefined) sess.completedFiles = p.current;
-                if (p.total !== undefined) sess.totalFiles = p.total;
-                if (p.speed !== undefined) sess.speed = p.speed;
-                if (p.msg) sess.message = p.msg;
-                if (p.message) sess.message = p.message;
-                if (p.activeDownloads) sess.activeDownloads = p.activeDownloads;
-                if (p.failed !== undefined) sess.failed = p.failed;
-                if (p.status === 'completed' || p.status === 'completed_with_errors') sess.status = 'completed';
-                if (p.status === 'failed') {
+                if (sess) {
+                    sess.status = 'completed';
+                    sess.message = '缺失文件下载完成';
+                }
+                console.log(`[LaunchGame] 后台下载完成，缓存已失效`);
+                invalidateDepCheckCache(_bgDlCleanId);
+            } catch (dlErr) {
+                console.error(`[LaunchGame] 后台下载失败: ${dlErr.message}`);
+                const sess = launchSessions.get(sessionId);
+                if (sess) {
                     sess.status = 'failed';
-                    sess.message = p.message || p.msg || '下载失败';
+                    sess.message = '下载失败: ' + dlErr.message;
                 }
-            }, versionJson, null, externalVersionDir);
-            const sess = launchSessions.get(sessionId);
-            if (sess) {
-                sess.status = 'completed';
-                sess.message = '缺失文件下载完成';
             }
-            console.log(`[LaunchGame] 缺失文件下载完成，重新检查并启动...`);
-            invalidateDepCheckCache(cleanVersionId);
-        } catch (dlErr) {
-            console.error(`[LaunchGame] 下载缺失文件失败: ${dlErr.message}`);
-            const sess = launchSessions.get(sessionId);
-            if (sess) {
-                sess.status = 'failed';
-                sess.message = '下载失败: ' + dlErr.message;
-            }
-            return {
-                success: false,
-                error: `缺失文件下载失败: ${dlErr.message}`,
-                needDownload: false,
-                depCheck: {
-                    java: depCheck.java,
-                    libraries: { missing: depCheck.libraries.missing.length, total: depCheck.libraries.total },
-                    natives: { missing: depCheck.natives.missing.length },
-                    assets: { missing: depCheck.assets.missing.length, total: depCheck.assets.total },
-                    mainJar: depCheck.mainJar
-                }
-            };
-        }
+        })();
 
-        depCheck = await checkDependencies(cleanVersionId, settings, externalVersionDir);
-        const stillMissing = depCheck.missingFiles.filter(f => f.type !== 'forge_core');
-        if (stillMissing.length > 0) {
-            console.log(`[LaunchGame] 下载后仍有 ${stillMissing.length} 个文件缺失`);
-            return {
-                success: false,
-                error: `仍有 ${stillMissing.length} 个文件缺失，无法启动游戏`,
-                needDownload: false,
-                depCheck: {
-                    java: depCheck.java,
-                    libraries: { missing: depCheck.libraries.missing.length, total: depCheck.libraries.total },
-                    natives: { missing: depCheck.natives.missing.length },
-                    assets: { missing: depCheck.assets.missing.length, total: depCheck.assets.total },
-                    mainJar: depCheck.mainJar
-                }
-            };
+        return {
+            success: true,
+            needDownload: true,
+            sessionId,
+            totalFiles: nonForgeCoreMissing.length,
+            message: `正在下载 ${nonForgeCoreMissing.length} 个缺失文件...`
+        };
         }
+    }
 
-        versionJson = resolveVersionJson(cleanVersionId, externalVersionDir);
-        if (!versionJson) {
-            return { success: false, error: `找不到版本 ${cleanVersionId} 的JSON文件（下载后）` };
-        }
-        }
+    if (checkOnly) {
+        return { success: true, ready: true, message: '所有文件就绪，可以启动' };
     }
 
     return doLaunch(cleanVersionId, versionJson, settings, account, externalVersionDir, versionId);
@@ -10031,7 +11701,9 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
     }
 
     const nativesDir = getNativesFolder(versionId);
-    const args = buildLaunchArguments(versionJson, settings, account, versionId, gameDir, externalVersionDir);
+    const launchResult = buildLaunchArguments(versionJson, settings, account, versionId, gameDir, externalVersionDir);
+    const args = launchResult.args;
+    const maxMemMB = launchResult.maxMemMB;
     console.log(`[Launch] 启动参数数量: ${args.length}`);
     
     {
@@ -10151,10 +11823,39 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
 
         const spawnOptions = {
             cwd: gameDir,
-            detached: true,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env }
+            env: { ...process.env },
+            stdio: ['ignore', 'pipe', 'pipe']
         };
+
+        // 参照 PCL2 内存优化策略：使用 Windows 原生 API 清理待机内存列表
+        // （不调用 Clear-RecycleBin，避免回收站存在损坏元数据时弹出文件恢复对话框）
+        {
+            const freeMB = Math.floor(os.freemem() / 1024 / 1024);
+            const totalMB = Math.floor(os.totalmem() / 1024 / 1024);
+            console.log(`[Launch] 启动前内存状态: 可用 ${freeMB}MB / 总计 ${totalMB}MB`);
+            if (freeMB < maxMemMB * 0.5 && process.platform === 'win32') {
+                try {
+                    const { execSync } = require('child_process');
+                    // 使用 SetSystemInformation 的 SystemMemoryListInformation 清理待机列表
+                    // 等价于 .NET 中 MemSwapWorks.PurgeStandbyList / EmptyWorkingSets
+                    const psScript = [
+                        'Add-Type -Namespace VersePC -Name MemoryOptimizer -MemberDefinition @"',
+                        '[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)]',
+                        'private static extern int SetSystemInformation(uint infoClass, System.IntPtr info, uint length);',
+                        'public static void PurgeStandbyList() { SetSystemInformation(80, [System.IntPtr]::Zero, 0); }',
+                        'public static void EmptyWorkingSets() { SetSystemInformation(2, [System.IntPtr]::Zero, 0); }',
+                        '"@',
+                        '[VersePC.MemoryOptimizer]::PurgeStandbyList()',
+                        '[VersePC.MemoryOptimizer]::EmptyWorkingSets()'
+                    ].join('\n');
+                    execSync(`powershell -NoProfile -Command "${psScript.replace(/"/g, '\\"')}"`, { timeout: 5000, windowsHide: true, stdio: 'pipe' });
+                    const newFreeMB = Math.floor(os.freemem() / 1024 / 1024);
+                    console.log(`[Launch] 内存优化后可用: ${newFreeMB}MB (释放 ${newFreeMB - freeMB}MB)`);
+                } catch (e) {
+                    // 静默失败，绝不影响启动流程
+                }
+            }
+        }
 
         if (process.platform === 'linux' && nativesDir) {
             const existingLdPath = spawnOptions.env.LD_LIBRARY_PATH || '';
@@ -10244,6 +11945,7 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                 const gameProcess = spawn(javaPath, newArgs, spawnOptions);
 
                 gameProcess.on('exit', () => {
+                    try { clearInterval(_logSaveTimer); } catch (e) {}
                     try { fs.unlinkSync(wrapperJar); } catch (e) {}
                     try { fs.rmSync(manifestDir, { recursive: true, force: true }); } catch (e) {}
                     try { restoreOfflineSkin(skinBackups); } catch (e) {}
@@ -10264,6 +11966,7 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                     lanPort: null,
                     gameReady: false,
                     readyTime: null,
+                    loadStage: 0,
                     launchInfo: {
                         versionId,
                         fullVersionId: fullVersionId || versionId,
@@ -10277,53 +11980,105 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                 gameInstances.set(sessionId, instanceInfo);
                 console.log(`[Launch] 游戏进程已创建, PID: ${gameProcess.pid}, Session: ${sessionId}`);
 
-                gameProcess.stdout.on('data', (data) => {
-                    const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
-                    instanceInfo.logBuffer.push(...lines);
-                    if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
-                    gameLogBuffer.push(...lines);
-                    if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
-                    for (const line of lines) {
-                        const lanMatch = line.match(/Local game hosted on[:\s]+(\d{4,5})/i) ||
-                                         line.match(/Started serving on[:\s]+(\d{4,5})/i) ||
-                                         line.match(/Opening LAN server on[:\s]+(\d{4,5})/i) ||
-                                         line.match(/LAN server started on[:\s]+(\d{4,5})/i);
-                        if (lanMatch) {
-                            instanceInfo.lanPort = parseInt(lanMatch[1], 10);
-                            detectedLanPort = parseInt(lanMatch[1], 10);
-                            console.log(`[LAN] Detected LAN port: ${instanceInfo.lanPort} (session: ${sessionId})`);
+                const _gameLogsDir = path.join(gameDir, 'logs');
+                const _safeVersionId = versionId.replace(/[\\/:*?"<>|]/g, '_');
+                const _crashLogPath = path.join(LOGS_DIR, `game-crash-${_safeVersionId}-${Date.now()}.log`);
+                const _readGameLog = (name) => { try { return fs.readFileSync(path.join(_gameLogsDir, name), 'utf8'); } catch(e) { return ''; } };
+                const _saveGameLog = (label) => {
+                    let parts;
+                    try {
+                        parts = [`=== VersePC ${label || 'Game Log'} ===\nSession: ${sessionId}\nPID: ${gameProcess ? gameProcess.pid : 'N/A'}\nTime: ${new Date().toISOString()}\nVersion: ${versionId}\nGameDir: ${gameDir}\n`];
+                        if (instanceInfo.logBuffer.length > 0) {
+                            parts.push(`\n=== stdout/stderr (last 1000 lines) ===\n${instanceInfo.logBuffer.slice(-1000).join('\n')}\n`);
                         }
-                        if (!instanceInfo.gameReady && (line.includes('Setting user:') || line.includes('LWJGL Version:') || line.includes('OpenAL initialized'))) {
-                            instanceInfo.gameReady = true;
-                            instanceInfo.readyTime = Date.now();
-                            const launchDuration = instanceInfo.readyTime - instanceInfo.startTime;
-                            console.log(`[Launch] 游戏窗口已就绪(Manifest模式), 耗时: ${(launchDuration / 1000).toFixed(1)}s`);
-                        }
+                        const latest = _readGameLog('latest.log');
+                        if (latest) parts.push(`\n=== latest.log (last 500 lines) ===\n${latest.split('\n').slice(-500).join('\n')}\n`);
+                        const debug = _readGameLog('debug.log');
+                        if (debug) parts.push(`\n=== debug.log (last 500 lines) ===\n${debug.split('\n').slice(-500).join('\n')}\n`);
+                        fs.writeFileSync(_crashLogPath, parts.join(''));
+                    } catch (e) {
+                        try {
+                            const fbPath = path.join(DATA_DIR, `crash-${_safeVersionId}-${Date.now()}.log`);
+                            fs.writeFileSync(fbPath, parts.join(''));
+                        } catch (e2) {}
                     }
-                });
+                };
+                const _logSaveTimer = setInterval(() => _saveGameLog('periodic'), 2000);
+                try { _saveGameLog('initial'); } catch(e) {}
 
-                gameProcess.stderr.on('data', (data) => {
-                    const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
-                    instanceInfo.logBuffer.push(...lines);
-                    if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
-                    gameLogBuffer.push(...lines);
-                    if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
-                });
+                if (gameProcess.stdout) {
+                    gameProcess.stdout.on('data', (data) => {
+                        const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
+                        instanceInfo.logBuffer.push(...lines);
+                        if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
+                        gameLogBuffer.push(...lines);
+                        if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
+                        for (const line of lines) {
+                            const lanMatch = line.match(/Local game hosted on[:\s]+(\d{4,5})/i) ||
+                                             line.match(/Started serving on[:\s]+(\d{4,5})/i) ||
+                                             line.match(/Opening LAN server on[:\s]+(\d{4,5})/i) ||
+                                             line.match(/LAN server started on[:\s]+(\d{4,5})/i);
+                            if (lanMatch) {
+                                instanceInfo.lanPort = parseInt(lanMatch[1], 10);
+                                detectedLanPort = parseInt(lanMatch[1], 10);
+                                console.log(`[LAN] Detected LAN port: ${instanceInfo.lanPort} (session: ${sessionId})`);
+                            }
+                            if (instanceInfo.loadStage < 1) { instanceInfo.loadStage = 1; }
+                            if (instanceInfo.loadStage < 2 && line.includes('Setting user:')) { instanceInfo.loadStage = 2; console.log(`[Launch] 阶段 2/5: 用户已设置 (session: ${sessionId})`); }
+                            if (instanceInfo.loadStage < 3 && /lwjgl version/i.test(line)) { instanceInfo.loadStage = 3; console.log(`[Launch] 阶段 3/5: LWJGL 已初始化 (session: ${sessionId})`); }
+                            if (instanceInfo.loadStage < 4 && (line.includes('OpenAL initialized') || line.includes('Starting up SoundSystem'))) { instanceInfo.loadStage = 4; console.log(`[Launch] 阶段 4/5: 音频系统就绪 (session: ${sessionId})`); }
+                            if (instanceInfo.loadStage < 5 && ((line.includes('Created') && line.includes('textures') && line.includes('-atlas')) || line.includes('Found animation info'))) {
+                                instanceInfo.loadStage = 5;
+                                if (!instanceInfo.gameReady) {
+                                    instanceInfo.gameReady = true;
+                                    instanceInfo.readyTime = Date.now();
+                                    const launchDuration = instanceInfo.readyTime - instanceInfo.startTime;
+                                    console.log(`[Launch] 阶段 5/5: 材质加载完成(Manifest模式), 耗时: ${(launchDuration / 1000).toFixed(1)}s`);
+                                }
+                            }
+                        }
+                    });
+                }
+
+                if (gameProcess.stderr) {
+                    gameProcess.stderr.on('data', (data) => {
+                        const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
+                        instanceInfo.logBuffer.push(...lines);
+                        if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
+                        gameLogBuffer.push(...lines);
+                        if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
+                    });
+                }
 
                 gameProcess.unref();
 
                 gameProcess.on('close', (code) => {
+                    try { clearInterval(_logSaveTimer); } catch (e) {}
+                    const _sysInfo = getSystemInfo();
+                    const crashParts = [`=== VersePC Game Crash Log ===\nSession: ${sessionId}\nExit Code: ${code}\nTime: ${new Date().toISOString()}\nVersion: ${versionId}\nJava: ${javaPath}\nGameDir: ${gameDir}\nOS: ${_sysInfo.osType} ${_sysInfo.osRelease} (${_sysInfo.osArch})\nCPU: ${_sysInfo.cpuModel}\nGPU: ${_sysInfo.gpuInfo}\nMemory: ${_sysInfo.totalMemMB}MB total, ${_sysInfo.freeMemMB}MB free\n`];
+                    try {
+                        if (instanceInfo.logBuffer.length > 0) {
+                            crashParts.push(`\n=== stdout/stderr (last 3000 lines) ===\n${instanceInfo.logBuffer.slice(-3000).join('\n')}\n`);
+                        }
+                        const latest = _readGameLog('latest.log');
+                        if (latest) crashParts.push(`\n=== latest.log (last 500 lines) ===\n${latest.split('\n').slice(-500).join('\n')}\n`);
+                        const debug = _readGameLog('debug.log');
+                        if (debug) crashParts.push(`\n=== debug.log (last 500 lines) ===\n${debug.split('\n').slice(-500).join('\n')}\n`);
+                        fs.writeFileSync(_crashLogPath, crashParts.join(''));
+                    } catch (e) {
+                        // 兜底：写入DATA_DIR根目录
+                        try {
+                            const fbPath = path.join(DATA_DIR, `crash-${_safeVersionId}-${Date.now()}.log`);
+                            fs.writeFileSync(fbPath, crashParts.join(''));
+                        } catch (e2) {}
+                    }
                     const recentLogs = instanceInfo.logBuffer.slice(-100).join('\n');
                     let analysis = analyzeExitCode(code, launchVersionId || versionId);
-                    if (!analysis.isCrash && code !== 0 && recentLogs.includes('Invalid paths argument')) {
-                        analysis = {
-                            code,
-                            isCrash: true,
-                            reason: 'Forge核心库文件缺失（Invalid paths argument）',
-                            suggestion: 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单'
-                        };
-                    }
-                    if (analysis.isCrash && recentLogs.includes('Invalid paths argument')) {
+                    // 补充：读取游戏日志文件进行更准确的分析
+                    const gameLatestLog = _readGameLog('latest.log');
+                    const gameDebugLog = _readGameLog('debug.log');
+                    const gameAllLogs = (gameLatestLog + '\n' + gameDebugLog).toLowerCase();
+                    if (gameAllLogs.includes('invalid paths argument') || gameAllLogs.includes('contained no existing paths')) {
                         analysis.reason = 'Forge核心库文件缺失（Invalid paths argument）';
                         analysis.suggestion = 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单';
                     }
@@ -10340,8 +12095,33 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                     lastGameExitAnalysis = { 
                         ...analysis, 
                         launchInfo: instanceInfo.launchInfo,
-                        logBuffer: instanceInfo.logBuffer.slice(-50)
+                        logBuffer: instanceInfo.logBuffer.slice(-50),
+                        systemInfo: _sysInfo
                     };
+                    try {
+                        const crashLogs = [];
+                        const _verDir2 = path.join(VERSIONS_DIR, launchVersionId || versionId);
+                        if (fs.existsSync(_verDir2)) {
+                            fs.readdirSync(_verDir2).filter(f => f.startsWith('hs_err_pid') && f.endsWith('.log')).forEach(f => crashLogs.push(path.join(_verDir2, f)));
+                        }
+                        if (fs.existsSync(gameDir)) {
+                            fs.readdirSync(gameDir).filter(f => f.startsWith('hs_err_pid') && f.endsWith('.log')).forEach(f => crashLogs.push(path.join(gameDir, f)));
+                        }
+                        try {
+                            const tmpDir = os.tmpdir();
+                            if (fs.existsSync(tmpDir)) {
+                                fs.readdirSync(tmpDir).filter(f => f.startsWith('hs_err_pid') && f.endsWith('.log')).forEach(f => crashLogs.push(path.join(tmpDir, f)));
+                            }
+                        } catch (_) {}
+                        if (crashLogs.length > 0) {
+                            crashLogs.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+                            lastGameExitAnalysis.crashLog = crashLogs[0];
+                            lastGameExitAnalysis.crashLogs = crashLogs;
+                            lastGameExitAnalysis.reason = (lastGameExitAnalysis.reason || '') + `\nJVM 崩溃日志: ${crashLogs[0]}`;
+                            instanceInfo.logBuffer.push(`[VersePC] JVM崩溃日志: ${crashLogs[0]}`);
+                            gameLogBuffer.push(`[VersePC] JVM崩溃日志: ${crashLogs[0]}`);
+                        }
+                    } catch (_) {}
                     try {
                         const playTimePath = path.join(DATA_DIR, 'play-time.json');
                         if (fs.existsSync(playTimePath)) {
@@ -10372,7 +12152,8 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                         reason: `启动错误: ${err.message}`, 
                         suggestion: '请检查Java路径是否正确', 
                         isCrash: true,
-                        launchInfo: instanceInfo.launchInfo
+                        launchInfo: instanceInfo.launchInfo,
+                        systemInfo: getSystemInfo()
                     };
                     gameInstances.delete(sessionId);
                 });
@@ -10410,6 +12191,7 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
             lanPort: null,
             gameReady: false,
             readyTime: null,
+            loadStage: 0,
             launchInfo: {
                 versionId,
                 fullVersionId: fullVersionId || versionId,
@@ -10423,60 +12205,64 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
         gameInstances.set(sessionId, instanceInfo);
         console.log(`[Launch] 游戏进程已创建, PID: ${gameProcess.pid}, Session: ${sessionId}`);
 
-        gameProcess.stdout.on('data', (data) => {
-            const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
-            instanceInfo.logBuffer.push(...lines);
-            if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
-            gameLogBuffer.push(...lines);
-            if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
-            for (const line of lines) {
-                const lanMatch = line.match(/Local game hosted on[:\s]+(\d{4,5})/i) ||
-                                 line.match(/Started serving on[:\s]+(\d{4,5})/i) ||
-                                 line.match(/Opening LAN server on[:\s]+(\d{4,5})/i) ||
-                                 line.match(/LAN server started on[:\s]+(\d{4,5})/i);
-                if (lanMatch) {
-                    instanceInfo.lanPort = parseInt(lanMatch[1], 10);
-                    detectedLanPort = parseInt(lanMatch[1], 10);
-                    console.log(`[LAN] Detected LAN port: ${instanceInfo.lanPort} (session: ${sessionId})`);
-                }
-                if (!instanceInfo.gameReady && (line.includes('Setting user:') || line.includes('LWJGL Version:') || line.includes('OpenAL initialized'))) {
-                    instanceInfo.gameReady = true;
-                    instanceInfo.readyTime = Date.now();
-                    const launchDuration = instanceInfo.readyTime - instanceInfo.startTime;
-                    console.log(`[Launch] 游戏窗口已就绪, 耗时: ${(launchDuration / 1000).toFixed(1)}s`);
-                    if (process.platform === 'win32') {
-                        try {
-                            const windowTitle = `Minecraft* - VersePC`;
-                            execSync(`powershell -Command "Get-Process | Where-Object {$_.MainWindowTitle -like 'Minecraft*'} | ForEach-Object {$_.MainWindowTitle = '${windowTitle}'}"`, { timeout: 5000, stdio: 'pipe' });
-                        } catch (e) {}
+        if (gameProcess.stdout) {
+            gameProcess.stdout.on('data', (data) => {
+                const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
+                instanceInfo.logBuffer.push(...lines);
+                if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
+                gameLogBuffer.push(...lines);
+                if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
+                for (const line of lines) {
+                    const lanMatch = line.match(/Local game hosted on[:\s]+(\d{4,5})/i) ||
+                                     line.match(/Started serving on[:\s]+(\d{4,5})/i) ||
+                                     line.match(/Opening LAN server on[:\s]+(\d{4,5})/i) ||
+                                     line.match(/LAN server started on[:\s]+(\d{4,5})/i);
+                    if (lanMatch) {
+                        instanceInfo.lanPort = parseInt(lanMatch[1], 10);
+                        detectedLanPort = parseInt(lanMatch[1], 10);
+                        console.log(`[LAN] Detected LAN port: ${instanceInfo.lanPort} (session: ${sessionId})`);
+                    }
+                    if (instanceInfo.loadStage < 1) { instanceInfo.loadStage = 1; }
+                    if (instanceInfo.loadStage < 2 && line.includes('Setting user:')) { instanceInfo.loadStage = 2; console.log(`[Launch] 阶段 2/5: 用户已设置 (session: ${sessionId})`); }
+                    if (instanceInfo.loadStage < 3 && /lwjgl version/i.test(line)) { instanceInfo.loadStage = 3; console.log(`[Launch] 阶段 3/5: LWJGL 已初始化 (session: ${sessionId})`); }
+                    if (instanceInfo.loadStage < 4 && (line.includes('OpenAL initialized') || line.includes('Starting up SoundSystem'))) { instanceInfo.loadStage = 4; console.log(`[Launch] 阶段 4/5: 音频系统就绪 (session: ${sessionId})`); }
+                    if (instanceInfo.loadStage < 5 && ((line.includes('Created') && line.includes('textures') && line.includes('-atlas')) || line.includes('Found animation info'))) {
+                        instanceInfo.loadStage = 5;
+                        if (!instanceInfo.gameReady) {
+                            instanceInfo.gameReady = true;
+                            instanceInfo.readyTime = Date.now();
+                            const launchDuration = instanceInfo.readyTime - instanceInfo.startTime;
+                            console.log(`[Launch] 阶段 5/5: 材质加载完成, 耗时: ${(launchDuration / 1000).toFixed(1)}s`);
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
 
-        gameProcess.stderr.on('data', (data) => {
-            const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
-            instanceInfo.logBuffer.push(...lines);
-            if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
-            gameLogBuffer.push(...lines);
-            if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
-        });
+        if (gameProcess.stderr) {
+            gameProcess.stderr.on('data', (data) => {
+                const lines = data.toString().split('\n').filter(l => l.trim()).map(filterSensitiveInfo);
+                instanceInfo.logBuffer.push(...lines);
+                if (instanceInfo.logBuffer.length > 5000) instanceInfo.logBuffer = instanceInfo.logBuffer.slice(-3000);
+                gameLogBuffer.push(...lines);
+                if (gameLogBuffer.length > 5000) gameLogBuffer = gameLogBuffer.slice(-3000);
+            });
+        }
+
+        gameProcess.unref();
 
         let launchVersionId = versionId;
 
         gameProcess.on('close', (code) => {
             try { restoreOfflineSkin(skinBackups); } catch (e) {}
+            const _sysInfo = getSystemInfo();
             const recentLogs = instanceInfo.logBuffer.slice(-100).join('\n');
             let analysis = analyzeExitCode(code, launchVersionId);
-            if (!analysis.isCrash && code !== 0 && recentLogs.includes('Invalid paths argument')) {
-                analysis = {
-                    code,
-                    isCrash: true,
-                    reason: 'Forge核心库文件缺失（Invalid paths argument）',
-                    suggestion: 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单'
-                };
-            }
-            if (analysis.isCrash && recentLogs.includes('Invalid paths argument')) {
+            // 补充：读取游戏日志文件进行更准确的分析
+            const gameLatestLog = (() => { try { return fs.readFileSync(path.join(gameDir, 'logs', 'latest.log'), 'utf8'); } catch(e) { return ''; } })();
+            const gameDebugLog = (() => { try { return fs.readFileSync(path.join(gameDir, 'logs', 'debug.log'), 'utf8'); } catch(e) { return ''; } })();
+            const gameAllLogs = (gameLatestLog + '\n' + gameDebugLog).toLowerCase();
+            if (gameAllLogs.includes('invalid paths argument') || gameAllLogs.includes('contained no existing paths')) {
                 analysis.reason = 'Forge核心库文件缺失（Invalid paths argument）';
                 analysis.suggestion = 'Forge安装不完整(fmlcore/javafmllanguage/mclanguage/lowcodelanguage缺失)。\n修复: 1)版本设置→文件修复 2)重新安装Forge 3)检查杀毒白名单';
             }
@@ -10493,8 +12279,33 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
             lastGameExitAnalysis = { 
                 ...analysis, 
                 launchInfo: instanceInfo.launchInfo,
-                logBuffer: instanceInfo.logBuffer.slice(-50)
+                logBuffer: instanceInfo.logBuffer.slice(-50),
+                systemInfo: _sysInfo
             };
+            try {
+                const crashLogs = [];
+                const _verDir = path.join(VERSIONS_DIR, launchVersionId || versionId);
+                if (fs.existsSync(_verDir)) {
+                    fs.readdirSync(_verDir).filter(f => f.startsWith('hs_err_pid') && f.endsWith('.log')).forEach(f => crashLogs.push(path.join(_verDir, f)));
+                }
+                if (fs.existsSync(gameDir)) {
+                    fs.readdirSync(gameDir).filter(f => f.startsWith('hs_err_pid') && f.endsWith('.log')).forEach(f => crashLogs.push(path.join(gameDir, f)));
+                }
+                try {
+                    const tmpDir = os.tmpdir();
+                    if (fs.existsSync(tmpDir)) {
+                        fs.readdirSync(tmpDir).filter(f => f.startsWith('hs_err_pid') && f.endsWith('.log')).forEach(f => crashLogs.push(path.join(tmpDir, f)));
+                    }
+                } catch (_) {}
+                if (crashLogs.length > 0) {
+                    crashLogs.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+                    lastGameExitAnalysis.crashLog = crashLogs[0];
+                    lastGameExitAnalysis.crashLogs = crashLogs;
+                    lastGameExitAnalysis.reason = (lastGameExitAnalysis.reason || '') + `\nJVM 崩溃日志: ${crashLogs[0]}`;
+                    instanceInfo.logBuffer.push(`[VersePC] JVM崩溃日志: ${crashLogs[0]}`);
+                    gameLogBuffer.push(`[VersePC] JVM崩溃日志: ${crashLogs[0]}`);
+                }
+            } catch (_) {}
             try {
                 const playTimePath = path.join(DATA_DIR, 'play-time.json');
                 if (fs.existsSync(playTimePath)) {
@@ -10522,7 +12333,8 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                 reason: `启动错误: ${err.message}`, 
                 suggestion: '请检查Java路径是否正确', 
                 isCrash: true,
-                launchInfo: instanceInfo.launchInfo
+                launchInfo: instanceInfo.launchInfo,
+                systemInfo: getSystemInfo()
             };
             gameInstances.delete(sessionId);
         });
@@ -10893,32 +12705,32 @@ async function installFabric(gameVersion, loaderVersion, onProgress = null) {
         let fabLibFailures = 0;
         if (fabLibsToDownload.length > 0) {
             const settings = loadSettingsCached();
-            const FAB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, fabLibsToDownload.length);
+            const FAB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 64, fabLibsToDownload.length);
             let completed = 0;
+            let failed = 0;
             let active = 0;
             let done = null;
 
             const scheduleNext = () => {
-                while (active < FAB_PARALLEL && completed + active < fabLibsToDownload.length) {
-                    const item = fabLibsToDownload[completed + active];
+                while (active < FAB_PARALLEL && completed + failed + active < fabLibsToDownload.length) {
+                    const item = fabLibsToDownload[completed + failed + active];
                     active++;
                     (async () => {
-                        try {
-                            if (fs.existsSync(item.libPath)) fs.unlinkSync(item.libPath);
-                            await downloadFileWithMirror(item.url, item.libPath);
-                        } catch (e) {
-                            fabLibFailures++;
-                            console.log(`[Fabric] Failed to download ${item.lib.name}: ${e.message}`);
-                        }
+                        if (fs.existsSync(item.libPath)) fs.unlinkSync(item.libPath);
+                        await downloadFileWithMirror(item.url, item.libPath);
                     })().then(() => {
                         completed++;
-                    }).catch(() => {}).finally(() => {
+                    }).catch((e) => {
+                        fabLibFailures++;
+                        console.log(`[Fabric] Failed to download ${item.lib.name}: ${e.message}`);
+                        failed++;
+                    }).finally(() => {
                         active--;
                         if (onProgress) {
-                            onProgress(completed / fabLibsToDownload.length, `下载Fabric库 (${completed}/${fabLibsToDownload.length})...`);
+                            onProgress((completed + failed) / fabLibsToDownload.length, `下载Fabric库 (${completed + failed}/${fabLibsToDownload.length})...`);
                         }
-                        if (active === 0 && completed >= fabLibsToDownload.length && done) done();
-                        else if (active < FAB_PARALLEL && completed + active < fabLibsToDownload.length) scheduleNext();
+                        if (active === 0 && completed + failed >= fabLibsToDownload.length && done) done();
+                        else if (active < FAB_PARALLEL && completed + failed + active < fabLibsToDownload.length) scheduleNext();
                     });
                 }
             };
@@ -10960,10 +12772,14 @@ async function installFabric(gameVersion, loaderVersion, onProgress = null) {
 
 function verifyLoaderLibs(versionId) {
     try {
-        const jsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
-        if (!fs.existsSync(jsonPath)) return false;
-        const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-        const libs = data.libraries || [];
+        const mergedJson = resolveVersionJson(versionId);
+        if (!mergedJson) {
+            const jsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
+            if (!fs.existsSync(jsonPath)) return false;
+            const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+            if (!data.libraries || data.libraries.length === 0) return false;
+        }
+        const libs = mergedJson ? (mergedJson.libraries || []) : [];
         let checked = 0, missing = 0;
         const missingPaths = [];
         for (const lib of libs) {
@@ -10995,7 +12811,9 @@ function verifyLoaderLibs(versionId) {
             return false;
         }
 
-        const isForge = versionId.toLowerCase().includes('forge');
+        const _vlLower = versionId.toLowerCase();
+        const _isNeo = _vlLower.includes('neoforge') || _vlLower.includes('neoforged');
+        const isForge = _vlLower.includes('forge') && !_isNeo;
         if (isForge && checked > 0) {
             const forgeCoreFiles = [];
             for (const lib of libs) {
@@ -11025,6 +12843,42 @@ function verifyLoaderLibs(versionId) {
                     missingForgeCores.push(path.basename(fp));
                 }
             }
+
+            const mainJsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
+            try {
+                const mainJson = JSON.parse(fs.readFileSync(mainJsonPath, 'utf-8'));
+                if (mainJson.mainClass && mainJson.mainClass.includes('bootstraplauncher')) {
+                    const mcMatch = versionId.match(/^(\d+\.\d+(?:\.\d+)?)-forge-(.+)$/);
+                    if (mcMatch) {
+                        const mcV = mcMatch[1];
+                        const fV = mcMatch[2];
+                        const forgeVerStr = `${mcV}-${fV}`;
+                        const forgeClientPath = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', forgeVerStr, `forge-${forgeVerStr}-client.jar`);
+                        const forgeUniversalPath = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', forgeVerStr, `forge-${forgeVerStr}-universal.jar`);
+                        const hasForgeJar = (fs.existsSync(forgeClientPath) && isJarIntact(forgeClientPath)) ||
+                            (fs.existsSync(forgeUniversalPath) && isJarIntact(forgeUniversalPath));
+                        if (!hasForgeJar) {
+                            forgeCoreMissing++;
+                            missingForgeCores.push(`forge-${forgeVerStr}-client.jar`);
+                        }
+
+                        const args = mainJson.arguments?.game || [];
+                        const mcpIdx = args.findIndex(a => a === '--fml.mcpVersion');
+                        if (mcpIdx >= 0 && mcpIdx + 1 < args.length) {
+                            const mcpV = args[mcpIdx + 1];
+                            const clientVerStr = `${mcV}-${mcpV}`;
+                            for (const suffix of ['srg', 'extra']) {
+                                const cp = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client', clientVerStr, `client-${clientVerStr}-${suffix}.jar`);
+                                if (!fs.existsSync(cp) || !isJarIntact(cp)) {
+                                    forgeCoreMissing++;
+                                    missingForgeCores.push(`client-${clientVerStr}-${suffix}.jar`);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_) {}
+
             if (forgeCoreMissing > 0) {
                 console.log(`[verifyLoaderLibs] ${versionId}: 基础库存在但Forge核心文件缺失(${forgeCoreMissing}): ${missingForgeCores.join(', ')}`);
                 return false;
@@ -11152,7 +13006,7 @@ async function verifyImportLibs(versionId, progress, abortSignal) {
     let libChecked = 0, coreLibMissing = 0, nonCoreLibMissing = 0;
     const coreMissingLibFiles = [];
     const nonCoreMissingLibFiles = [];
-    const CORE_PREFIXES = ['net.minecraftforge', 'cpw.mods', 'net.minecraft'];
+    const CORE_PREFIXES = ['net.minecraftforge', 'net.neoforged', 'cpw.mods', 'net.minecraft'];
 
     function isCoreLibrary(libName) {
         if (!libName) return false;
@@ -11193,8 +13047,9 @@ async function verifyImportLibs(versionId, progress, abortSignal) {
                     const mg = p[0].replace(/\./g, '/');
                     const cl = p.length >= 4 ? `-${p[3]}` : '';
                     const jn = `${p[1]}-${p[2]}${cl}.jar`;
-                    const base = lib.url || (p[0].includes('forge') || p[0].includes('minecraftforge') || p[0].includes('neoforged') || p[0].includes('minecraft')
-                        ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/');
+                    const base = lib.url || (p[0].includes('neoforged') ? 'https://maven.neoforged.net/'
+                        : (p[0].includes('forge') || p[0].includes('minecraftforge') || p[0].includes('minecraft')
+                        ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/'));
                     dlUrl = `${base}${mg}/${p[1]}/${p[2]}/${jn}`;
                 }
             }
@@ -11222,7 +13077,7 @@ async function verifyImportLibs(versionId, progress, abortSignal) {
                 const pct = 91 + Math.round((p.progress / 100) * 6);
                 progress('verify', `补全核心依赖 (${(p.completed || 0) + (p.failed || 0)}/${coreLibMissing})`, Math.min(pct, 97), [], '');
             }
-        });
+        }, mergedJson);
         console.log(`[verifyImport] 核心库补全结果: ${dlResult.completed}成功 ${dlResult.failed}失败`);
         if (dlResult.failed > 0) {
             return { ok: false, checked: libChecked, missing: dlResult.failed };
@@ -11236,7 +13091,7 @@ async function verifyImportLibs(versionId, progress, abortSignal) {
                 const pct = 91 + Math.round((p.progress / 100) * 6);
                 progress('verify', `补全非核心依赖 (${(p.completed || 0) + (p.failed || 0)}/${nonCoreLibMissing})`, Math.min(pct, 97), [], '');
             }
-        });
+        }, mergedJson);
         console.log(`[verifyImport] 非核心库补全结果: ${dlResult.completed}成功 ${dlResult.failed}失败`);
         if (dlResult.failed > 0) {
             if (progress) progress('verify', `警告: ${dlResult.failed} 个非核心库补全失败，将继续导入`, 93, [], '');
@@ -11248,16 +13103,12 @@ async function verifyImportLibs(versionId, progress, abortSignal) {
     return { ok: true, checked: libChecked, missing: 0 };
 }
 
-async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null) {
+async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null, useNative = false) {
     const report = onProgress || (() => {});
     const isPackaged = __dirname.includes('app.asar');
     const resourcesBase = isPackaged
         ? path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), 'resources')
         : path.join(__dirname, 'resources');
-    const bundledInstaller = path.join(resourcesBase, 'forge-installer.jar');
-    if (!fs.existsSync(bundledInstaller)) {
-        throw new Error('forge-installer.jar 不存在: ' + bundledInstaller);
-    }
     const bundledJava = path.join(resourcesBase, 'jdk-8u432+62-jre', 'bin', 'java.exe');
     let javaPath = null;
     if (fs.existsSync(bundledJava)) {
@@ -11271,9 +13122,9 @@ async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null) 
         throw new Error('未找到 Java 8 或更高版本，无法安装 Forge。请先在设置中安装或配置 Java。');
     }
     console.log(`[Forge] 使用 Java: ${javaPath}`);
-    console.log(`[Forge] forge-installer: ${bundledInstaller}`);
     console.log(`[Forge] Forge installer: ${installerJarPath}`);
     console.log(`[Forge] Minecraft 目录: ${mcDir}`);
+    console.log(`[Forge] 原生模式: ${useNative}`);
 
     let javaMajor = 8;
     try {
@@ -11282,9 +13133,21 @@ async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null) 
         if (m) javaMajor = parseInt(m[1]);
     } catch (_) {}
 
-    let args = `-cp "${bundledInstaller};${installerJarPath}" com.bangbang93.ForgeInstaller "${mcDir}"`;
-    if (javaMajor >= 9) {
-        args = '--add-exports cpw.mods.bootstraplauncher/cpw.mods.bootstraplauncher=ALL-UNNAMED ' + args;
+    let args;
+    if (useNative) {
+        args = `-jar "${installerJarPath}" --installClient "${mcDir}"`;
+        if (javaMajor >= 9) {
+            args = '--add-exports cpw.mods.bootstraplauncher/cpw.mods.bootstraplauncher=ALL-UNNAMED ' + args;
+        }
+    } else {
+        const bundledInstaller = path.join(resourcesBase, 'forge-installer.jar');
+        if (!fs.existsSync(bundledInstaller)) {
+            throw new Error('forge-installer.jar 不存在: ' + bundledInstaller);
+        }
+        args = `-cp "${bundledInstaller};${installerJarPath}" com.bangbang93.ForgeInstaller "${mcDir}"`;
+        if (javaMajor >= 9) {
+            args = '--add-exports cpw.mods.bootstraplauncher/cpw.mods.bootstraplauncher=ALL-UNNAMED ' + args;
+        }
     }
 
     return new Promise((resolve, reject) => {
@@ -11297,6 +13160,7 @@ async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null) 
             if (stderr) console.log(`[ForgeInstaller] stderr (最后500字): ${stderr.slice(-500)}`);
 
             const allOutput = (stdout || '') + (stderr || '');
+            const outputLines = allOutput.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
             if (allOutput.includes('Extracting json')) report('提取 JSON 配置...', 10);
             if (allOutput.includes('Downloading libraries')) report('下载依赖库...', 20);
             if (allOutput.includes('Building Processors')) report('构建处理器...', 30);
@@ -11306,8 +13170,15 @@ async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null) 
             if (error && error.killed) {
                 resolve({ success: false, error: 'Forge 安装器执行超时（10分钟）' });
             } else if (!error || (error.code === 0)) {
-                report('Forge 安装完成', 100);
-                resolve({ success: true });
+                const hasTrue = outputLines.slice(-5).some(l => l === 'true');
+                if (!useNative && !hasTrue) {
+                    console.warn(`[ForgeInstaller] ⚠ 进程退出码0但输出中无 "true"，安装可能不完整`);
+                    console.warn(`[ForgeInstaller] 最后5行: ${outputLines.slice(-5).join(' | ')}`);
+                    resolve({ success: false, error: `安装器未输出true，最后输出: ${outputLines.slice(-3).join(' | ')}` });
+                } else {
+                    report('Forge 安装器完成，正在补全文件...', 80);
+                    resolve({ success: true });
+                }
             } else {
                 resolve({ success: false, error: `Forge 安装器退出码 ${error.code}: ${(stderr || stdout || '').slice(-300)}` });
             }
@@ -11421,7 +13292,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
         const versionJsonPath = path.join(versionDir, `${versionId}.json`);
         const settings = loadSettingsCached();
-        const gameDir = settings.gameDir || path.join(MINECRAFT_DIR, '.minecraft');
+        const gameDir = settings.gameDir || MINECRAFT_DIR;
 
         if (versionJsonData) {
             console.log(`[Forge] 使用 BMCLAPI forge-installer.jar 安装 (现代 Forge)...`);
@@ -11452,6 +13323,80 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                 console.warn(`[Forge] 创建临时目录失败: ${e.message}`);
             }
 
+            // PCL2方式: 预下载 MOJMAPS mappings 文件（injector 的 processor 依赖此文件）
+            if (installProfile && installProfile.data && installProfile.data.MOJMAPS) {
+                try {
+                    const mojmapsRaw = installProfile.data.MOJMAPS.client;
+                    const mojmapsRef = typeof mojmapsRaw === 'string' ? mojmapsRaw
+                        : (Array.isArray(mojmapsRaw) ? mojmapsRaw[0] : (mojmapsRaw?.value || ''));
+                    const clean = mojmapsRef.replace(/[\[\]]/g, '');
+                    const parts = clean.split(':');
+                    if (parts.length >= 4) {
+                        const groupId = parts[0];
+                        const artifactId = parts[1];
+                        const libVersion = parts[2];
+                        const ext = parts.length > 4 ? parts[4] : (parts[3].includes('@') ? parts[3].split('@')[1] : 'txt');
+                        const groupPath = groupId.replace(/\./g, '/');
+                        const mappingsFileName = `${artifactId}-${libVersion}-mappings.${ext}`;
+                        const mappingsDir = path.join(LIBRARIES_DIR, groupPath, artifactId, libVersion);
+                        const mappingsPath = path.join(mappingsDir, mappingsFileName);
+
+                        if (!fs.existsSync(mappingsPath)) {
+                            console.log(`[Forge] 预下载 MOJMAPS: ${mappingsFileName}`);
+                            if (onProgress) onProgress(0.04, '正在下载 MOJMAPS 映射文件...');
+                            const mcVer = installProfile.version || gameVersion;
+                            const manifestBody = await httpGet('https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json');
+                            const manifest = JSON.parse(manifestBody);
+                            const verEntry = manifest.versions.find(v => v.id === mcVer);
+                            if (verEntry) {
+                                const verJsonUrl = verEntry.url.replace('https://piston-meta.mojang.com/', 'https://bmclapi2.bangbang93.com/');
+                                const mcVerJson = JSON.parse(await httpGet(verJsonUrl));
+                                const cm = mcVerJson.downloads?.client_mappings;
+                                if (cm) {
+                                    let cmUrl = cm.url.replace('https://piston-data.mojang.com/', 'https://bmclapi2.bangbang93.com/');
+                                    fs.mkdirSync(mappingsDir, { recursive: true });
+                                    await downloadFileWithMirror(cmUrl, mappingsPath);
+                                    console.log(`[Forge] MOJMAPS 下载完成: ${mappingsPath} (${fs.statSync(mappingsPath).size} bytes)`);
+                                }
+                            }
+                        } else {
+                            console.log(`[Forge] MOJMAPS 已存在: ${mappingsPath}`);
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`[Forge] MOJMAPS 预下载失败: ${e.message}，injector 将自行尝试下载`);
+                }
+            }
+
+            // PCL2方式: 预下载 Forge 支持库（injector 的 processor 依赖这些库）
+            try {
+                const allLibs = [...(installProfile?.libraries || []), ...(versionJsonData?.libraries || [])];
+                const seen = new Set();
+                let downloaded = 0;
+                for (const lib of allLibs) {
+                    if (!lib.name || seen.has(lib.name)) continue;
+                    seen.add(lib.name);
+                    const artifact = lib.downloads?.artifact;
+                    if (!artifact || !artifact.path) continue;
+                    const localPath = path.join(LIBRARIES_DIR, artifact.path);
+                    if (fs.existsSync(localPath)) continue;
+                    let url = artifact.url;
+                    if (!url) continue;
+                    url = url.replace('https://maven.minecraftforge.net/', 'https://bmclapi2.bangbang93.com/maven/');
+                    try {
+                        const dir = path.dirname(localPath);
+                        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                        await downloadFileWithMirror(url, localPath);
+                        downloaded++;
+                    } catch (e) {
+                        console.warn(`[Forge] 库下载失败: ${lib.name}: ${e.message}`);
+                    }
+                }
+                if (downloaded > 0) console.log(`[Forge] 预下载了 ${downloaded} 个支持库`);
+            } catch (e) {
+                console.warn(`[Forge] 支持库预下载异常: ${e.message}`);
+            }
+
             try {
                 const installerResult = await runForgeInstallerJar(installerPath, installerGameDir, (msg, pct) => {
                     if (onProgress) onProgress(0.05 + pct * 0.85, msg);
@@ -11466,6 +13411,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                             if (!installerJson.id) installerJson.id = versionId;
                             fs.mkdirSync(versionDir, { recursive: true });
                             fs.writeFileSync(versionJsonPath, JSON.stringify(installerJson, null, 2));
+                            _invalidateResolvedJsonCache(versionId);
                             console.log(`[Forge] 复制 forge-installer.jar 生成的版本JSON`);
                         } catch (e) {
                             console.warn(`[Forge] 复制版本JSON失败: ${e.message}`);
@@ -11476,6 +13422,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                         versionJsonData.inheritsFrom = gameVersion;
                         if (!versionJsonData.type) versionJsonData.type = 'release';
                         fs.writeFileSync(versionJsonPath, JSON.stringify(versionJsonData, null, 2));
+                        _invalidateResolvedJsonCache(versionId);
                         console.log(`[Forge] forge-installer.jar 未生成版本JSON，手动写入`);
                     } else {
                         try {
@@ -11483,15 +13430,152 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                             if (!createdJson.inheritsFrom) {
                                 createdJson.inheritsFrom = gameVersion;
                                 fs.writeFileSync(versionJsonPath, JSON.stringify(createdJson, null, 2));
+                                _invalidateResolvedJsonCache(versionId);
                             }
                         } catch (_) {}
                     }
                     try { fs.unlinkSync(installerPath); } catch (e) {}
                     console.log(`[Forge] Installation complete: ${versionId}`);
                     if (tempGameDir) try { fs.rmSync(tempGameDir, { recursive: true, force: true }); } catch (_) {}
+
+                    const forgeLibVerStr = `${gameVersion}-${forgeVersion}`;
+                    if (onProgress) onProgress(0.82, '正在下载Forge核心库...');
+                    await downloadForgeCoreLibsFromMaven(forgeLibVerStr, onProgress);
+
+                    const forgeDir = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', forgeLibVerStr);
+                    const forgeClientJar = path.join(forgeDir, `forge-${forgeLibVerStr}-client.jar`);
+                    const forgeUniversalJar = path.join(forgeDir, `forge-${forgeLibVerStr}-universal.jar`);
+                    const hasForgeJar = (fs.existsSync(forgeClientJar) && isJarIntact(forgeClientJar)) ||
+                        (fs.existsSync(forgeUniversalJar) && isJarIntact(forgeUniversalJar));
+                    if (!hasForgeJar) {
+                        if (onProgress) onProgress(0.85, '正在下载Forge核心JAR...');
+                        const forgePath = `net/minecraftforge/forge/${forgeLibVerStr}`;
+                        const candidates = [
+                            { dir: forgePath, file: `forge-${forgeLibVerStr}-client.jar` },
+                            { dir: forgePath, file: `forge-${forgeLibVerStr}-universal.jar` },
+                        ];
+                        for (const art of candidates) {
+                            const tp = path.join(LIBRARIES_DIR, art.dir, art.file);
+                            if (fs.existsSync(tp) && isJarIntact(tp)) break;
+                            for (const mb of FORGE_MAVEN_BASES) {
+                                try {
+                                    if (!fs.existsSync(path.dirname(tp))) fs.mkdirSync(path.dirname(tp), { recursive: true });
+                                    await downloadFileWithMirror(`${mb}/${art.dir}/${art.file}`, tp, null, 1, null, 30000);
+                                    if (fs.existsSync(tp) && isJarIntact(tp)) { console.log(`[Forge] Maven下载: ${art.file}`); break; }
+                                } catch (_) {}
+                            }
+                            if (fs.existsSync(tp) && isJarIntact(tp)) break;
+                        }
+                    }
+
+                    let mcpVer = '';
+                    try {
+                        const vjText = fs.existsSync(versionJsonPath) ? fs.readFileSync(versionJsonPath, 'utf8') : '';
+                        const vj = JSON.parse(vjText);
+                        const args = vj.arguments?.game || [];
+                        const idx = args.findIndex(a => a === '--fml.mcpVersion');
+                        if (idx >= 0 && idx + 1 < args.length) mcpVer = args[idx + 1];
+                    } catch (_) {}
+
+                    if (!mcpVer && installProfile?.data?.MOJMAPS) {
+                        try {
+                            const mojmapsRaw = installProfile.data.MOJMAPS.client;
+                            const mojmapsRef = typeof mojmapsRaw === 'string' ? mojmapsRaw
+                                : (Array.isArray(mojmapsRaw) ? mojmapsRaw[0] : '');
+                            const match = mojmapsRef.match(/:(\d{8}\.\d{6}):/);
+                            if (match) { mcpVer = match[1]; console.log(`[Forge] MCP版本(从install_profile提取): ${mcpVer}`); }
+                        } catch (_) {}
+                    }
+
+                    if (mcpVer) {
+                        const clientVerStr = `${gameVersion}-${mcpVer}`;
+                        const clientDir = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client', clientVerStr);
+                        const needSrg = !fs.existsSync(path.join(clientDir, `client-${clientVerStr}-srg.jar`)) ||
+                            !isJarIntact(path.join(clientDir, `client-${clientVerStr}-srg.jar`));
+                        const needExtra = !fs.existsSync(path.join(clientDir, `client-${clientVerStr}-extra.jar`)) ||
+                            !isJarIntact(path.join(clientDir, `client-${clientVerStr}-extra.jar`));
+
+                        if (needSrg || needExtra) {
+                            console.log(`[Forge] BMCLAPI安装器未生成patching JAR (srg=${needSrg}, extra=${needExtra})，直接运行官方安装器...`);
+                            if (onProgress) onProgress(0.88, 'BMCLAPI安装器不完整，正在使用官方安装器补全...');
+                            try {
+                                const officialUrl = `${forgeMavenOfficial}/${versionStr}/forge-${versionStr}-installer.jar`;
+                                const officialPath = path.join(DATA_DIR, 'temp', `forge-installer-official-${versionStr}.jar`);
+                                if (!fs.existsSync(path.dirname(officialPath))) fs.mkdirSync(path.dirname(officialPath), { recursive: true });
+                                await downloadFileWithMirror(officialUrl, officialPath, null, 1, null, 120000);
+                                if (fs.existsSync(officialPath) && fs.statSync(officialPath).size > 64 * 1024) {
+                                    const officialResult = await runForgeInstallerJar(officialPath, installerGameDir, (msg, pct) => {
+                                        if (onProgress) onProgress(0.9 + pct * 0.1, `官方安装器: ${msg}`);
+                                    }, true);
+                                    if (officialResult.success) {
+                                        console.log(`[Forge] ✅ 官方安装器完成patching`);
+                                    } else {
+                                        console.warn(`[Forge] 官方安装器失败: ${officialResult.error}`);
+                                    }
+                                } else {
+                                    console.warn(`[Forge] 官方安装器下载失败或文件太小`);
+                                }
+                                try { fs.unlinkSync(officialPath); } catch (_) {}
+                            } catch (e2) {
+                                console.warn(`[Forge] 官方安装器异常: ${e2.message}`);
+                            }
+                        } else {
+                            console.log(`[Forge] patching JAR已存在，跳过补全`);
+                        }
+                    } else {
+                        console.warn(`[Forge] 无法获取mcpVersion，跳过patching JAR补全`);
+                    }
+                    if (onProgress) onProgress(1, 'Forge 安装完成');
                     return { success: true, versionId: versionId };
                 } else {
-                    console.warn(`[Forge] forge-installer.jar 失败: ${installerResult.error}，回退手动安装...`);
+                    console.warn(`[Forge] forge-installer.jar 失败: ${installerResult.error}，尝试官方安装器...`);
+                    try {
+                        const officialUrl = `${forgeMavenOfficial}/${versionStr}/forge-${versionStr}-installer.jar`;
+                        const officialPath = path.join(DATA_DIR, 'temp', `forge-installer-official-${versionStr}.jar`);
+                        if (!fs.existsSync(path.dirname(officialPath))) fs.mkdirSync(path.dirname(officialPath), { recursive: true });
+                        if (onProgress) onProgress(0.5, '正在下载官方Forge安装器...');
+                        await downloadFileWithMirror(officialUrl, officialPath, null, 1, null, 120000);
+                        if (fs.existsSync(officialPath) && fs.statSync(officialPath).size > 64 * 1024) {
+                            console.log(`[Forge] 官方安装器下载完成，使用 --installClient 安装...`);
+                            const officialResult = await runForgeInstallerJar(officialPath, installerGameDir, (msg, pct) => {
+                                if (onProgress) onProgress(0.5 + pct * 0.45, `官方安装器: ${msg}`);
+                            }, true);
+                            if (officialResult.success) {
+                                console.log(`[Forge] ✅ 官方安装器成功`);
+                                const installerJsonPath = path.join(installerGameDir, 'versions', versionId, `${versionId}.json`);
+                                if (fs.existsSync(installerJsonPath) && !fs.existsSync(versionJsonPath)) {
+                                    try {
+                                        const ij = JSON.parse(fs.readFileSync(installerJsonPath, 'utf8'));
+                                        if (!ij.inheritsFrom) ij.inheritsFrom = gameVersion;
+                                        if (!ij.id) ij.id = versionId;
+                                        fs.mkdirSync(versionDir, { recursive: true });
+                                        fs.writeFileSync(versionJsonPath, JSON.stringify(ij, null, 2));
+                                        _invalidateResolvedJsonCache(versionId);
+                                    } catch (_) {}
+                                }
+                                if (!fs.existsSync(versionJsonPath)) {
+                                    versionJsonData.id = versionId;
+                                    versionJsonData.inheritsFrom = gameVersion;
+                                    if (!versionJsonData.type) versionJsonData.type = 'release';
+                                    fs.writeFileSync(versionJsonPath, JSON.stringify(versionJsonData, null, 2));
+                                    _invalidateResolvedJsonCache(versionId);
+                                } else {
+                                    try {
+                                        const cj = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8'));
+                                        if (!cj.inheritsFrom) { cj.inheritsFrom = gameVersion; fs.writeFileSync(versionJsonPath, JSON.stringify(cj, null, 2)); _invalidateResolvedJsonCache(versionId); }
+                                    } catch (_) {}
+                                }
+                                if (tempGameDir) try { fs.rmSync(tempGameDir, { recursive: true, force: true }); } catch (_) {}
+                                if (onProgress) onProgress(1, 'Forge 安装完成');
+                                return { success: true, versionId: versionId };
+                            } else {
+                                console.warn(`[Forge] 官方安装器也失败: ${officialResult.error}`);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`[Forge] 官方安装器异常: ${e.message}`);
+                    }
+                    console.warn(`[Forge] 官方安装器失败，回退手动安装...`);
                 }
             } catch (e) {
                 console.warn(`[Forge] forge-installer.jar 异常: ${e.message}，回退手动安装...`);
@@ -11525,7 +13609,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
             let forgeLibFailures = 0;
             const totalForgeLibs = (versionJsonData.libraries || []).length;
-            const FORGE_LIB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
+            const FORGE_LIB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 64, 64);
 
             const forgeLibTasks = [];
             for (const lib of (versionJsonData.libraries || [])) {
@@ -11608,6 +13692,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
             if (onProgress) onProgress(0.80, '正在创建版本配置...');
             fs.writeFileSync(versionJsonPath, JSON.stringify(versionJsonData, null, 2));
+            _invalidateResolvedJsonCache(versionId);
 
             try { fs.unlinkSync(installerPath); } catch (e) {}
             console.log(`[Forge] Installation complete (fallback): ${versionId}`);
@@ -11717,7 +13802,11 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                     if (proc.outputs) {
                         let allOutputsExist = true;
                         for (const [key, checksum] of Object.entries(proc.outputs)) {
-                            const outputKey = key.replace(/\{([^}]+)\}/g, (_, k) => clientData[k] !== undefined ? String(clientData[k]) : k);
+                            const outputKey = key.replace(/\{([^}]+)\}/g, (_, k) => {
+                            if (k === 'ROOT') return DATA_DIR;
+                            if (k === 'MINECRAFT_JAR') return mcJarPath;
+                            return clientData[k] !== undefined ? String(clientData[k]) : k;
+                        });
                             const outputPath = resolveArtifact(outputKey);
                             if (!fs.existsSync(outputPath) || (checksum && !isJarIntact(outputPath))) {
                                 allOutputsExist = false;
@@ -11774,6 +13863,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                             // 替换 {KEY} 为 data 中的值
                             resolved = resolved.replace(/\{([^}]+)\}/g, (match, key) => {
                                 if (key === 'MINECRAFT_JAR') return mcJarPath;
+                                if (key === 'ROOT') return DATA_DIR;
                                 if (clientData[key] !== undefined) return String(clientData[key]);
                                 return match;
                             });
@@ -11907,6 +13997,42 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
             const jsonPath = path.join(versionDir, `${versionId}.json`);
             fs.writeFileSync(jsonPath, JSON.stringify(fallbackJson, null, 2));
+            {
+                let mcpVer = '';
+                try {
+                    const args = fallbackJson.arguments?.game || [];
+                    const idx = args.findIndex(a => a === '--fml.mcpVersion');
+                    if (idx >= 0 && idx + 1 < args.length) mcpVer = args[idx + 1];
+                } catch (_) {}
+                if (mcpVer) {
+                    const clientVerStr = `${gameVersion}-${mcpVer}`;
+                    const clientDir = path.join(LIBRARIES_DIR, 'net', 'minecraft', 'client', clientVerStr);
+                    const needSrg = !fs.existsSync(path.join(clientDir, `client-${clientVerStr}-srg.jar`)) ||
+                        !isJarIntact(path.join(clientDir, `client-${clientVerStr}-srg.jar`));
+                    const needExtra = !fs.existsSync(path.join(clientDir, `client-${clientVerStr}-extra.jar`)) ||
+                        !isJarIntact(path.join(clientDir, `client-${clientVerStr}-extra.jar`));
+                    if (needSrg || needExtra) {
+                        console.log(`[Forge] 回退路径缺少patching JAR，直接运行官方安装器...`);
+                        try {
+                            const fvStr = `${gameVersion}-${forgeVersion}`;
+                            const officialUrl = `https://maven.minecraftforge.net/net/minecraftforge/forge/${fvStr}/forge-${fvStr}-installer.jar`;
+                            const officialPath = path.join(DATA_DIR, 'temp', `forge-installer-official-${fvStr}.jar`);
+                            if (!fs.existsSync(path.dirname(officialPath))) fs.mkdirSync(path.dirname(officialPath), { recursive: true });
+                            await downloadFileWithMirror(officialUrl, officialPath, null, 1, null, 120000);
+                            if (fs.existsSync(officialPath) && fs.statSync(officialPath).size > 64 * 1024) {
+                                const settings = loadSettingsCached();
+                                const gameDir = settings.gameDir || MINECRAFT_DIR;
+                                const officialResult = await runForgeInstallerJar(officialPath, gameDir, null, true);
+                                if (officialResult.success) console.log(`[Forge] ✅ 官方安装器回退完成`);
+                                else console.warn(`[Forge] 官方安装器回退失败: ${officialResult.error}`);
+                            }
+                            try { fs.unlinkSync(officialPath); } catch (_) {}
+                        } catch (e2) {
+                            console.warn(`[Forge] 官方安装器异常: ${e2.message}`);
+                        }
+                    }
+                }
+            }
             return { success: true, versionId: versionId, libsMissing: fMissing.length };
         } else {
             throw new Error('Forge 安装包中未找到 version.json 或 install_profile.json，可能是损坏的安装包');
@@ -11927,8 +14053,37 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
     }
 }
 
+function isLibValid(libPath, expectedSize, expectedSha1) {
+    if (!fs.existsSync(libPath)) return false;
+    try {
+        const stat = fs.statSync(libPath);
+        if (stat.size === 0) return false;
+        if (expectedSize > 0 && stat.size !== expectedSize) return false;
+        if (expectedSha1 && typeof expectedSha1 === 'string' && expectedSha1.length === 40) {
+            const crypto = require('crypto');
+            const content = fs.readFileSync(libPath);
+            const hash = crypto.createHash('sha1').update(content).digest('hex');
+            return hash === expectedSha1;
+        }
+        return stat.size > 1024;
+    } catch (e) {
+        return false;
+    }
+}
+
+function getNeoLibMirrorUrl(originalUrl) {
+    if (!originalUrl) return originalUrl;
+    return originalUrl
+        .replace('https://maven.neoforged.net/releases/', 'https://bmclapi2.bangbang93.com/maven/')
+        .replace('https://maven.neoforged.net/', 'https://bmclapi2.bangbang93.com/maven/')
+        .replace('https://maven.minecraftforge.net/', 'https://bmclapi2.bangbang93.com/maven/')
+        .replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/libraries/');
+}
+
 async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
-    const versionId = `${gameVersion}-neoforge-${neoVersion}`;
+    const isLegacy = neoVersion.startsWith('1.20.1-');
+    const packageName = isLegacy ? 'forge' : 'neoforge';
+    const versionId = `${gameVersion}-NeoForge-${neoVersion}`;
 
     try {
         const baseResult = await ensureBaseVersionInstalled(gameVersion);
@@ -11939,35 +14094,349 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
         const versionDir = path.join(VERSIONS_DIR, versionId);
         if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true });
 
-        const neoUrl = `${NEOFORGE_API_URL}/versions/${encodeURIComponent(`net.neoforged:neoforge:${neoVersion}`)}?type=json`;
-        console.log(`[NeoForge] Fetching version data: ${neoUrl}`);
-        let neoData;
-        try {
-            neoData = await fetchJSON(neoUrl);
-        } catch (e) {
-            const mirrorNeoUrl = `https://bmclapi2.bangbang93.com/maven/api/maven/versions/${encodeURIComponent(`net.neoforged:neoforge:${neoVersion}`)}?type=json`;
-            console.log(`[NeoForge] Retrying with mirror: ${mirrorNeoUrl}`);
-            neoData = await fetchJSON(mirrorNeoUrl);
+        const installerPath = path.join(DATA_DIR, 'temp', `neoforge-installer-${neoVersion}.jar`);
+        if (!fs.existsSync(path.dirname(installerPath))) fs.mkdirSync(path.dirname(installerPath), { recursive: true });
+
+        if (onProgress) onProgress(0, '正在下载NeoForge安装包...');
+
+        const neoforgeMavenOfficial = 'https://maven.neoforged.net/releases/net/neoforged';
+        const installerUrls = [
+            `https://bmclapi2.bangbang93.com/maven/net/neoforged/${packageName}/${neoVersion}/${packageName}-${neoVersion}-installer.jar`,
+            `${neoforgeMavenOfficial}/${packageName}/${neoVersion}/${packageName}-${neoVersion}-installer.jar`
+        ];
+        console.log(`[NeoForge] Downloading installer: ${installerUrls[0]}`);
+
+        let installerOk = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const dlUrl = installerUrls[attempt % installerUrls.length];
+            try {
+                await downloadFileWithMirror(dlUrl, installerPath);
+                const dlStat = fs.statSync(installerPath);
+                if (dlStat.size < 64 * 1024) {
+                    console.error(`[NeoForge] Installer too small (${dlStat.size} bytes), retrying...`);
+                    try { fs.unlinkSync(installerPath); } catch (_) {}
+                    continue;
+                }
+                const fd = fs.openSync(installerPath, 'r');
+                const buf = Buffer.alloc(4);
+                fs.readSync(fd, buf, 0, 4, 0);
+                fs.closeSync(fd);
+                if (buf[0] !== 0x50 || buf[1] !== 0x4B || buf[2] !== 0x03 || buf[3] !== 0x04) {
+                    console.error(`[NeoForge] Installer ZIP magic invalid, retrying...`);
+                    try { fs.unlinkSync(installerPath); } catch (_) {}
+                    continue;
+                }
+                installerOk = true;
+                break;
+            } catch (e) {
+                console.error(`[NeoForge] Installer download failed: ${e.message}`);
+                try { fs.unlinkSync(installerPath); } catch (_) {}
+            }
         }
+        if (!installerOk) {
+            throw new Error('NeoForge安装器下载失败，请检查网络');
+        }
+
+        const versionJsonPath = path.join(versionDir, `${versionId}.json`);
+
+        const installerGameDir = DATA_DIR;
+
+        console.log(`[NeoForge] 使用 forge-installer.jar 安装...`);
+        if (onProgress) onProgress(0.05, '正在使用 NeoForge 安装器...');
+
+        const AdmZip = require('adm-zip');
+        let installProfile = null;
+        try {
+            const zip = new AdmZip(installerPath);
+            const profileEntry = zip.getEntry('install_profile.json');
+            if (profileEntry) installProfile = JSON.parse(profileEntry.getData().toString('utf8'));
+        } catch (e) {}
+
+        if (installProfile) {
+            try {
+                fs.mkdirSync(versionDir, { recursive: true });
+                fs.writeFileSync(path.join(versionDir, 'install_profile.json'), JSON.stringify(installProfile, null, 2));
+            } catch (_) {}
+        }
+
+        if (installProfile && installProfile.data && installProfile.data.MOJMAPS) {
+            try {
+                const mojmapsRaw = installProfile.data.MOJMAPS.client;
+                const mojmapsRef = typeof mojmapsRaw === 'string' ? mojmapsRaw
+                    : (Array.isArray(mojmapsRaw) ? mojmapsRaw[0] : (mojmapsRaw?.value || ''));
+                const clean = mojmapsRef.replace(/[\[\]]/g, '');
+                const parts = clean.split(':');
+                if (parts.length >= 4) {
+                    const groupId = parts[0];
+                    const artifactId = parts[1];
+                    const libVersion = parts[2];
+                    const ext = parts.length > 4 ? parts[4] : (parts[3].includes('@') ? parts[3].split('@')[1] : 'txt');
+                    const groupPath = groupId.replace(/\./g, '/');
+                    const mappingsFileName = `${artifactId}-${libVersion}-mappings.${ext}`;
+                    const mappingsDir = path.join(LIBRARIES_DIR, groupPath, artifactId, libVersion);
+                    const mappingsPath = path.join(mappingsDir, mappingsFileName);
+
+                    if (!fs.existsSync(mappingsPath)) {
+                        console.log(`[NeoForge] 预下载 MOJMAPS: ${mappingsFileName}`);
+                        if (onProgress) onProgress(0.04, '正在下载 MOJMAPS 映射文件...');
+                        const mcVer = installProfile.version || gameVersion;
+                        const manifestBody = await httpGet('https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json');
+                        const manifest = JSON.parse(manifestBody);
+                        const verEntry = manifest.versions.find(v => v.id === mcVer);
+                        if (verEntry) {
+                            const verJsonUrl = verEntry.url.replace('https://piston-meta.mojang.com/', 'https://bmclapi2.bangbang93.com/');
+                            const mcVerJson = JSON.parse(await httpGet(verJsonUrl));
+                            const cm = mcVerJson.downloads?.client_mappings;
+                            if (cm) {
+                                let cmUrl = cm.url.replace('https://piston-data.mojang.com/', 'https://bmclapi2.bangbang93.com/');
+                                fs.mkdirSync(mappingsDir, { recursive: true });
+                                await downloadFileWithMirror(cmUrl, mappingsPath);
+                                console.log(`[NeoForge] MOJMAPS 下载完成: ${mappingsPath}`);
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn(`[NeoForge] MOJMAPS 预下载失败: ${e.message}`);
+            }
+        }
+
+        if (installProfile) {
+            try {
+                const allLibs = installProfile.libraries || [];
+                let downloaded = 0;
+                for (const lib of allLibs) {
+                    if (!lib.name) continue;
+                    const artifact = lib.downloads?.artifact;
+                    if (!artifact || !artifact.path) continue;
+                    const localPath = path.join(LIBRARIES_DIR, artifact.path);
+                    if (fs.existsSync(localPath)) continue;
+                    let url = artifact.url;
+                    if (!url) continue;
+                    url = url.replace('https://maven.neoforged.net/', 'https://bmclapi2.bangbang93.com/maven/')
+                             .replace('https://maven.minecraftforge.net/', 'https://bmclapi2.bangbang93.com/maven/');
+                    try {
+                        const dir = path.dirname(localPath);
+                        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                        await downloadFileWithMirror(url, localPath);
+                        downloaded++;
+                    } catch (e) {
+                        console.warn(`[NeoForge] 库预下载失败: ${lib.name}: ${e.message}`);
+                    }
+                }
+                if (downloaded > 0) console.log(`[NeoForge] 预下载了 ${downloaded} 个支持库`);
+            } catch (e) {
+                console.warn(`[NeoForge] 支持库预下载异常: ${e.message}`);
+            }
+        }
+
+        let installerUsed = false;
+        try {
+            const installerResult = await runForgeInstallerJar(installerPath, installerGameDir, (msg, pct) => {
+                if (onProgress) onProgress(0.05 + pct * 0.85, msg);
+            });
+
+            if (installerResult.success) {
+                const versionsScanDir = path.join(DATA_DIR, 'versions');
+                const oldList = fs.readdirSync(versionsScanDir).map(d => path.join(versionsScanDir, d));
+                let newVersionDir = null;
+                try {
+                    const currentList = fs.readdirSync(versionsScanDir).map(d => path.join(versionsScanDir, d));
+                    newVersionDir = currentList.find(d => !oldList.includes(d));
+                } catch (_) {}
+
+                if (newVersionDir && fs.existsSync(newVersionDir)) {
+                    const jsonFiles = fs.readdirSync(newVersionDir).filter(f => f.endsWith('.json'));
+                    if (jsonFiles.length > 0) {
+                        const srcJson = path.join(newVersionDir, jsonFiles[0]);
+                        const ij = JSON.parse(fs.readFileSync(srcJson, 'utf8'));
+                        if (!ij.inheritsFrom) ij.inheritsFrom = gameVersion;
+                        if (!ij.id) ij.id = versionId;
+                        fs.mkdirSync(versionDir, { recursive: true });
+                        fs.writeFileSync(versionJsonPath, JSON.stringify(ij, null, 2));
+                        _invalidateResolvedJsonCache(versionId);
+                        console.log(`[NeoForge] 复制 installer 生成的版本JSON`);
+                        installerUsed = true;
+                    }
+                }
+
+                if (!installerUsed) {
+                    const installerJsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
+                    if (fs.existsSync(installerJsonPath)) {
+                        try {
+                            const ij = JSON.parse(fs.readFileSync(installerJsonPath, 'utf8'));
+                            if (!ij.inheritsFrom) ij.inheritsFrom = gameVersion;
+                            if (!ij.id) ij.id = versionId;
+                            fs.mkdirSync(versionDir, { recursive: true });
+                            fs.writeFileSync(versionJsonPath, JSON.stringify(ij, null, 2));
+                            _invalidateResolvedJsonCache(versionId);
+                            console.log(`[NeoForge] 复制 installer 生成的版本JSON (direct)`);
+                            installerUsed = true;
+                        } catch (_) {}
+                    }
+                }
+
+                if (installerUsed) {
+                    console.log(`[NeoForge] forge-installer.jar 安装成功: ${versionId}`);
+                    if (onProgress) onProgress(0.95, '补全 NeoForge 库和参数...');
+                    try { await mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, onProgress); } catch (mergeErr) { console.warn(`[NeoForge] merge 补全失败: ${mergeErr.message}`); }
+                    try { fs.unlinkSync(installerPath); } catch (_) {}
+                    if (onProgress) onProgress(1, 'NeoForge 安装完成');
+                    return { success: true, versionId: versionId };
+                } else {
+                    console.warn(`[NeoForge] forge-installer.jar 成功但未生成版本JSON，尝试原生模式...`);
+                }
+            } else {
+                console.warn(`[NeoForge] forge-installer.jar 失败: ${installerResult.error}，尝试原生模式...`);
+            }
+        } catch (e) {
+            console.warn(`[NeoForge] forge-installer.jar 异常: ${e.message}，尝试原生模式...`);
+        }
+
+        try {
+            if (onProgress) onProgress(0.5, '正在使用官方安装器...');
+            const officialResult = await runForgeInstallerJar(installerPath, installerGameDir, (msg, pct) => {
+                if (onProgress) onProgress(0.5 + pct * 0.4, `官方安装器: ${msg}`);
+            }, true);
+
+            if (officialResult.success) {
+                const versionsScanDir2 = path.join(DATA_DIR, 'versions');
+                const oldList2 = fs.readdirSync(versionsScanDir2).map(d => path.join(versionsScanDir2, d));
+                let newVersionDir = null;
+                try {
+                    const currentList2 = fs.readdirSync(versionsScanDir2).map(d => path.join(versionsScanDir2, d));
+                    newVersionDir = currentList2.find(d => !oldList2.includes(d));
+                } catch (_) {}
+
+                if (newVersionDir && fs.existsSync(newVersionDir)) {
+                    const jsonFiles = fs.readdirSync(newVersionDir).filter(f => f.endsWith('.json'));
+                    if (jsonFiles.length > 0) {
+                        const srcJson = path.join(newVersionDir, jsonFiles[0]);
+                        const ij = JSON.parse(fs.readFileSync(srcJson, 'utf8'));
+                        if (!ij.inheritsFrom) ij.inheritsFrom = gameVersion;
+                        if (!ij.id) ij.id = versionId;
+                        fs.mkdirSync(versionDir, { recursive: true });
+                        fs.writeFileSync(versionJsonPath, JSON.stringify(ij, null, 2));
+                        _invalidateResolvedJsonCache(versionId);
+                        console.log(`[NeoForge] 官方安装器安装成功，已复制版本JSON`);
+                        if (onProgress) onProgress(0.95, '补全 NeoForge 库和参数...');
+                        try { await mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, onProgress); } catch (mergeErr) { console.warn(`[NeoForge] merge 补全失败: ${mergeErr.message}`); }
+                        try { fs.unlinkSync(installerPath); } catch (_) {}
+                        if (onProgress) onProgress(1, 'NeoForge 安装完成');
+                        return { success: true, versionId: versionId };
+                    }
+                }
+
+                const installerJsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
+                if (fs.existsSync(installerJsonPath)) {
+                    const ij = JSON.parse(fs.readFileSync(installerJsonPath, 'utf8'));
+                    if (!ij.inheritsFrom) ij.inheritsFrom = gameVersion;
+                    if (!ij.id) ij.id = versionId;
+                    fs.mkdirSync(versionDir, { recursive: true });
+                    fs.writeFileSync(versionJsonPath, JSON.stringify(ij, null, 2));
+                    _invalidateResolvedJsonCache(versionId);
+                    console.log(`[NeoForge] 官方安装器安装成功 (direct)`);
+                    if (onProgress) onProgress(0.95, '补全 NeoForge 库和参数...');
+                    try { await mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, onProgress); } catch (mergeErr) { console.warn(`[NeoForge] merge 补全失败: ${mergeErr.message}`); }
+                    try { fs.unlinkSync(installerPath); } catch (_) {}
+                    if (onProgress) onProgress(1, 'NeoForge 安装完成');
+                    return { success: true, versionId: versionId };
+                }
+                console.warn(`[NeoForge] 官方安装器成功但未生成版本JSON，回退手动安装...`);
+            } else {
+                console.warn(`[NeoForge] 官方安装器失败: ${officialResult.error}，回退手动安装...`);
+            }
+        } catch (e) {
+            console.warn(`[NeoForge] 官方安装器异常: ${e.message}，回退手动安装...`);
+        }
+
+        console.log(`[NeoForge] 回退到手动安装模式...`);
+        if (onProgress) onProgress(0.85, '使用备用安装方式...');
+
+        const AdmZipClass = require('adm-zip');
+        const zip = new AdmZipClass(installerPath);
+
+        let versionJsonData = null;
+        let manualInstallProfile = null;
+
+        try {
+            const profileEntry = zip.getEntry('install_profile.json');
+            if (profileEntry) manualInstallProfile = JSON.parse(profileEntry.getData().toString('utf8'));
+        } catch (e) {}
+
+        try {
+            const versionEntry = zip.getEntry('version.json');
+            if (versionEntry) {
+                versionJsonData = JSON.parse(versionEntry.getData().toString('utf8'));
+            }
+        } catch (e) {}
+
+        if (!versionJsonData && manualInstallProfile) {
+            if (typeof manualInstallProfile.json === 'object' && manualInstallProfile.json !== null) {
+                versionJsonData = manualInstallProfile.json;
+            } else if (typeof manualInstallProfile.json === 'string' && manualInstallProfile.json) {
+                const jsonFileName = manualInstallProfile.json.replace(/^\//, '');
+                const jsonEntry = zip.getEntry(jsonFileName);
+                if (jsonEntry) {
+                    try { versionJsonData = JSON.parse(jsonEntry.getData().toString('utf8')); } catch (e) {}
+                }
+            }
+        }
+
+        if (manualInstallProfile && versionJsonData) {
+            const profileLibs = manualInstallProfile.libraries || [];
+            const versionLibs = versionJsonData.libraries || [];
+            const existingNames = new Set(versionLibs.map(l => l.name).filter(Boolean));
+            for (const lib of profileLibs) {
+                if (lib.name && !existingNames.has(lib.name)) {
+                    versionLibs.push(lib);
+                    existingNames.add(lib.name);
+                }
+            }
+            versionJsonData.libraries = versionLibs;
+            if (manualInstallProfile.mainClass && !versionJsonData.mainClass) {
+                versionJsonData.mainClass = manualInstallProfile.mainClass;
+            }
+        }
+
+        if (!versionJsonData) {
+            throw new Error('NeoForge安装器中未找到version.json');
+        }
+
+        const neoForgeMainPattern = new RegExp(`^net\\.neoforged:(neoforge|forge):${neoVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+        versionJsonData.libraries = (versionJsonData.libraries || []).filter(lib => {
+            if (!lib.name) return true;
+            return !neoForgeMainPattern.test(lib.name);
+        });
 
         const versionJson = {
             id: versionId,
             inheritsFrom: gameVersion,
-            mainClass: 'cpw.mods.bootstraplauncher.BootstrapLauncher',
+            mainClass: versionJsonData.mainClass || 'cpw.mods.bootstraplauncher.BootstrapLauncher',
             type: 'release',
-            libraries: [...(neoData.libraries || [])],
-            arguments: {
+            libraries: [...versionJsonData.libraries],
+            arguments: versionJsonData.arguments || {
                 game: ['--launchTarget', 'neoforgeclient', '--fml.neoForgeVersion', neoVersion, '--fml.mcVersion', gameVersion],
                 jvm: []
             }
         };
+        if (!versionJson.arguments.game) {
+            versionJson.arguments.game = ['--launchTarget', 'neoforgeclient', '--fml.neoForgeVersion', neoVersion, '--fml.mcVersion', gameVersion];
+        }
+
+        if (onProgress) onProgress(0.9, '正在下载NeoForge库...');
 
         const neoLibsToDownload = [];
         for (const lib of (versionJson.libraries || [])) {
             const parts = lib.name ? lib.name.split(':') : [];
             let libPath = null;
+            let expectedSize = -1;
+            let expectedSha1 = null;
+
             if (lib.downloads?.artifact?.path) {
                 libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
+                expectedSize = lib.downloads.artifact.size || -1;
+                expectedSha1 = lib.downloads.artifact.sha1 || null;
             } else if (lib.name && parts.length >= 3) {
                 const groupPath = parts[0].replace(/\./g, path.sep);
                 const lname = parts[1];
@@ -11977,51 +14446,70 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
                 libPath = path.join(LIBRARIES_DIR, groupPath, lname, lver, jarName);
             }
 
-            if (!libPath || isJarIntact(libPath)) continue;
+            if (!libPath || isLibValid(libPath, expectedSize, expectedSha1)) continue;
 
             if (lib.downloads?.artifact?.url) {
-                neoLibsToDownload.push({ lib, url: lib.downloads.artifact.url, libPath });
+                const mirrorUrl = getNeoLibMirrorUrl(lib.downloads.artifact.url);
+                neoLibsToDownload.push({ lib, url: mirrorUrl, fallbackUrl: lib.downloads.artifact.url, libPath, expectedSha1 });
             } else if (parts.length >= 3) {
                 const mavenGroup = parts[0].replace(/\./g, '/');
                 const lname = parts[1];
                 const lver = parts[2];
                 const classifier = parts.length >= 4 ? parts[3] : '';
                 const jarName = classifier ? `${lname}-${lver}-${classifier}.jar` : `${lname}-${lver}.jar`;
-                const baseUrl = lib.url || 'https://maven.neoforged.net/';
-                const dlUrl = `${baseUrl}${mavenGroup}/${lname}/${lver}/${jarName}`;
-                neoLibsToDownload.push({ lib, url: dlUrl, libPath });
+                const isNeoLib = parts[0].includes('neoforged') || parts[0].includes('fancymodloader') || parts[0].includes('mixin');
+                const officialUrl = lib.url || (isNeoLib ? 'https://maven.neoforged.net/releases/' : 'https://libraries.minecraft.net/');
+                const dlUrl = `${officialUrl}${mavenGroup}/${lname}/${lver}/${jarName}`;
+                const mirrorUrl = getNeoLibMirrorUrl(dlUrl);
+                neoLibsToDownload.push({ lib, url: mirrorUrl, fallbackUrl: dlUrl, libPath, expectedSha1: null });
             }
         }
 
         let neoLibFailures = 0;
         if (neoLibsToDownload.length > 0) {
-            const settings = loadSettingsCached();
-            const NEO_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, neoLibsToDownload.length);
+            const NEO_PARALLEL = 8;
             let completed = 0;
+            let failed = 0;
             let active = 0;
             let done = null;
 
             const scheduleNext = () => {
-                while (active < NEO_PARALLEL && completed + active < neoLibsToDownload.length) {
-                    const item = neoLibsToDownload[completed + active];
+                while (active < NEO_PARALLEL && completed + failed + active < neoLibsToDownload.length) {
+                    const item = neoLibsToDownload[completed + failed + active];
                     active++;
                     (async () => {
-                        try {
-                            if (fs.existsSync(item.libPath)) fs.unlinkSync(item.libPath);
-                            await downloadFileWithMirror(item.url, item.libPath);
-                        } catch (e) {
-                            neoLibFailures++;
-                            console.log(`[NeoForge] Failed to download ${item.lib.name}: ${e.message}`);
+                        let success = false;
+                        for (let retry = 0; retry < 3; retry++) {
+                            try {
+                                if (fs.existsSync(item.libPath)) fs.unlinkSync(item.libPath);
+                                const dlUrl = retry === 0 ? item.url : item.fallbackUrl;
+                                await downloadFileWithMirror(dlUrl, item.libPath);
+                                if (isLibValid(item.libPath, -1, item.expectedSha1)) { success = true; break; }
+                                if (retry < 2) {
+                                    try { fs.unlinkSync(item.libPath); } catch (_) {}
+                                    const delay = 3000 + retry * 2000;
+                                    const start = Date.now();
+                                    while (Date.now() - start < delay) {}
+                                }
+                            } catch (e) {
+                                if (retry < 2) {
+                                    const delay = 3000 + retry * 2000;
+                                    const start = Date.now();
+                                    while (Date.now() - start < delay) {}
+                                } else {
+                                    console.log(`[NeoForge] Failed to download ${item.lib.name}: ${e.message}`);
+                                }
+                            }
                         }
+                        if (!success) neoLibFailures++;
                     })().then(() => {
                         completed++;
-                    }).catch(() => {}).finally(() => {
+                    }).catch(() => {
+                        failed++;
+                    }).finally(() => {
                         active--;
-                        if (onProgress) {
-                            onProgress(completed / neoLibsToDownload.length, `下载NeoForge库 (${completed}/${neoLibsToDownload.length})...`);
-                        }
-                        if (active === 0 && completed >= neoLibsToDownload.length && done) done();
-                        else if (active < NEO_PARALLEL && completed + active < neoLibsToDownload.length) scheduleNext();
+                        if (active === 0 && completed + failed >= neoLibsToDownload.length && done) done();
+                        else if (active < NEO_PARALLEL && completed + failed + active < neoLibsToDownload.length) scheduleNext();
                     });
                 }
             };
@@ -12029,29 +14517,23 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
             await new Promise(resolve => { done = resolve; scheduleNext(); });
         }
 
-        const neoCoreLibs = [];
-        const neoMainLib = versionJson.libraries.find(l => l.name && l.name.startsWith('net.neoforged:neoforge:'));
-        if (neoMainLib) {
-            const np = neoMainLib.name.split(':');
-            const nj = `${np[1]}-${np[2]}.jar`;
-            neoCoreLibs.push(path.join(LIBRARIES_DIR, np[0].replace(/\./g, path.sep), np[1], np[2], nj));
-        }
-        const neoMissing = neoCoreLibs.filter(f => !fs.existsSync(f));
-        if (neoMissing.length > 0) {
-            console.warn(`[NeoForge] 核心库文件暂缺 (${neoMissing.length}个): ${neoMissing.join(', ')}, 将由安装后验证补全`);
-        }
+        fs.writeFileSync(versionJsonPath, JSON.stringify(versionJson, null, 2));
+        _invalidateResolvedJsonCache(versionId);
+        console.log(`[NeoForge] 手动模式 JSON written, libs=${(versionJson.libraries||[]).length}, failed=${neoLibFailures}`);
 
-        const jsonPath = path.join(versionDir, `${versionId}.json`);
-        fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
-        console.log(`[NeoForge] JSON已写入, libs缺失=${neoMissing.length}`);
-        return { success: true, versionId: versionId, libsMissing: neoMissing.length };
+        if (onProgress) onProgress(0.95, '补全 NeoForge 库和参数...');
+        try { await mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, onProgress); } catch (mergeErr) { console.warn(`[NeoForge] merge 补全失败: ${mergeErr.message}`); }
+
+        try { fs.unlinkSync(installerPath); } catch (_) {}
+
+        return { success: true, versionId: versionId, libsMissing: neoLibFailures, fallback: true };
     } catch (e) {
         console.error(`[NeoForge] Installation failed: ${e.message}`);
         try {
-            const versionDir = path.join(VERSIONS_DIR, `${gameVersion}-neoforge-${neoVersion}`);
-            if (fs.existsSync(versionDir)) {
-                fs.rmSync(versionDir, { recursive: true, force: true });
-                console.log(`[NeoForge] Cleaned up failed version directory: ${versionDir}`);
+            const vDir = path.join(VERSIONS_DIR, versionId);
+            if (fs.existsSync(vDir)) {
+                fs.rmSync(vDir, { recursive: true, force: true });
+                console.log(`[NeoForge] Cleaned up failed version directory: ${vDir}`);
             }
         } catch (cleanupErr) {
             console.error(`[NeoForge] Failed to cleanup version directory:`, cleanupErr.message);
@@ -12182,36 +14664,36 @@ async function mergeFabricLoaderToVersion(versionId, gameVersion, loaderVersion,
     const downloadErrors = [];
     if (libsToDownload.length > 0) {
         const settings = loadSettingsCached();
-        const FABRIC_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, libsToDownload.length);
+        const FABRIC_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 64, libsToDownload.length);
         let completed = 0;
+        let failed = 0;
         let active = 0;
         let done = null;
 
         const scheduleNext = () => {
-            while (active < FABRIC_PARALLEL && completed + active < libsToDownload.length) {
-                const lib = libsToDownload[completed + active];
+            while (active < FABRIC_PARALLEL && completed + failed + active < libsToDownload.length) {
+                const lib = libsToDownload[completed + failed + active];
                 active++;
                 (async () => {
                     const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
                     const libUrl = lib.downloads.artifact.url
                         || `https://maven.fabricmc.net/${lib.downloads.artifact.path}`;
                     console.log(`[Fabric] 下载库: ${lib.name || lib.downloads.artifact.path}`);
-                    try {
-                        await downloadFileWithMirror(libUrl, libPath);
-                        console.log(`[Fabric] 下载成功: ${lib.name}`);
-                    } catch (e) {
-                        console.error(`[Fabric] 下载失败: ${lib.name} - ${e.message}`);
-                        downloadErrors.push({ name: lib.name, url: libUrl, error: e.message });
-                    }
+                    await downloadFileWithMirror(libUrl, libPath);
+                    console.log(`[Fabric] 下载成功: ${lib.name}`);
                 })().then(() => {
                     completed++;
-                }).catch(() => {}).finally(() => {
+                }).catch((e) => {
+                    console.error(`[Fabric] 下载失败: ${lib.name} - ${e.message}`);
+                    downloadErrors.push({ name: lib.name, url: lib.downloads.artifact.url, error: e.message });
+                    failed++;
+                }).finally(() => {
                     active--;
                     if (onProgress) {
-                        onProgress(completed / libsToDownload.length, `下载Fabric库 (${completed}/${libsToDownload.length})...`);
+                        onProgress((completed + failed) / libsToDownload.length, `下载Fabric库 (${completed + failed}/${libsToDownload.length})...`);
                     }
-                    if (active === 0 && completed >= libsToDownload.length && done) done();
-                    else if (active < FABRIC_PARALLEL && completed + active < libsToDownload.length) scheduleNext();
+                    if (active === 0 && completed + failed >= libsToDownload.length && done) done();
+                    else if (active < FABRIC_PARALLEL && completed + failed + active < libsToDownload.length) scheduleNext();
                 });
             }
         };
@@ -12227,6 +14709,7 @@ async function mergeFabricLoaderToVersion(versionId, gameVersion, loaderVersion,
     }
 
     fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
+    _invalidateResolvedJsonCache(versionId);
     console.log(`[Fabric] Loader merged into version: ${versionId}`);
 }
 
@@ -12302,6 +14785,7 @@ async function mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion) {
         versionJson.arguments.game.push('--fml.forgeVersion', forgeVersion, '--fml.mcVersion', gameVersion, '--fml.forgeGroup', 'net.minecraftforge');
         versionJson.libraries = versionJson.libraries || [];
         fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
+        _invalidateResolvedJsonCache(versionId);
     }
 
     try { fs.unlinkSync(installerPath); } catch (e) {}
@@ -12312,99 +14796,400 @@ async function mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion) {
 // 模组加载器版本合并 - 将加载器特有的配置合并到版本JSON中
 // ============================================================================
 
-function mergeVersionJsonProperties(target, source) {
-    if (source.mainClass) target.mainClass = source.mainClass;
-    if (source.libraries) {
-        target.libraries = [...(target.libraries || []), ...source.libraries];
-    }
-    if (source.arguments) {
-        target.arguments = target.arguments || {};
-        if (source.arguments.game) {
-            target.arguments.game = [...(target.arguments.game || []), ...source.arguments.game];
-        }
-        if (source.arguments.jvm) {
-            target.arguments.jvm = [...(target.arguments.jvm || []), ...source.arguments.jvm];
-        }
-    }
-}
 
 async function mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, onProgress = null) {
     const versionDir = path.join(VERSIONS_DIR, versionId);
     const jsonPath = path.join(versionDir, `${versionId}.json`);
+    const versionJson = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
 
-    const neoUrl = `${NEOFORGE_API_URL}/versions/${encodeURIComponent(`net.neoforged:neoforge:${neoVersion}`)}?type=json`;
-    console.log(`[NeoForge] Fetching: ${neoUrl}`);
+    let profileLibs = [];
+    let profileData = null;
+    let installerMainClass = null;
+    let installerArgs = null;
+
+    if (onProgress) onProgress(0.1, '提取 NeoForge 安装器数据...');
+
+    const ipPath = path.join(versionDir, 'install_profile.json');
+    if (fs.existsSync(ipPath)) {
+        try {
+            const ipData = JSON.parse(fs.readFileSync(ipPath, 'utf-8'));
+            profileLibs = ipData.libraries || [];
+            profileData = ipData.data || null;
+        } catch (_) {}
+    }
+
+    if (profileLibs.length === 0) {
+        const isLegacy = neoVersion.startsWith('1.20.1-');
+        const pkg = isLegacy ? 'forge' : 'neoforge';
+        const installerUrls = [
+            `https://bmclapi2.bangbang93.com/maven/net/neoforged/${pkg}/${neoVersion}/${pkg}-${neoVersion}-installer.jar`,
+            `https://maven.neoforged.net/releases/net/neoforged/${pkg}/${neoVersion}/${pkg}-${neoVersion}-installer.jar`
+        ];
+        const installerPath = path.join(DATA_DIR, 'temp', `neoforge-merge-${neoVersion}.jar`);
+        fs.mkdirSync(path.dirname(installerPath), { recursive: true });
+
+        let downloaded = false;
+        for (const url of installerUrls) {
+            try {
+                await downloadFileWithMirror(url, installerPath);
+                downloaded = true;
+                break;
+            } catch (_) {}
+        }
+
+        if (downloaded) {
+            try {
+                const AdmZip = require('adm-zip');
+                const zip = new AdmZip(installerPath);
+                const profileEntry = zip.getEntry('install_profile.json');
+                if (profileEntry) {
+                    const ipData = JSON.parse(profileEntry.getData().toString('utf8'));
+                    profileLibs = ipData.libraries || [];
+                    profileData = ipData.data || null;
+                    try { fs.writeFileSync(ipPath, JSON.stringify(ipData, null, 2)); } catch (_) {}
+                }
+                const versionEntry = zip.getEntry('version.json');
+                if (versionEntry) {
+                    const vData = JSON.parse(versionEntry.getData().toString('utf8'));
+                    installerMainClass = vData.mainClass || null;
+                    installerArgs = vData.arguments || null;
+                }
+            } catch (zipErr) {
+                console.warn(`[NeoForge] 解压安装器失败: ${zipErr.message}`);
+            }
+            try { fs.unlinkSync(installerPath); } catch (_) {}
+        }
+    }
+
+    if (profileLibs.length === 0) {
+        try {
+            const neoUrl = `${NEOFORGE_API_URL}/versions/${encodeURIComponent(`net.neoforged:neoforge:${neoVersion}`)}?type=json`;
+            let neoData;
+            try {
+                neoData = await fetchJSON(neoUrl, 3, 10000);
+            } catch (e) {
+                const mirrorNeoUrl = `https://bmclapi2.bangbang93.com/maven/api/maven/versions/${encodeURIComponent(`net.neoforged:neoforge:${neoVersion}`)}?type=json`;
+                neoData = await fetchJSON(mirrorNeoUrl, 3, 10000);
+            }
+            installerMainClass = neoData.mainClass || installerMainClass;
+            installerArgs = neoData.arguments || installerArgs;
+            profileLibs = neoData.libraries || profileLibs;
+        } catch (e) {
+            console.warn(`[NeoForge] API也失败: ${e.message}`);
+        }
+    }
+
+    versionJson.mainClass = installerMainClass || versionJson.mainClass || 'cpw.mods.bootstraplauncher.BootstrapLauncher';
+
+    if (profileData) {
+        versionJson.data = profileData;
+    }
+
+    const existingLibNames = new Set((versionJson.libraries || []).map(l => l.name).filter(Boolean));
+    for (const lib of profileLibs) {
+        if (lib.name && !existingLibNames.has(lib.name)) {
+            versionJson.libraries = versionJson.libraries || [];
+            versionJson.libraries.push(lib);
+            existingLibNames.add(lib.name);
+        }
+    }
+
+    versionJson.arguments = versionJson.arguments || {};
+    versionJson.arguments.game = versionJson.arguments.game || [];
+    const hasFmlArgs = versionJson.arguments.game.some(a => a === '--fml.neoForgeVersion');
+    if (!hasFmlArgs) {
+        if (installerArgs?.game) {
+            versionJson.arguments.game.push(...installerArgs.game);
+        } else {
+            versionJson.arguments.game.push('--launchTarget', 'neoforgeclient', '--fml.neoForgeVersion', neoVersion, '--fml.mcVersion', gameVersion);
+        }
+    }
+    if (installerArgs?.jvm) {
+        const existingJvm = new Set(versionJson.arguments.jvm || []);
+        for (const jvmArg of installerArgs.jvm) {
+            if (!existingJvm.has(jvmArg)) {
+                versionJson.arguments.jvm = versionJson.arguments.jvm || [];
+                versionJson.arguments.jvm.push(jvmArg);
+                existingJvm.add(jvmArg);
+            }
+        }
+    }
+
+    if (onProgress) onProgress(0.5, '下载 NeoForge 库文件...');
+
+    const libsToDownload = (versionJson.libraries || []).filter(lib => {
+        if (!lib.downloads?.artifact?.url) return false;
+        const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
+        return !fs.existsSync(libPath);
+    });
+
+    if (libsToDownload.length > 0) {
+        const settings = loadSettingsCached();
+        const NEO_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 64, libsToDownload.length);
+        let completed = 0;
+        let failed = 0;
+        let active = 0;
+        let done = null;
+
+        const scheduleNext = () => {
+            while (active < NEO_PARALLEL && completed + failed + active < libsToDownload.length) {
+                const lib = libsToDownload[completed + failed + active];
+                active++;
+                (async () => {
+                    const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
+                    const dir = path.dirname(libPath);
+                    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                    await downloadFileWithMirror(lib.downloads.artifact.url, libPath);
+                    if (libPath.endsWith('.jar') && !isJarIntact(libPath)) {
+                        throw new Error(`下载后JAR损坏: ${path.basename(libPath)}`);
+                    }
+                })().then(() => {
+                    completed++;
+                }).catch((e) => {
+                    console.error(`[NeoForge] 库下载失败: ${lib.downloads.artifact.path} - ${e.message}`);
+                    try { fs.unlinkSync(path.join(LIBRARIES_DIR, lib.downloads.artifact.path)); } catch (_) {}
+                    failed++;
+                }).finally(() => {
+                    active--;
+                    if (onProgress) {
+                        onProgress(0.5 + 0.5 * (completed + failed) / libsToDownload.length, `下载NeoForge库 (${completed + failed}/${libsToDownload.length})...`);
+                    }
+                    if (active === 0 && completed + failed >= libsToDownload.length && done) done();
+                    else if (active < NEO_PARALLEL && completed + failed + active < libsToDownload.length) scheduleNext();
+                });
+            }
+        };
+
+        await new Promise(resolve => { done = resolve; scheduleNext(); });
+    }
+
+    if (onProgress) onProgress(0.9, '执行 NeoForge 处理器...');
 
     try {
-        let neoData;
-        try {
-            neoData = await fetchJSON(neoUrl);
-        } catch (e) {
-            const mirrorNeoUrl = `https://bmclapi2.bangbang93.com/maven/api/maven/versions/${encodeURIComponent(`net.neoforged:neoforge:${neoVersion}`)}?type=json`;
-            console.log(`[NeoForge] Retrying with mirror: ${mirrorNeoUrl}`);
-            neoData = await fetchJSON(mirrorNeoUrl);
-        }
-        const versionJson = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-        versionJson.mainClass = 'cpw.mods.bootstraplauncher.BootstrapLauncher';
-        versionJson.libraries = [...(versionJson.libraries || []), ...(neoData.libraries || [])];
-        versionJson.arguments = versionJson.arguments || {};
-        versionJson.arguments.game = versionJson.arguments.game || [];
-        versionJson.arguments.game.push('--launchTarget', 'neoforgeclient', '--fml.neoForgeVersion', neoVersion, '--fml.mcVersion', gameVersion);
-
-        const libsToDownload = (versionJson.libraries || []).filter(lib => {
-            if (!lib.downloads?.artifact?.url) return false;
-            const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
-            return !fs.existsSync(libPath);
-        });
-
-        if (libsToDownload.length > 0) {
-            const settings = loadSettingsCached();
-            const NEO_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, libsToDownload.length);
-            let completed = 0;
-            let active = 0;
-            let done = null;
-
-            const scheduleNext = () => {
-                while (active < NEO_PARALLEL && completed + active < libsToDownload.length) {
-                    const lib = libsToDownload[completed + active];
-                    active++;
-                    (async () => {
-                        const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
-                        try {
-                            await downloadFileWithMirror(lib.downloads.artifact.url, libPath);
-                            if (libPath.endsWith('.jar') && !isJarIntact(libPath)) {
-                                throw new Error(`下载后JAR损坏: ${path.basename(libPath)}`);
-                            }
-                        } catch (e) {
-                            console.error(`[NeoForge] 库下载失败: ${lib.downloads.artifact.path} - ${e.message}`);
-                            try { fs.unlinkSync(libPath); } catch (_) {}
+        const ipPath = path.join(versionDir, 'install_profile.json');
+        if (fs.existsSync(ipPath)) {
+            const ipData = JSON.parse(fs.readFileSync(ipPath, 'utf-8'));
+            const processors = ipData.processors;
+            if (processors && processors.length > 0) {
+                console.log(`[NeoForge] 检测到 ${processors.length} 个 Processor, 开始执行...`);
+                const clientData = {};
+                if (ipData.data) {
+                    for (const [key, val] of Object.entries(ipData.data)) {
+                        if (val && val.client !== undefined && val.client !== null) {
+                            clientData[key] = val.client;
                         }
-                    })().then(() => {
-                        completed++;
-                    }).catch(() => {}).finally(() => {
-                        active--;
-                        if (onProgress) {
-                            onProgress(completed / libsToDownload.length, `下载NeoForge库 (${completed}/${libsToDownload.length})...`);
-                        }
-                        if (active === 0 && completed >= libsToDownload.length && done) done();
-                        else if (active < NEO_PARALLEL && completed + active < libsToDownload.length) scheduleNext();
-                    });
+                    }
                 }
-            };
+                function _resolveArtifact(artifactStr) {
+                    if (typeof artifactStr !== 'string') return artifactStr;
+                    const match = artifactStr.match(/^\[([^\]]+)\]$/);
+                    if (!match) return artifactStr;
+                    const parts = match[1].split(':');
+                    if (parts.length < 3) return match[1];
+                    const gp = parts[0].replace(/\./g, path.sep);
+                    return path.join(LIBRARIES_DIR, gp, parts[1], parts[2], `${parts[1]}-${parts[2]}.jar`);
+                }
+                function _resolveMavenLib(mavenCoord) {
+                    const parts = mavenCoord.split(':');
+                    if (parts.length < 3) return null;
+                    const gp = parts[0].replace(/\./g, path.sep);
+                    const classifier = parts.length >= 4 ? `-${parts[3]}` : '';
+                    const jarName = `${parts[1]}-${parts[2]}${classifier}.jar`;
+                    return path.join(LIBRARIES_DIR, gp, parts[1], parts[2], jarName);
+                }
+                const mcJarPath = path.join(VERSIONS_DIR, gameVersion, `${gameVersion}.jar`);
+                let procJavaPath = 'java';
+                try {
+                    const sysJava = detectSystemJava();
+                    const bundledJava = detectBundledJava();
+                    const allJava = [...bundledJava, ...sysJava];
+                    const suitable = allJava.filter(j => j.majorVersion >= 8);
+                    if (suitable.length > 0) procJavaPath = suitable[0].path;
+                } catch (_) {}
 
-            await new Promise(resolve => { done = resolve; scheduleNext(); });
+                let installerJarForProc = null;
+                if (clientData.BINPATCH) {
+                    const _standardPath = path.join(DATA_DIR, 'temp', `neoforge-installer-${neoVersion}.jar`);
+                    if (fs.existsSync(_standardPath)) {
+                        installerJarForProc = _standardPath;
+                        console.log(`[NeoForge] 复用已有 installer JAR: ${_standardPath}`);
+                    } else {
+                        const _isLegacy = neoVersion.startsWith('1.20.1-');
+                        const _pkg = _isLegacy ? 'forge' : 'neoforge';
+                        const _instUrls = [
+                            `https://bmclapi2.bangbang93.com/maven/net/neoforged/${_pkg}/${neoVersion}/${_pkg}-${neoVersion}-installer.jar`,
+                            `https://maven.neoforged.net/releases/net/neoforged/${_pkg}/${neoVersion}/${_pkg}-${neoVersion}-installer.jar`
+                        ];
+                        const _instPath = path.join(DATA_DIR, 'temp', `neoforge-installer-proc-${neoVersion}.jar`);
+                        if (!fs.existsSync(_instPath)) {
+                            fs.mkdirSync(path.dirname(_instPath), { recursive: true });
+                            for (const _url of _instUrls) {
+                                try { await downloadFileWithMirror(_url, _instPath); break; } catch (_) {}
+                            }
+                        }
+                        if (fs.existsSync(_instPath)) {
+                            installerJarForProc = _instPath;
+                            console.log(`[NeoForge] 下载 installer JAR for processor: ${_instPath}`);
+                        }
+                    }
+                }
+
+                for (let pi = 0; pi < processors.length; pi++) {
+                    const proc = processors[pi];
+                    if (proc.sides && !proc.sides.includes('client')) continue;
+                    if (proc.outputs) {
+                        let allExist = true;
+                        for (const [key, checksum] of Object.entries(proc.outputs)) {
+                            const outputKey = key.replace(/\{([^}]+)\}/g, (_, k) => {
+                            if (k === 'ROOT') return DATA_DIR;
+                            if (k === 'MINECRAFT_JAR') return mcJarPath;
+                            return clientData[k] !== undefined ? String(clientData[k]) : k;
+                        });
+                            const outputPath = _resolveArtifact(outputKey);
+                            if (!fs.existsSync(outputPath)) { allExist = false; break; }
+                        }
+                        if (allExist) { console.log(`[NeoForge] Processor[${pi}] 输出已存在, 跳过`); continue; }
+                    }
+                    const procJarPath = _resolveMavenLib(proc.jar);
+                    if (!procJarPath || !fs.existsSync(procJarPath)) {
+                        console.warn(`[NeoForge] Processor[${pi}] JAR未找到: ${proc.jar}`);
+                        continue;
+                    }
+                    let procMainClass = null;
+                    try {
+                        const procZip = new (require('adm-zip'))(procJarPath);
+                        const manifestEntry = procZip.getEntry('META-INF/MANIFEST.MF');
+                        if (manifestEntry) {
+                            const manifest = manifestEntry.getData().toString('utf8');
+                            const mcMatch = manifest.match(/Main-Class:\s*(\S+)/);
+                            if (mcMatch) procMainClass = mcMatch[1].trim();
+                        }
+                    } catch (_) {}
+                    if (!procMainClass) { console.warn(`[NeoForge] Processor[${pi}] Main-Class未找到`); continue; }
+                    const cpParts = [procJarPath];
+                    if (proc.classpath) {
+                        for (const cpItem of proc.classpath) {
+                            const cpLibPath = _resolveMavenLib(cpItem);
+                            if (cpLibPath && fs.existsSync(cpLibPath)) cpParts.push(cpLibPath);
+                        }
+                    }
+                    if (installerJarForProc && fs.existsSync(installerJarForProc) && !cpParts.includes(installerJarForProc)) {
+                        cpParts.push(installerJarForProc);
+                    }
+                    const classpathStr = cpParts.join(process.platform === 'win32' ? ';' : ':');
+                    const args = [];
+                    if (proc.args) {
+                        for (const arg of proc.args) {
+                            let resolved = arg.replace(/\{([^}]+)\}/g, (match, key) => {
+                                if (key === 'MINECRAFT_JAR') return mcJarPath;
+                                if (key === 'MINECRAFT_VERSION') return gameVersion;
+                                if (key === 'ROOT') return DATA_DIR;
+                                if (clientData[key] !== undefined) return String(clientData[key]);
+                                return match;
+                            });
+                            resolved = _resolveArtifact(resolved);
+                            if (process.platform === 'win32' && resolved.includes('/')) {
+                                resolved = resolved.replace(/\//g, '\\');
+                            }
+                            args.push(resolved);
+                        }
+                    }
+                    console.log(`[NeoForge] Processor[${pi}] 执行: ${procMainClass}`);
+                    console.log(`[NeoForge] Processor[${pi}] classpath: ${cpParts.map(p => path.basename(p)).join(';')}`);
+                    console.log(`[NeoForge] Processor[${pi}] args: ${args.join(' ')}`);
+                    if (onProgress) onProgress(0.9 + 0.05 * (pi / processors.length), `执行处理器 (${pi + 1}/${processors.length})...`);
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const cp = require('child_process');
+                            const cmd = `"${procJavaPath}" -cp "${classpathStr}" ${procMainClass} ${args.map(a => `"${a}"`).join(' ')}`;
+                            console.log(`[NeoForge] Processor[${pi}] cmd: ${cmd.substring(0, 500)}`);
+                            const proc_child = cp.exec(cmd, { timeout: 120000, windowsHide: true, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+                                if (stdout) console.log(`[NeoForge] Processor[${pi}] stdout: ${stdout.substring(0, 500)}`);
+                                if (stderr) console.warn(`[NeoForge] Processor[${pi}] stderr: ${stderr.substring(0, 500)}`);
+                                if (err) reject(err);
+                                else resolve(stdout);
+                            });
+                        });
+                        console.log(`[NeoForge] Processor[${pi}] 完成`);
+                    } catch (e) {
+                        console.error(`[NeoForge] Processor[${pi}] 失败: ${e.message}`);
+                    }
+                    await yieldToEventLoop();
+                }
+
+                if (clientData.PATCHED) {
+                    const patchedRef = String(clientData.PATCHED).replace(/[\[\]]/g, '');
+                    const patchedPath = _resolveMavenLib(patchedRef);
+                    if (patchedPath && fs.existsSync(patchedPath)) {
+                        const jarDir = path.dirname(procJavaPath);
+                        const jarExe = path.join(jarDir, 'jar.exe');
+                        const manifestTempDir = path.join(DATA_DIR, 'temp', 'manifest-patch');
+                        try {
+                            fs.mkdirSync(manifestTempDir, { recursive: true });
+                            const child_process = require('child_process');
+                            const jarOpts = { cwd: manifestTempDir, stdio: 'pipe', timeout: 30000 };
+                            child_process.execSync(`"${jarExe}" xf "${patchedPath}" META-INF/MANIFEST.MF`, jarOpts);
+                            const mfFile = path.join(manifestTempDir, 'META-INF', 'MANIFEST.MF');
+                            if (fs.existsSync(mfFile)) {
+                                let mfContent = fs.readFileSync(mfFile, 'utf8');
+                                if (!mfContent.includes('Minecraft-Dists')) {
+                                    let patched = mfContent.replace(/(\r?\n)(\r?\n)/, '$1Minecraft-Dists: client$2');
+                                    if (!patched.includes('Minecraft-Dists')) patched += '\r\nMinecraft-Dists: client\r\n';
+                                    fs.writeFileSync(mfFile, patched, 'utf8');
+                                    child_process.execSync(`"${jarExe}" ufm "${patchedPath}" "${mfFile}"`, jarOpts);
+                                    console.log(`[NeoForge] 已为 patched JAR 添加 Minecraft-Dists 属性`);
+                                } else {
+                                    console.log(`[NeoForge] patched JAR 已有 Minecraft-Dists 属性`);
+                                }
+                            }
+                        } catch (mfErr) {
+                            console.warn(`[NeoForge] 修补 patched JAR MANIFEST 失败: ${mfErr.message}`);
+                        } finally {
+                            try { fs.rmSync(manifestTempDir, { recursive: true, force: true }); } catch (_) {}
+                        }
+
+                        const versionDirJar = path.join(versionDir, `${versionId}.jar`);
+                        try {
+                            fs.copyFileSync(patchedPath, versionDirJar);
+                            console.log(`[NeoForge] 已将 patched JAR 复制到版本目录: ${versionDirJar}`);
+                        } catch (cpErr) {
+                            console.warn(`[NeoForge] 复制 patched JAR 到版本目录失败: ${cpErr.message}`);
+                        }
+
+                        const existingPatched = (versionJson.libraries || []).some(l => l.name && l.name.includes('minecraft-client-patched'));
+                        if (!existingPatched) {
+                            const pp = patchedRef.split(':');
+                            const gp = pp[0].replace(/\./g, '/');
+                            const artPath = `${gp}/${pp[1]}/${pp[2]}/${pp[1]}-${pp[2]}.jar`;
+                            versionJson.libraries = versionJson.libraries || [];
+                            versionJson.libraries.push({
+                                name: patchedRef,
+                                downloads: {
+                                    artifact: {
+                                        path: artPath,
+                                        url: `https://maven.neoforged.net/releases/${artPath}`
+                                    }
+                                }
+                            });
+                            console.log(`[NeoForge] 添加 patched JAR 到 libraries: ${patchedRef}`);
+                        }
+                    } else {
+                        console.warn(`[NeoForge] Patched JAR 未找到: ${patchedPath}`);
+                    }
+                }
+
+                if (installerJarForProc && installerJarForProc.includes('installer-proc-')) {
+                    try { fs.unlinkSync(installerJarForProc); } catch (_) {}
+                }
+            }
         }
-
-        fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
-        console.log(`[NeoForge] Loader merged into version: ${versionId}`);
-    } catch (e) {
-        const versionJson = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-        versionJson.mainClass = 'cpw.mods.bootstraplauncher.BootstrapLauncher';
-        versionJson.arguments = versionJson.arguments || {};
-        versionJson.arguments.game = versionJson.arguments.game || [];
-        versionJson.arguments.game.push('--launchTarget', 'neoforgeclient', '--fml.neoForgeVersion', neoVersion, '--fml.mcVersion', gameVersion);
-        fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
+    } catch (procErr) {
+        console.error(`[NeoForge] Processor执行异常: ${procErr.message}`);
     }
+
+    fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
+    _invalidateResolvedJsonCache(versionId);
+    console.log(`[NeoForge] Loader merged: ${versionId}, libs=${(versionJson.libraries || []).length}, mainClass=${versionJson.mainClass}`);
 }
 
 async function mergeOptiFineToVersion(versionId, gameVersion, optiFineVersion, onProgress = null) {
@@ -12444,6 +15229,7 @@ async function mergeOptiFineToVersion(versionId, gameVersion, optiFineVersion, o
         }
 
         fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
+        _invalidateResolvedJsonCache(versionId);
         console.log(`[OptiFine] Installed into version: ${versionId}`);
     } catch (e) {
         console.log(`[OptiFine] Install failed: ${e.message}`);
@@ -12452,68 +15238,135 @@ async function mergeOptiFineToVersion(versionId, gameVersion, optiFineVersion, o
 
 async function getFabricLoaderVersions() {
     try {
-        const data = await fetchJSON(`${FABRIC_META_URL}/versions/loader`);
+        const data = await fetchWithRacing([
+            {
+                fetchFn: () => fetchJSON(`${FABRIC_META_URL}/versions/loader`),
+                label: '[Racing] Fabric Meta API'
+            },
+            {
+                fetchFn: () => fetchJSON('https://bmclapi2.bangbang93.com/fabric-meta/versions/loader'),
+                label: '[Racing] BMCLAPI Fabric Meta'
+            }
+        ]);
+        console.log('[Racing] getFabricLoaderVersions 成功');
         return data.map(v => ({
             version: v.version,
             stable: v.stable
         }));
     } catch (e) {
+        console.warn(`[Racing] getFabricLoaderVersions 所有源失败: ${e.message}`);
         return [];
     }
 }
 
 async function getFabricLoaderVersionsForGame(gameVersion) {
     try {
-        const data = await fetchJSON(`${FABRIC_META_URL}/versions/loader/${gameVersion}`);
+        const data = await fetchWithRacing([
+            {
+                fetchFn: () => fetchJSON(`${FABRIC_META_URL}/versions/loader/${gameVersion}`),
+                label: `[Racing] Fabric Meta API (${gameVersion})`
+            },
+            {
+                fetchFn: () => fetchJSON(`https://bmclapi2.bangbang93.com/fabric-meta/versions/loader/${gameVersion}`),
+                label: `[Racing] BMCLAPI Fabric Meta (${gameVersion})`
+            }
+        ]);
+        console.log(`[Racing] getFabricLoaderVersionsForGame(${gameVersion}) 成功`);
         return data.map(v => ({
             version: v.loader.version,
             stable: v.loader.stable
         }));
     } catch (e) {
+        console.warn(`[Racing] getFabricLoaderVersionsForGame(${gameVersion}) 所有源失败: ${e.message}`);
         return [];
     }
 }
 
 async function getNeoForgeVersionsForGame(gameVersion) {
+    const p = gameVersion.split('.');
+    const mcMajor = parseInt(p[0], 10) || 0;
+    const mcMinor = parseInt(p[1], 10) || 0;
+    const neoPrefix = mcMajor + '.' + mcMinor;
+
+    let allNeoForgeVersions = [];
+    let allForgeVersions = [];
+    let lastError = null;
+
+    const fetchXmlVersions = async (url) => {
+        const xml = await fetchText(url, 15000);
+        const matches = xml.match(/<version>([^<]+)<\/version>/g) || [];
+        return matches.map(v => v.replace(/<\/?version>/g, ''));
+    };
+
     try {
-        const apiUrl = 'https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge';
-        console.log('[NeoForge] Fetching versions from:', apiUrl);
-        const data = await fetchJSON(apiUrl);
-        const allVersions = data.versions || [];
-        console.log('[NeoForge] API returned', allVersions.length, 'versions, first 5:', allVersions.slice(0, 5));
-        
-        const versions = [];
-        const mcParts = gameVersion.split('.');
-        const mcMajor = mcParts[1] || '0';
-        const mcMinor = mcParts[2] || '0';
-        const neoPrefix = mcMajor + '.' + mcMinor;
-        
-        for (const ver of allVersions) {
-            if (typeof ver !== 'string') continue;
-            if (ver.startsWith(neoPrefix + '.') || ver.startsWith(neoPrefix + '-')) {
-                versions.push({ version: ver, gameVersion: gameVersion, type: 'release' });
-            }
-        }
-        
-        if (versions.length === 0) {
-            console.log('[NeoForge] No versions with prefix', neoPrefix, ', returning latest 10');
-            const latest = allVersions.filter(v => typeof v === 'string').slice(-10).reverse();
-            for (const ver of latest) {
-                versions.push({ version: ver, gameVersion: gameVersion, type: 'release' });
-            }
-        }
-        
-        console.log('[NeoForge] Found', versions.length, 'versions for MC', gameVersion);
-        versions.reverse();
-        if (versions.length > 0) {
-            versions[0].type = '推荐';
-        }
-        
-        return versions.slice(0, 10);
+        const [neoVersions, forgeVersions] = await Promise.allSettled([
+            fetchXmlVersions('https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml'),
+            fetchXmlVersions('https://bmclapi2.bangbang93.com/maven/net/neoforged/forge/maven-metadata.xml')
+        ]);
+        if (neoVersions.status === 'fulfilled') allNeoForgeVersions = neoVersions.value;
+        if (forgeVersions.status === 'fulfilled') allForgeVersions = forgeVersions.value;
     } catch (e) {
-        console.error('[NeoForge] Error fetching versions:', e.message);
+        lastError = e.message;
+    }
+
+    if (allNeoForgeVersions.length === 0 && allForgeVersions.length === 0) {
+        try {
+            const data = await fetchJSON('https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge', 15000);
+            allNeoForgeVersions = data.versions || [];
+        } catch (e) {
+            lastError = e.message;
+            console.warn(`[NeoForge] primary API failed: ${e.message}`);
+        }
+    }
+
+    if (allNeoForgeVersions.length === 0 && allForgeVersions.length === 0) {
+        console.error(`[NeoForge] 所有源均不可达，最后错误: ${lastError}`);
         return [];
     }
+
+    const neoForgePrefix = /^\d+\.\d+/;
+    const matched = [];
+    const fallback = [];
+    for (const ver of allNeoForgeVersions) {
+        if (typeof ver !== 'string') continue;
+        if (ver.startsWith(neoPrefix + '.')) {
+            matched.push(ver);
+        }
+        if (!ver.includes('-beta') && !ver.includes('-alpha')) {
+            fallback.push(ver);
+        }
+    }
+
+    const forgeMatched = [];
+    for (const ver of allForgeVersions) {
+        if (typeof ver !== 'string') continue;
+        if (ver.startsWith(gameVersion + '-') || ver.startsWith(gameVersion + '.')) {
+            forgeMatched.push(ver);
+        }
+    }
+
+    let result = matched.length > 0 ? matched : fallback.slice(-10);
+    if (forgeMatched.length > 0) {
+        for (const fv of forgeMatched) {
+            if (!result.includes(fv)) result.push(fv);
+        }
+    }
+    result = [...new Set(result)].filter(v => typeof v === 'string').reverse();
+    if (result.length > 0) {
+        const stable = result.find(v => !v.includes('-beta') && !v.includes('-alpha'));
+        if (stable) {
+            result = result.filter(v => v !== stable);
+            result.unshift(stable);
+        }
+        result[0] = { version: result[0], gameVersion, type: '推荐' };
+    }
+    const finalVersions = result.slice(0, 10).map((v, i) => {
+        if (typeof v === 'string') return { version: v, gameVersion, type: i === 0 ? '推荐' : '' };
+        return v;
+    });
+
+    console.log(`[NeoForge] Found ${finalVersions.length} versions for MC ${gameVersion}, prefix: ${neoPrefix}`);
+    return finalVersions;
 }
 
 async function autoDownloadFabricApi(gameVersion, versionId, onProgress = null) {
@@ -12572,9 +15425,17 @@ async function autoDownloadFabricApi(gameVersion, versionId, onProgress = null) 
     }
 }
 
+let _installMutex = null;
+
 async function performInstallation(sessionId, versionDetails) {
+    while (_installMutex) {
+        try { await _installMutex; } catch (_) {}
+    }
+    let releaseMutex;
+    _installMutex = new Promise(resolve => { releaseMutex = resolve; });
+
     const session = installSessions.get(sessionId);
-    if (!session) return;
+    if (!session) { releaseMutex(); _installMutex = null; return; }
 
     const isAborted = () => {
         return session.status === 'cancelled' || (session._abortController && session._abortController.signal.aborted);
@@ -12603,6 +15464,19 @@ async function performInstallation(sessionId, versionDetails) {
 
     const versionId = versionDetails.id;
     const versionDir = path.join(VERSIONS_DIR, versionId);
+    const backupDir = versionDir + '.backup';
+    let hasBackup = false;
+
+    if (fs.existsSync(versionDir)) {
+        try {
+            if (fs.existsSync(backupDir)) fs.rmSync(backupDir, { recursive: true, force: true });
+            fs.renameSync(versionDir, backupDir);
+            hasBackup = true;
+            console.log(`[Install] Backed up existing version: ${versionId}`);
+        } catch (e) {
+            console.warn(`[Install] Failed to backup version: ${e.message}`);
+        }
+    }
     if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true });
 
     try {
@@ -12620,6 +15494,7 @@ async function performInstallation(sessionId, versionDetails) {
 
         const versionJsonPath = path.join(versionDir, `${versionId}.json`);
         fs.writeFileSync(versionJsonPath, JSON.stringify(versionDetails, null, 2));
+        _invalidateResolvedJsonCache(versionId);
 
         if (isAborted()) { abortCleanup(); return; }
         session.stage = 'client_jar';
@@ -12668,7 +15543,7 @@ async function performInstallation(sessionId, versionDetails) {
         session.completedFiles = 0;
 
         const settings = loadSettingsCached();
-        const LIB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, validLibraries.length);
+        const LIB_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 64, validLibraries.length);
         let libCompleted = 0;
 
         const downloadOneLib = async (lib, idx) => {
@@ -12755,8 +15630,9 @@ async function performInstallation(sessionId, versionDetails) {
                     const libFile = path.join(LIBRARIES_DIR, parts[0].replace(/\./g, path.sep), lname, lversion, jarName);
 
                     if (!fs.existsSync(libFile)) {
-                        const isForgeLib = parts[0].includes('forge') || parts[0].includes('minecraftforge') || parts[0].includes('neoforged') || (parts[0] === 'net.minecraft' && lname !== 'client' && lname !== 'server');
-                        const baseUrl = lib.url || (isForgeLib ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/');
+                        const isNeoForgeLib = parts[0].includes('neoforged');
+                        const isForgeLib = parts[0].includes('forge') || parts[0].includes('minecraftforge') || (parts[0] === 'net.minecraft' && lname !== 'client' && lname !== 'server');
+                        const baseUrl = lib.url || (isNeoForgeLib ? 'https://maven.neoforged.net/' : (isForgeLib ? 'https://maven.minecraftforge.net/' : 'https://libraries.minecraft.net/'));
                         const downloadUrl = `${baseUrl}${groupPath}/${lname}/${lversion}/${jarName}`;
 
                         try {
@@ -13039,6 +15915,7 @@ async function performInstallation(sessionId, versionDetails) {
                             const vj = JSON.parse(fs.readFileSync(versionJsonPath, 'utf-8'));
                             vj.inheritsFrom = loaderResult.versionId;
                             fs.writeFileSync(versionJsonPath, JSON.stringify(vj, null, 2));
+                            _invalidateResolvedJsonCache(versionId);
                             console.log(`[API-install] 设置 inheritsFrom: ${loaderResult.versionId}`);
                         }
                     }
@@ -13102,6 +15979,10 @@ async function performInstallation(sessionId, versionDetails) {
         session.speed = 0;
         if (speedSyncTimer) clearInterval(speedSyncTimer);
 
+        if (hasBackup) {
+            try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch (_) {}
+        }
+
         _versionsCache = null;
         _versionsCacheTime = 0;
 
@@ -13116,14 +15997,21 @@ async function performInstallation(sessionId, versionDetails) {
         console.error(`Installation failed for ${versionId}:`, e.message);
         
         try {
-            const versionDir = path.join(VERSIONS_DIR, versionId);
-            if (fs.existsSync(versionDir)) {
-                fs.rmSync(versionDir, { recursive: true, force: true });
-                console.log(`[Install] Cleaned up failed version directory: ${versionDir}`);
+            const failedDir = path.join(VERSIONS_DIR, versionId);
+            if (hasBackup && fs.existsSync(backupDir)) {
+                if (fs.existsSync(failedDir)) fs.rmSync(failedDir, { recursive: true, force: true });
+                fs.renameSync(backupDir, failedDir);
+                console.log(`[Install] Restored backup for: ${versionId}`);
+            } else if (fs.existsSync(failedDir)) {
+                fs.rmSync(failedDir, { recursive: true, force: true });
+                console.log(`[Install] Cleaned up failed version directory: ${failedDir}`);
             }
         } catch (cleanupErr) {
-            console.error(`[Install] Failed to cleanup version directory:`, cleanupErr.message);
+            console.error(`[Install] Failed to cleanup/restore:`, cleanupErr.message);
         }
+    } finally {
+        releaseMutex();
+        _installMutex = null;
     }
 }
 
@@ -13261,6 +16149,138 @@ function _dedupeVersionId(baseName) {
     return candidate;
 }
 
+// PCL2核心策略: 整合包导入后修复损坏的JAR文件
+// AdmZip解压大型JAR或特殊压缩格式时可能产生损坏文件
+async function _repairCorruptedModJars(versionDir) {
+    const modsDir = path.join(versionDir, 'mods');
+    if (!fs.existsSync(modsDir)) return { repaired: 0, failed: 0 };
+
+    const corruptedJars = [];
+    function scanDir(dir) {
+        const items = fs.readdirSync(dir);
+        for (const item of items) {
+            const fullPath = path.join(dir, item);
+            const stat = fs.statSync(fullPath);
+            if (stat.isDirectory()) { scanDir(fullPath); continue; }
+            if (!item.toLowerCase().endsWith('.jar')) continue;
+            if (stat.size < 100) { corruptedJars.push({ path: fullPath, reason: 'too_small' }); continue; }
+            if (!isJarIntact(fullPath)) { corruptedJars.push({ path: fullPath, reason: 'corrupted' }); }
+        }
+    }
+    scanDir(modsDir);
+
+    if (corruptedJars.length === 0) return { repaired: 0, failed: 0 };
+
+    console.log(`[Modpack] 发现 ${corruptedJars.length} 个损坏的JAR文件，尝试修复...`);
+    let repaired = 0, failed = 0;
+
+    for (const jar of corruptedJars) {
+        let fixed = false;
+        try {
+            const tempDir = jar.path + '_repair_tmp';
+            if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+            fs.mkdirSync(tempDir, { recursive: true });
+
+            if (process.platform === 'win32') {
+                try {
+                    const { execSync } = require('child_process');
+                    execSync(`powershell -NoProfile -NonInteractive -Command "Expand-Archive -Path '${jar.path.replace(/'/g, "''")}' -DestinationPath '${tempDir.replace(/'/g, "''")}' -Force"`, { stdio: 'pipe', timeout: 30000, windowsHide: true });
+                    const files = [];
+                    function collectPowershell(d) { for (const i of fs.readdirSync(d)) { const p = path.join(d, i); if (fs.statSync(p).isDirectory()) collectPowershell(p); else files.push(p); } }
+                    collectPowershell(tempDir);
+                    if (files.length > 0) {
+                        const AdmZip = require('adm-zip');
+                        const newZip = new AdmZip();
+                        for (const f of files) {
+                            const rel = path.relative(tempDir, f).replace(/\\/g, '/');
+                            newZip.addLocalFile(f, path.dirname(rel));
+                        }
+                        newZip.writeZip(jar.path);
+                        if (isJarIntact(jar.path)) { fixed = true; console.log(`[Modpack] 已修复: ${path.basename(jar.path)}`); }
+                    }
+                } catch (e) {
+                    console.warn(`[Modpack] PowerShell修复失败 ${path.basename(jar.path)}: ${e.message}`);
+                }
+            }
+
+            if (!fixed) {
+                const { execSync } = require('child_process');
+                const tempDir2 = jar.path + '_unzip_tmp';
+                if (fs.existsSync(tempDir2)) fs.rmSync(tempDir2, { recursive: true, force: true });
+                fs.mkdirSync(tempDir2, { recursive: true });
+                try {
+                    execSync(`unzip -o "${jar.path}" -d "${tempDir2}"`, { stdio: 'pipe', timeout: 30000 });
+                    const AdmZip = require('adm-zip');
+                    const newZip = new AdmZip();
+                    function addDirToZip(zip, dir, base) { for (const i of fs.readdirSync(dir)) { const p = path.join(dir, i); if (fs.statSync(p).isDirectory()) addDirToZip(zip, p, base); else zip.addLocalFile(p, path.relative(base, path.dirname(p)).replace(/\\/g, '/')); } }
+                    addDirToZip(newZip, tempDir2, tempDir2);
+                    newZip.writeZip(jar.path);
+                    if (isJarIntact(jar.path)) { fixed = true; console.log(`[Modpack] unzip已修复: ${path.basename(jar.path)}`); }
+                } catch (e) {}
+                if (fs.existsSync(tempDir2)) fs.rmSync(tempDir2, { recursive: true, force: true });
+            }
+
+            if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch (e) {
+            console.warn(`[Modpack] 修复失败 ${path.basename(jar.path)}: ${e.message}`);
+        }
+        if (fixed) repaired++; else failed++;
+    }
+
+    console.log(`[Modpack] JAR修复完成: ${repaired}个修复, ${failed}个失败`);
+    return { repaired, failed };
+}
+
+const _WIN_RESERVED_NAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
+function isModpackPathSafe(entryPath) {
+    if (!entryPath) return false;
+    if (entryPath.replace(/\\/g, '/').toLowerCase().startsWith('__macosx/')) return false;
+    const segments = entryPath.replace(/\\/g, '/').split('/');
+    for (const seg of segments) {
+        if (seg && _WIN_RESERVED_NAMES.test(seg)) return false;
+    }
+    return true;
+}
+
+// PCL2策略: overrides解压JAR文件后的完整性校验
+async function _extractOverridesWithVerification(zip, versionDir, entries) {
+    let extracted = 0;
+    let corrupted = 0;
+    for (const entry of entries) {
+        if (entry.isDirectory) continue;
+        const entryName = entry.entryName;
+        if (!isModpackPathSafe(entryName)) continue;
+        let relPath = null;
+        if (entryName.startsWith('overrides/')) relPath = entryName.slice('overrides/'.length);
+        else if (entryName.startsWith('client-overrides/')) relPath = entryName.slice('client-overrides/'.length);
+        if (!relPath) continue;
+
+        const destPath = path.resolve(versionDir, relPath);
+        const resolvedBase = path.resolve(versionDir);
+        if (!destPath.startsWith(resolvedBase + path.sep) && destPath !== resolvedBase) continue;
+
+        const isModJar = relPath.toLowerCase().startsWith('mods/') && relPath.toLowerCase().endsWith('.jar');
+        await asyncEnsureDir(destPath);
+
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            try { await fs.promises.writeFile(destPath, entry.getData()); break; } catch (e) {
+                if (attempt < 5) await new Promise(r => setTimeout(r, (attempt - 1) * 2000));
+            }
+        }
+
+        if (isModJar) {
+            const jarStat = fs.existsSync(destPath) ? fs.statSync(destPath) : null;
+            if (!jarStat || jarStat.size < 100 || !isJarIntact(destPath)) {
+                corrupted++;
+                console.warn(`[Modpack] 解压后JAR损坏: ${relPath} (${jarStat?.size || 0} bytes)，标记待修复`);
+            }
+        }
+
+        if (++extracted % 50 === 0) yieldToEventLoop();
+    }
+    return { extracted, corrupted };
+}
+
 /**
  * 从本地文件路径导入整合包（.mrpack / CurseForge .zip）
  * @param {string} filePath  - 本地文件的绝对路径
@@ -13277,8 +16297,9 @@ async function importModpackFromPath(filePath, onProgress, targetVersion = '', a
         } else {
             stageHistory.push({ stage, message, progress: pct });
         }
-        console.log(`[Modpack][${stage}] ${message} (${pct}%)` + (currentFile ? ` - ${currentFile}` : ''));
-        if (typeof onProgress === 'function') onProgress({ stage, message, progress: pct, files: files || [], currentFile: currentFile || '', stageHistory: stageHistory.map(s => ({ ...s })) });
+        const filesSnapshot = files ? files.slice(0, Math.min(files.length, 200)).map(f => ({ n: f.name, s: f.status, p: f.progress || 0, e: f.error || '', sp: f.speed || 0 })) : [];
+        const stagesSnapshot = stageHistory.map(s => ({ stage: s.stage, message: s.message, progress: s.progress }));
+        if (typeof onProgress === 'function') onProgress({ stage, message, progress: pct, files: filesSnapshot, currentFile: currentFile || '', stageHistory: stagesSnapshot });
     };
 
     console.log(`[Modpack] ========== 开始导入整合包 ==========`);
@@ -13324,7 +16345,10 @@ async function importModpackFromPath(filePath, onProgress, targetVersion = '', a
         if (ext === '.rar') {
             return { success: false, error: '不支持 rar 格式的压缩包，请解压后重新压缩为 zip 格式再试' };
         }
-        return { success: false, error: '无法读取 ZIP 文件: ' + e.message };
+        if (e.message && (e.message.includes('END header') || e.message.includes('Invalid') || e.message.includes('corrupt'))) {
+            return { success: false, error: '整合包文件损坏或下载不完整，请删除后重新下载' };
+        }
+        return { success: false, error: '打开整合包文件失败，文件可能损坏或为不支持的压缩包格式' };
     }
 
     // PCL2策略: 检测加密ZIP
@@ -13489,12 +16513,15 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     }
 
     let loaderVersionId = null;
+    if (forgeVer) loaderVersionId = `${mcVersion}-forge-${forgeVer}`;
+    else if (neoforgeVer) loaderVersionId = `${mcVersion}-neoforge-${neoforgeVer}`;
+    else if (fabricVer) loaderVersionId = `fabric-loader-${fabricVer}-${mcVersion}`;
 
     if (isNewVersionDir) {
         progress('base', '正在准备基础版本...', 10);
         console.log(`[mrpack] 确保基础版本存在: ${mcVersion}`);
         const baseResult = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
-            progress('base', msg || '正在准备基础版本...', Math.min(pct, 75));
+            progress('base', msg || '正在准备基础版本...', Math.min(Math.round(pct * 0.15), 15));
         });
         if (baseResult.error) {
             try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (e) {}
@@ -13514,7 +16541,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                         }
                         console.log(`[mrpack] 安装模组加载器: Forge ${forgeVer} (MC ${mcVersion})`);
                         const ir = await installForge(mcVersion, forgeVer, (p, msg) => {
-                            progress('loader-install', msg || '正在安装Forge...', 12 + p * 3);
+                            const np = p > 1 ? p / 100 : p;
+                            progress('loader-install', msg || '正在安装Forge...', 12 + np * 3);
                         });
                         if (!ir.success) throw new Error(ir.error);
                     } else {
@@ -13530,7 +16558,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                         }
                         console.log(`[mrpack] 安装模组加载器: NeoForge ${neoforgeVer} (MC ${mcVersion})`);
                         const ir = await installNeoForge(mcVersion, neoforgeVer, (p, msg) => {
-                            progress('loader-install', msg || '正在安装NeoForge...', 12 + p * 3);
+                            const np = p > 1 ? p / 100 : p;
+                            progress('loader-install', msg || '正在安装NeoForge...', 12 + np * 3);
                         });
                         if (!ir.success) throw new Error(ir.error);
                     } else {
@@ -13546,7 +16575,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                         }
                         console.log(`[mrpack] 安装模组加载器: Fabric ${fabricVer} (MC ${mcVersion})`);
                         const ir = await installFabric(mcVersion, fabricVer, (p, msg) => {
-                            progress('loader-install', msg || '正在安装Fabric...', 12 + p * 3);
+                            const np = p > 1 ? p / 100 : p;
+                            progress('loader-install', msg || '正在安装Fabric...', 12 + np * 3);
                         });
                         if (!ir.success) throw new Error(ir.error);
                     } else {
@@ -13580,6 +16610,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
             };
             if (loaderMainClass) versionJson.mainClass = loaderMainClass;
             fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
+            _invalidateResolvedJsonCache(versionId);
             console.log(`[mrpack] 创建版本JSON: ${versionId}.json (继承 ${loaderVersionId}, mainClass: ${loaderMainClass || '未设置'})`);
         } else {
             const versionJson = {
@@ -13591,10 +16622,110 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 releaseTime: new Date().toISOString()
             };
             fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
+            _invalidateResolvedJsonCache(versionId);
             console.log(`[mrpack] 创建版本JSON: ${versionId}.json (无加载器)`);
         }
 
         progress('loader', '模组加载器就绪', 15);
+    }
+
+    // 整合包重装/重导入: 检测现有版本JSON的inheritsFrom是否与整合包声明的MC+Loader一致
+    // 不一致则自动安装正确的Base+Loader并更新版本JSON，避免出现 "整合包说MC1.20.1，版本却继承自1.19.2" 的错配
+    {
+        const versionJsonPath = path.join(versionDir, `${versionId}.json`);
+        const expectedInheritsFrom = loaderVersionId || mcVersion || '';
+        let existingJson = null;
+        try {
+            if (fs.existsSync(versionJsonPath)) {
+                existingJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf-8'));
+            }
+        } catch (_e) {}
+        const currentInheritsFrom = existingJson ? (existingJson.inheritsFrom || '') : '';
+
+        if (expectedInheritsFrom && currentInheritsFrom && currentInheritsFrom !== expectedInheritsFrom) {
+            console.log(`[mrpack] ⚠ 检测到版本 ${versionId} 的基础版本不匹配: 当前=${currentInheritsFrom} 整合包要求=${expectedInheritsFrom}`);
+            progress('base-fix', `正在同步基础版本到 ${expectedInheritsFrom}...`, 12);
+
+            const oldInheritsFrom = currentInheritsFrom;
+
+            if (mcVersion) {
+                const baseFix = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
+                    progress('base-fix', msg || `正在准备 ${mcVersion}...`, 12);
+                });
+                if (baseFix.error) {
+                    console.error(`[mrpack] 基础版本 ${mcVersion} 安装失败: ${baseFix.error}`);
+                    try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (ce) {}
+                    return { success: false, versionId, error: `基础版本 ${mcVersion} 安装失败: ${baseFix.error}` };
+                }
+            }
+
+            if (loaderVersionId) {
+                const lvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
+                const needInstall = !fs.existsSync(lvJsonPath) || !verifyLoaderLibs(loaderVersionId);
+                if (needInstall) {
+                    if (fs.existsSync(lvJsonPath) && !verifyLoaderLibs(loaderVersionId)) {
+                        console.log(`[mrpack] 整合包要求的 ${loaderVersionId} 库文件缺失，重新安装`);
+                        try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
+                    }
+                    console.log(`[mrpack] 正在安装整合包要求的加载器: ${loaderVersionId}`);
+                    try {
+                        let ir;
+                        if (forgeVer) ir = await installForge(mcVersion, forgeVer, (p, msg) => { const np = p > 1 ? p / 100 : p; progress('loader-install', msg || '正在安装Forge...', 13 + np * 2); });
+                        else if (neoforgeVer) ir = await installNeoForge(mcVersion, neoforgeVer, (p, msg) => { const np = p > 1 ? p / 100 : p; progress('loader-install', msg || '正在安装NeoForge...', 13 + np * 2); });
+                        else if (fabricVer) ir = await installFabric(mcVersion, fabricVer, (p, msg) => { const np = p > 1 ? p / 100 : p; progress('loader-install', msg || '正在安装Fabric...', 13 + np * 2); });
+                        if (!ir || !ir.success) throw new Error((ir && ir.error) || `${loaderVersionId} 安装失败`);
+                    } catch (e) {
+                        console.error(`[mrpack] 加载器 ${loaderVersionId} 安装失败:`, e.stack || e.message);
+                        try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (ce) {}
+                        return { success: false, versionId, error: `整合包要求 ${loaderVersionId} 但安装失败: ${e.message}` };
+                    }
+                }
+            }
+
+            try {
+                let newJson = existingJson || {};
+                newJson.id = versionId;
+                newJson.inheritsFrom = expectedInheritsFrom;
+                if (!newJson.type) newJson.type = 'release';
+                if (loaderVersionId) {
+                    try {
+                        const lvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
+                        if (fs.existsSync(lvJsonPath)) {
+                            const lvJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
+                            if (lvJson.mainClass) newJson.mainClass = lvJson.mainClass;
+                        }
+                    } catch (_lvErr) {}
+                } else if (!newJson.mainClass) {
+                    newJson.mainClass = 'net.minecraft.client.main.Main';
+                }
+                if (!newJson.time) newJson.time = new Date().toISOString();
+                if (!newJson.releaseTime) newJson.releaseTime = new Date().toISOString();
+                fs.writeFileSync(versionJsonPath, JSON.stringify(newJson, null, 2));
+                _invalidateResolvedJsonCache(versionId);
+                console.log(`[mrpack] ✓ 已更新版本 ${versionId} 的基础版本: ${oldInheritsFrom} → ${expectedInheritsFrom}`);
+            } catch (e) {
+                console.error(`[mrpack] 更新版本JSON失败:`, e.message);
+            }
+        } else if (!expectedInheritsFrom) {
+            console.log(`[mrpack] 整合包未指定MC版本，跳过基础版本校验`);
+        } else {
+            console.log(`[mrpack] 版本 ${versionId} 的基础版本匹配 (${expectedInheritsFrom})，无需更新`);
+        }
+    }
+
+    let _backupDir = null;
+    if (!isNewVersionDir) {
+        try {
+            const existingModsDir = path.join(versionDir, 'mods');
+            if (fs.existsSync(existingModsDir)) {
+                _backupDir = versionDir + '.backup_' + Date.now();
+                fs.cpSync(existingModsDir, path.join(_backupDir, 'mods'), { recursive: true });
+                console.log(`[mrpack] 已备份 mods 目录到 ${_backupDir}`);
+            }
+        } catch (bkErr) {
+            console.warn(`[mrpack] 备份 mods 目录失败 (非致命): ${bkErr.message}`);
+            _backupDir = null;
+        }
     }
 
     try {
@@ -13605,6 +16736,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     for (const entry of entries) {
         if (entry.isDirectory) continue;
         const entryName = entry.entryName;
+        if (!isModpackPathSafe(entryName)) continue;
         let relPath = null;
         if (entryName.startsWith('overrides/')) {
             relPath = entryName.slice('overrides/'.length);
@@ -13636,6 +16768,16 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         }
     }
 
+    try {
+        const vsPath = path.join(versionDir, 'version-settings.json');
+        let vs = {};
+        if (fs.existsSync(vsPath)) vs = JSON.parse(fs.readFileSync(vsPath, 'utf-8'));
+        if (!vs.isolation || vs.isolation === 'global') {
+            vs.isolation = 'on';
+            fs.writeFileSync(vsPath, JSON.stringify(vs, null, 2));
+        }
+    } catch (_) {}
+
     const targetLoaders = new Set();
     if (fabricVer) targetLoaders.add('fabric');
     if (forgeVer) targetLoaders.add('forge');
@@ -13665,10 +16807,14 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
     let okCount = 0, failCount = 0;
     let inFlight = 0;
-    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
+    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 32, 64);
+    const _modAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: PARALLEL_MODS + 8, maxFreeSockets: 16, timeout: 120000 });
     let lastProgUpdate = 0;
     let lastReportedPct = 0;
     let smoothPct = 0;
+
+    const _totalModSize = modFiles.reduce((sum, mf) => sum + Math.max(mf.size || 0, 102400), 0);
+    const _modWeights = modFiles.map(mf => Math.max(mf.size || 0, 102400) / _totalModSize);
 
     const getModTimeout = (sizeBytes) => {
         if (sizeBytes > 50 * 1024 * 1024) return 600000;
@@ -13679,12 +16825,13 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
     const updateOverall = () => {
         const now = Date.now();
-        let totalPct = 0;
-        for (const mf of modFiles) {
-            totalPct += (mf.status === 'completed' || mf.status === 'failed') ? 100 : (mf.progress || 0);
+        let weightedPct = 0;
+        for (let i = 0; i < modFiles.length; i++) {
+            const mf = modFiles[i];
+            const w = _modWeights[i] || (1 / modFiles.length);
+            weightedPct += ((mf.status === 'completed' || mf.status === 'failed') ? 100 : (mf.progress || 0)) * w;
         }
-        const overallPct = totalPct / Math.max(modFiles.length, 1);
-        const pct = 25 + Math.round((overallPct / 100) * 65);
+        const pct = 25 + Math.round((weightedPct / 100) * 65);
         const clamped = Math.min(pct, 95);
         if (smoothPct <= 0 || clamped <= smoothPct) {
             smoothPct = clamped;
@@ -13708,77 +16855,72 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
             failCount++; inFlight--; updateOverall();
             return;
         }
+
         const fileName = path.basename(fileEntry.path || (downloads[0] || 'unknown'));
-        const destPath = path.join(versionDir, fileEntry.path || path.join('mods', fileName));
+        let destPath = path.join(versionDir, fileEntry.path || path.join('mods', fileName));
         ensureDir(destPath);
 
         if (modFiles[index]) { modFiles[index].status = 'downloading'; modFiles[index].progress = 0; }
         updateOverall();
 
+        if (fileEntry.fileSize > 0 && fs.existsSync(destPath)) {
+            try {
+                const st = fs.statSync(destPath);
+                if (st.size === fileEntry.fileSize && isJarIntact(destPath)) {
+                    if (modFiles[index]) { modFiles[index].status = 'completed'; modFiles[index].progress = 100; }
+                    okCount++; inFlight--; updateOverall();
+                    return;
+                }
+            } catch (_) {}
+        }
+
         if (!isJarIntact(destPath)) {
             const fileSize = fileEntry.fileSize || 0;
             let downloaded = false;
-            const MAX_ROUNDS = 5;
-
-            for (let round = 0; round < MAX_ROUNDS && !downloaded; round++) {
-                if (abortSignal && abortSignal.aborted) break;
-                if (round > 0) {
-                    console.log(`[mrpack] Mod ${fileName} 第${round + 1}轮重试...`);
-                    if (modFiles[index]) { modFiles[index].status = 'downloading'; modFiles[index].progress = 0; }
-                    await new Promise(r => setTimeout(r, 3000 + round * 2000 + Math.random() * 2000));
+            const allUrls = [];
+            for (const dl of downloads) {
+                for (const mu of getMirrorUrls(dl)) {
+                    if (!allUrls.includes(mu)) allUrls.push(mu);
                 }
+            }
 
-                for (let urlIdx = 0; urlIdx < downloads.length && !downloaded; urlIdx++) {
-                    if (abortSignal && abortSignal.aborted) break;
-                    const tryUrl = downloads[urlIdx];
-                    const allUrls = getMirrorUrls(tryUrl);
-
-                    for (const mirrorUrl of allUrls) {
-                        if (downloaded || (abortSignal && abortSignal.aborted)) break;
-                        const perTryAbort = new AbortController();
-                        const perTryTimeout = setTimeout(() => { try { perTryAbort.abort(); } catch (_) {} },
-                            Math.max(120000, getModTimeout(fileSize) + 30000));
-                        if (abortSignal) {
-                            abortSignal.addEventListener('abort', () => { try { perTryAbort.abort(); } catch (_) {} }, { once: true });
-                        }
-                        try {
-                            await _dlSingle(mirrorUrl, destPath, {
-                                onProgress: (p) => {
-                                    if (p && modFiles[index]) {
-                                        modFiles[index].progress = Math.round(p.progress || 0);
-                                        modFiles[index].downloaded = p.downloaded || 0;
-                                        modFiles[index].speed = p.speed || '';
-                                    }
-                                    updateOverall();
-                                },
-                                retries: 3,
-                                stallTimeout: 45000,
-                                abortSignal: perTryAbort.signal,
-                                timeout: getModTimeout(fileSize)
-                            });
-                            if (isJarIntact(destPath)) {
-                                const expectedSha1 = fileEntry.hashes && fileEntry.hashes.sha1;
-                                if (expectedSha1) {
-                                    const actualSha1 = await calculateSHA1(destPath);
-                                    if (actualSha1 === expectedSha1) {
-                                        downloaded = true;
-                                    } else {
-                                        console.warn(`[mrpack] SHA1校验失败: ${fileName} 期望=${expectedSha1} 实际=${actualSha1}`);
-                                        try { fs.unlinkSync(destPath); } catch (_) {}
-                                    }
-                                } else {
-                                    downloaded = true;
-                                }
+            for (const tryUrl of allUrls) {
+                if (downloaded || (abortSignal && abortSignal.aborted)) break;
+                try {
+                    await _dlSingle(tryUrl, destPath, {
+                        onProgress: (p) => {
+                            if (p && modFiles[index]) {
+                                modFiles[index].progress = Math.round(p.progress || 0);
+                                modFiles[index].downloaded = p.downloaded || 0;
+                                modFiles[index].speed = p.speed || 0;
+                            }
+                            updateOverall();
+                        },
+                        retries: 0,
+                        abortSignal: abortSignal,
+                        timeout: getModTimeout(fileSize),
+                        stallTimeout: 60000,
+                        agent: _modAgent
+                    });
+                    if (isJarIntact(destPath)) {
+                        const expectedSha1 = fileEntry.hashes && fileEntry.hashes.sha1;
+                        if (expectedSha1) {
+                            const actualSha1 = await calculateSHA1(destPath);
+                            if (actualSha1 === expectedSha1) {
+                                downloaded = true;
                             } else {
+                                console.warn(`[mrpack] SHA1校验失败: ${fileName}`);
                                 try { fs.unlinkSync(destPath); } catch (_) {}
                             }
-                        } catch (e) {
-                            if (abortSignal && abortSignal.aborted) break;
-                            try { fs.unlinkSync(destPath); } catch (_) {}
-                        } finally {
-                            clearTimeout(perTryTimeout);
+                        } else {
+                            downloaded = true;
                         }
+                    } else {
+                        try { fs.unlinkSync(destPath); } catch (_) {}
                     }
+                } catch (e) {
+                    if (abortSignal && abortSignal.aborted) break;
+                    console.warn(`[mrpack] ${fileName} 失败: ${e.message}`);
                 }
             }
 
@@ -13788,7 +16930,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 if (projectId) {
                     console.log(`[mrpack] Mod ${fileName} 常规下载失败，尝试通过Modrinth API重新获取下载链接...`);
                     try {
-                        const apiRes = await fetchJSON(`https://api.modrinth.com/v2/project/${projectId}/version`);
+                        const apiRes = await fetchJSON(`${MODRINTH_API}/project/${projectId}/version`);
                         if (apiRes && Array.isArray(apiRes) && apiRes.length > 0) {
                             for (const ver of apiRes) {
                                 if (downloaded) break;
@@ -13805,7 +16947,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                                                 },
                                                 retries: 2,
                                                 abortSignal,
-                                                timeout: 300000
+                                                timeout: 300000,
+                                                agent: _modAgent
                                             });
                                             if (isJarIntact(destPath)) {
                                                 downloaded = true;
@@ -13831,12 +16974,12 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 const searchName = fileName.replace(/[-_]\d+[\d._-]*\.jar$/, '').replace(/[-_]/g, ' ').trim();
                 if (searchName.length > 2) {
                     try {
-                        const searchRes = await fetchJSON(`https://api.modrinth.com/v2/search?query=${encodeURIComponent(searchName)}&facets=[["project_type:mod"]]`);
+                        const searchRes = await fetchJSON(`${MODRINTH_API}/search?query=${encodeURIComponent(searchName)}&facets=[["project_type:mod"]]`);
                         if (searchRes && searchRes.hits && searchRes.hits.length > 0) {
                             for (const hit of searchRes.hits.slice(0, 3)) {
                                 if (downloaded) break;
                                 try {
-                                    const verRes = await fetchJSON(`https://api.modrinth.com/v2/project/${hit.project_id}/version?game_versions=["${mcVersion}"]`);
+                                    const verRes = await fetchJSON(`${MODRINTH_API}/project/${hit.project_id}/version?game_versions=["${mcVersion}"]`);
                                     if (verRes && Array.isArray(verRes) && verRes.length > 0) {
                                         for (const ver of verRes) {
                                             if (downloaded) break;
@@ -13851,7 +16994,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                                                             },
                                                             retries: 2,
                                                             abortSignal,
-                                                            timeout: 300000
+                                                            timeout: 300000,
+                                                            agent: _modAgent
                                                         });
                                                         if (isJarIntact(destPath)) {
                                                             downloaded = true;
@@ -13884,6 +17028,10 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                     if (modFiles[index]) { modFiles[index].status = 'failed'; modFiles[index].error = '下载失败'; }
                 }
                 failCount++;
+                if (failCount > Math.max(5, filesList.length * 0.1) && failCount > okCount) {
+                    console.error(`[mrpack] 失败数(${failCount})超过阈值，取消剩余下载`);
+                    if (abortSignal) try { abortSignal.abort(); } catch (_) {}
+                }
             }
         } else {
             if (modFiles[index]) { modFiles[index].status = 'completed'; modFiles[index].progress = 100; }
@@ -13906,9 +17054,16 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         pool.push(runNextMod());
     }
     await Promise.all(pool);
+    try { _modAgent.destroy(); } catch (_) {}
     if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
     if (failCount > 0) {
         console.warn(`[mrpack] Mod下载汇总: ${okCount}成功 ${failCount}失败 (共${filesList.length}个)`);
+    }
+
+    progress('repair', '正在修复损坏的模组文件...', 88);
+    const repairResult = await _repairCorruptedModJars(versionDir);
+    if (repairResult.failed > 0) {
+        console.warn(`[mrpack] ${repairResult.failed} 个模组文件损坏且无法修复，游戏启动时可能报错`);
     }
 
     if (loaderVersionId && mcVersion) {
@@ -13955,7 +17110,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 }
                 if (missingAssets.length > 0) {
                     console.log(`[mrpack] 资源文件缺失 ${missingAssets.length}/${assetEntries.length} 个，开始下载...`);
-                    const ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 8, 16);
+                    const ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 64, 64);
                     let assetDone = 0;
                     const assetTotal = missingAssets.length;
                     const runAssetBatch = async () => {
@@ -13993,14 +17148,33 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     if (mergedJson && mergedJson.inheritsFrom) {
         const mainJarId = mergedJson.jar || mergedJson.inheritsFrom;
         const mainJarPath = path.join(VERSIONS_DIR, mainJarId, `${mainJarId}.jar`);
-        if (!fs.existsSync(mainJarPath) && mergedJson.downloads?.client) {
-            progress('assets', '正在下载客户端JAR...', 97, [], '');
-            try {
-                const jarDir = path.dirname(mainJarPath);
-                if (!fs.existsSync(jarDir)) fs.mkdirSync(jarDir, { recursive: true });
-                await downloadFileWithMirror(mergedJson.downloads.client.url, mainJarPath);
-            } catch (e) {
-                console.warn(`[mrpack] 客户端JAR下载失败(非致命): ${e.message}`);
+        if (!fs.existsSync(mainJarPath)) {
+            let jarUrl = mergedJson.downloads?.client?.url;
+            if (!jarUrl) {
+                try {
+                    const baseJsonPath = path.join(VERSIONS_DIR, mainJarId, `${mainJarId}.json`);
+                    if (fs.existsSync(baseJsonPath)) {
+                        const baseJson = JSON.parse(fs.readFileSync(baseJsonPath, 'utf8'));
+                        jarUrl = baseJson?.downloads?.client?.url;
+                    }
+                } catch (_) {}
+            }
+            if (jarUrl) {
+                progress('assets', '正在下载客户端JAR...', 97, [], '');
+                let jarOk = false;
+                for (let jarAttempt = 0; jarAttempt < 3 && !jarOk; jarAttempt++) {
+                    try {
+                        const jarDir = path.dirname(mainJarPath);
+                        if (!fs.existsSync(jarDir)) fs.mkdirSync(jarDir, { recursive: true });
+                        await downloadFileWithMirror(jarUrl, mainJarPath);
+                        jarOk = true;
+                    } catch (e) {
+                        console.warn(`[mrpack] 客户端JAR下载失败(${jarAttempt + 1}/3): ${e.message}`);
+                        try { if (fs.existsSync(mainJarPath)) fs.unlinkSync(mainJarPath); } catch (_) {}
+                        if (jarAttempt < 2) await new Promise(r => setTimeout(r, 2000));
+                    }
+                }
+                if (!jarOk) console.warn(`[mrpack] 客户端JAR下载最终失败(非致命)，启动时会自动补全`);
             }
         }
     }
@@ -14065,8 +17239,25 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     return { success: true, name: packName, versionId, mcVersion, targetVersion: targetVersion || '', loaderVersionId: loaderVersionId || null };
     } catch (e) {
         console.error('[mrpack] 导入失败:', e);
+        if (_backupDir) {
+            try {
+                const restoredModsDir = path.join(_backupDir, 'mods');
+                if (fs.existsSync(restoredModsDir)) {
+                    const currentModsDir = path.join(versionDir, 'mods');
+                    if (fs.existsSync(currentModsDir)) fs.rmSync(currentModsDir, { recursive: true, force: true });
+                    fs.cpSync(restoredModsDir, currentModsDir, { recursive: true });
+                    console.log(`[mrpack] 已从备份恢复 mods 目录`);
+                }
+                fs.rmSync(_backupDir, { recursive: true, force: true });
+            } catch (rbErr) {
+                console.error(`[mrpack] 回滚失败: ${rbErr.message}`);
+            }
+        }
         cleanupVersionChain(versionId);
         return { success: false, versionId, error: e.message || '未知错误' };
+    }
+    if (_backupDir) {
+        try { fs.rmSync(_backupDir, { recursive: true, force: true }); } catch (_) {}
     }
 }
 
@@ -14252,6 +17443,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
             };
             if (cfLoaderMainClass) versionJson.mainClass = cfLoaderMainClass;
             fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
+            _invalidateResolvedJsonCache(versionId);
             console.log(`[CurseForge] 创建版本JSON: ${versionId}.json (继承 ${loaderVersionId}, mainClass: ${cfLoaderMainClass || '未设置'})`);
         } else {
             const versionJson = {
@@ -14263,10 +17455,26 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                 releaseTime: new Date().toISOString()
             };
             fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
+            _invalidateResolvedJsonCache(versionId);
             console.log(`[CurseForge] 创建版本JSON: ${versionId}.json (无加载器)`);
         }
 
         progress('loader', '模组加载器就绪', 15);
+    }
+
+    let _cfBackupDir = null;
+    if (!isNewVersionDirCF) {
+        try {
+            const existingModsDir = path.join(versionDir, 'mods');
+            if (fs.existsSync(existingModsDir)) {
+                _cfBackupDir = versionDir + '.backup_' + Date.now();
+                fs.cpSync(existingModsDir, path.join(_cfBackupDir, 'mods'), { recursive: true });
+                console.log(`[CurseForge] 已备份 mods 目录到 ${_cfBackupDir}`);
+            }
+        } catch (bkErr) {
+            console.warn(`[CurseForge] 备份 mods 目录失败 (非致命): ${bkErr.message}`);
+            _cfBackupDir = null;
+        }
     }
 
     try {
@@ -14276,6 +17484,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     let cfExtractYieldCounter = 0;
     for (const entry of entries) {
         if (entry.isDirectory) continue;
+        if (!isModpackPathSafe(entry.entryName)) continue;
         if (entry.entryName.startsWith('overrides/')) {
             const relPath = entry.entryName.slice('overrides/'.length);
             const destPath = path.join(versionDir, relPath);
@@ -14302,6 +17511,16 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         }
     }
 
+    try {
+        const vsPath = path.join(versionDir, 'version-settings.json');
+        let vs = {};
+        if (fs.existsSync(vsPath)) vs = JSON.parse(fs.readFileSync(vsPath, 'utf-8'));
+        if (!vs.isolation || vs.isolation === 'global') {
+            vs.isolation = 'on';
+            fs.writeFileSync(vsPath, JSON.stringify(vs, null, 2));
+        }
+    } catch (_) {}
+
     const cfFiles = manifest.files || [];
     const modsDir = path.join(versionDir, 'mods');
     ensureDir(path.join(modsDir, 'dummy.txt'));
@@ -14310,10 +17529,16 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     progress('mods', `下载 Mod 文件 (共 ${cfFiles.length} 个)...`, 25, [...overrideFiles, ...cfModFiles], '');
 
     let cfDownloadedCount = 0;
+    let cfFailedCount = 0;
     let cfInFlight = 0;
-    const CF_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
+    const CF_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 32, 64);
+    const _cfAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: CF_PARALLEL + 8, maxFreeSockets: 16, timeout: 120000 });
     let cfLastProgUpdate = 0;
     let cfLastReportedPct = 0;
+    let cfSmoothPct = 0;
+
+    const _cfTotalModSize = cfModFiles.reduce((sum, mf) => sum + Math.max(mf.size || 0, 102400), 0);
+    const _cfModWeights = cfModFiles.map(mf => Math.max(mf.size || 0, 102400) / _cfTotalModSize);
 
     const getCfModTimeout = (sizeBytes) => {
         if (sizeBytes > 50 * 1024 * 1024) return 600000;
@@ -14324,15 +17549,22 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
 
     const cfUpdateOverall = () => {
         const now = Date.now();
-        let totalPct = 0;
-        for (const mf of cfModFiles) {
-            totalPct += (mf.status === 'completed' || mf.status === 'failed') ? 100 : (mf.progress || 0);
+        let weightedPct = 0;
+        for (let i = 0; i < cfModFiles.length; i++) {
+            const mf = cfModFiles[i];
+            const w = _cfModWeights[i] || (1 / cfModFiles.length);
+            weightedPct += ((mf.status === 'completed' || mf.status === 'failed') ? 100 : (mf.progress || 0)) * w;
         }
-        const overallPct = totalPct / Math.max(cfModFiles.length, 1);
-        const pct = 25 + Math.round((overallPct / 100) * 65);
+        const pct = 25 + Math.round((weightedPct / 100) * 65);
         const clamped = Math.min(pct, 95);
-        if (clamped <= cfLastReportedPct && now - cfLastProgUpdate < 500) return;
-        cfLastReportedPct = Math.max(cfLastReportedPct, clamped);
+        if (cfSmoothPct <= 0 || clamped <= cfSmoothPct) {
+            cfSmoothPct = clamped;
+        } else {
+            cfSmoothPct = cfSmoothPct * 0.75 + clamped * 0.25;
+        }
+        const finalPct = Math.max(cfLastReportedPct, Math.round(cfSmoothPct));
+        if (finalPct <= cfLastReportedPct && now - cfLastProgUpdate < 200) return;
+        cfLastReportedPct = finalPct;
         cfLastProgUpdate = now;
         progress('mods', `下载 Mod (${cfDownloadedCount}/${cfFiles.length}, ${cfInFlight}个进行中)`, cfLastReportedPct, [...overrideFiles, ...cfModFiles], '');
     };
@@ -14347,7 +17579,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         cfUpdateOverall();
 
         let cfDownloaded = false;
-        const MAX_CF_ROUNDS = 5;
+        const MAX_CF_ROUNDS = 3;
 
         for (let round = 0; round < MAX_CF_ROUNDS && !cfDownloaded; round++) {
             if (abortSignal && abortSignal.aborted) break;
@@ -14364,7 +17596,10 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
 
             try {
                 if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
-                const fileInfo = await fetchJSON(`${CURSEFORGE_API}/mods/${projectID}/files/${fileID}`, { 'x-api-key': cfApiKey });
+                let fileInfo = _cfFileInfoMap[fileID] ? { data: _cfFileInfoMap[fileID] } : null;
+                if (!fileInfo && round === 0) {
+                    fileInfo = await fetchJSON(`${CURSEFORGE_API}/mods/${projectID}/files/${fileID}`, { 'x-api-key': cfApiKey });
+                }
                 const downloadUrl = fileInfo && fileInfo.data ? fileInfo.data.downloadUrl : null;
                 if (downloadUrl) {
                     const fileName = path.basename(downloadUrl);
@@ -14398,7 +17633,8 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                                         retries: 3,
                                         stallTimeout: 45000,
                                         abortSignal: perTryAbort.signal,
-                                        timeout: getCfModTimeout(fileInfo?.data?.fileLength || 0)
+                                        timeout: getCfModTimeout(fileInfo?.data?.fileLength || 0),
+                                        agent: _cfAgent
                                     });
                                     if (isJarIntact(destPath)) {
                                         cfDownloaded = true;
@@ -14449,7 +17685,8 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                                 },
                                 retries: 2,
                                 abortSignal,
-                                timeout: 300000
+                                timeout: 300000,
+                                agent: _cfAgent
                             });
                             if (isJarIntact(destPath)) {
                                 cfDownloaded = true;
@@ -14472,13 +17709,39 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                 cfModFiles[index].status = 'failed'; cfModFiles[index].error = '已取消';
             } else {
                 cfModFiles[index].status = 'failed'; cfModFiles[index].error = '下载失败';
+                cfFailedCount++;
                 console.error(`[CurseForge] Mod ${projectID}:${fileID} 最终下载失败`);
+                if (cfFailedCount > Math.max(5, cfFiles.length * 0.1) && cfFailedCount > cfDownloadedCount) {
+                    console.error(`[CurseForge] 失败数(${cfFailedCount})超过阈值，取消剩余下载`);
+                    if (abortSignal) try { abortSignal.abort(); } catch (_) {}
+                }
             }
         }
         cfDownloadedCount++;
         cfInFlight--;
         cfUpdateOverall();
     };
+
+    const _cfFileInfoMap = {};
+    if (cfApiKey && cfFiles.length > 0) {
+        progress('mods', `正在获取 ${cfFiles.length} 个 Mod 的下载信息...`, 20, [...overrideFiles, ...cfModFiles], '');
+        const _cfBatchSize = 50;
+        for (let bi = 0; bi < cfFiles.length; bi += _cfBatchSize) {
+            if (abortSignal && abortSignal.aborted) break;
+            const batch = cfFiles.slice(bi, bi + _cfBatchSize);
+            try {
+                const batchRes = await fetchJSONWithMethod(`${CURSEFORGE_API}/mods/files`, 'POST',
+                    JSON.stringify({ fileIds: batch.map(f => f.fileID) }),
+                    { 'x-api-key': cfApiKey, 'Content-Type': 'application/json' });
+                if (batchRes && batchRes.data) {
+                    for (const fi of batchRes.data) _cfFileInfoMap[fi.id] = fi;
+                }
+            } catch (e) {
+                console.warn(`[CurseForge] 批量获取文件信息失败: ${e.message}，将逐个获取`);
+            }
+        }
+        console.log(`[CurseForge] 预获取文件信息: ${Object.keys(_cfFileInfoMap).length}/${cfFiles.length}`);
+    }
 
     let cfTaskIdx = 0;
     const runNextCfMod = async () => {
@@ -14493,7 +17756,14 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         cfPool.push(runNextCfMod());
     }
     await Promise.all(cfPool);
+    try { _cfAgent.destroy(); } catch (_) {}
     if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
+
+    progress('repair', '正在修复损坏的模组文件...', 88);
+    const cfRepairResult = await _repairCorruptedModJars(versionDir);
+    if (cfRepairResult.failed > 0) {
+        console.warn(`[CurseForge] ${cfRepairResult.failed} 个模组文件损坏且无法修复，游戏启动时可能报错`);
+    }
 
     if (loaderVersionId && mcVersion) {
         const lt = fabricVerCF ? 'fabric' : (forgeVerCF || neoforgeVerCF ? 'forge' : null);
@@ -14539,7 +17809,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                 }
                 if (cfMissingAssets.length > 0) {
                     console.log(`[CurseForge] 资源文件缺失 ${cfMissingAssets.length}/${cfAssetEntries.length} 个，开始下载...`);
-                    const CF_ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 16, 64);
+                    const CF_ASSET_PARALLEL = Math.min(parseInt(settings.maxThreads, 10) || 64, 64);
                     let cfAssetDone = 0;
                     const cfAssetTotal = cfMissingAssets.length;
                     const runCfAssetBatch = async () => {
@@ -14577,14 +17847,33 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     if (cfMergedJson && cfMergedJson.inheritsFrom) {
         const cfMainJarId = cfMergedJson.jar || cfMergedJson.inheritsFrom;
         const cfMainJarPath = path.join(VERSIONS_DIR, cfMainJarId, `${cfMainJarId}.jar`);
-        if (!fs.existsSync(cfMainJarPath) && cfMergedJson.downloads?.client) {
-            progress('assets', '正在下载客户端JAR...', 97, [], '');
-            try {
-                const cfJarDir = path.dirname(cfMainJarPath);
-                if (!fs.existsSync(cfJarDir)) fs.mkdirSync(cfJarDir, { recursive: true });
-                await downloadFileWithMirror(cfMergedJson.downloads.client.url, cfMainJarPath);
-            } catch (e) {
-                console.warn(`[CurseForge] 客户端JAR下载失败(非致命): ${e.message}`);
+        if (!fs.existsSync(cfMainJarPath)) {
+            let cfJarUrl = cfMergedJson.downloads?.client?.url;
+            if (!cfJarUrl) {
+                try {
+                    const cfBaseJsonPath = path.join(VERSIONS_DIR, cfMainJarId, `${cfMainJarId}.json`);
+                    if (fs.existsSync(cfBaseJsonPath)) {
+                        const cfBaseJson = JSON.parse(fs.readFileSync(cfBaseJsonPath, 'utf8'));
+                        cfJarUrl = cfBaseJson?.downloads?.client?.url;
+                    }
+                } catch (_) {}
+            }
+            if (cfJarUrl) {
+                progress('assets', '正在下载客户端JAR...', 97, [], '');
+                let cfJarOk = false;
+                for (let jarAttempt = 0; jarAttempt < 3 && !cfJarOk; jarAttempt++) {
+                    try {
+                        const cfJarDir = path.dirname(cfMainJarPath);
+                        if (!fs.existsSync(cfJarDir)) fs.mkdirSync(cfJarDir, { recursive: true });
+                        await downloadFileWithMirror(cfJarUrl, cfMainJarPath);
+                        cfJarOk = true;
+                    } catch (e) {
+                        console.warn(`[CurseForge] 客户端JAR下载失败(${jarAttempt + 1}/3): ${e.message}`);
+                        try { if (fs.existsSync(cfMainJarPath)) fs.unlinkSync(cfMainJarPath); } catch (_) {}
+                        if (jarAttempt < 2) await new Promise(r => setTimeout(r, 2000));
+                    }
+                }
+                if (!cfJarOk) console.warn(`[CurseForge] 客户端JAR下载最终失败(非致命)，启动时会自动补全`);
             }
         }
     }
@@ -14624,7 +17913,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     }
 
     const cfFailedMods = cfModFiles.filter(m => m.status === 'failed');
-    const cfFailedCount = cfFailedMods.length;
+    cfFailedCount = cfFailedMods.length;
 
     const packInfo = {
         name: packName, versionId: versionId, mcVersion, packFormat: 'curseforge',
@@ -14651,8 +17940,25 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     };
     } catch (e) {
         console.error('[CurseForge] 导入失败:', e);
+        if (_cfBackupDir) {
+            try {
+                const restoredModsDir = path.join(_cfBackupDir, 'mods');
+                if (fs.existsSync(restoredModsDir)) {
+                    const currentModsDir = path.join(versionDir, 'mods');
+                    if (fs.existsSync(currentModsDir)) fs.rmSync(currentModsDir, { recursive: true, force: true });
+                    fs.cpSync(restoredModsDir, currentModsDir, { recursive: true });
+                    console.log(`[CurseForge] 已从备份恢复 mods 目录`);
+                }
+                fs.rmSync(_cfBackupDir, { recursive: true, force: true });
+            } catch (rbErr) {
+                console.error(`[CurseForge] 回滚失败: ${rbErr.message}`);
+            }
+        }
         cleanupVersionChain(versionId);
         return { success: false, versionId, error: e.message || '未知错误' };
+    }
+    if (_cfBackupDir) {
+        try { fs.rmSync(_cfBackupDir, { recursive: true, force: true }); } catch (_) {}
     }
 }
 
@@ -14750,6 +18056,7 @@ async function _importHmcl(zip, hmclEntry, filePath, progress, targetVersion = '
             } catch (e) {}
         }
         fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
+        _invalidateResolvedJsonCache(versionId);
     }
 
     progress('extract', '解压覆盖文件...', 20);
@@ -14897,6 +18204,7 @@ async function _importRawZip(zip, filePath, progress, targetVersion = '', abortS
             }
         }
         fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
+        _invalidateResolvedJsonCache(versionId);
         console.log(`[RawZip] 创建版本JSON: ${versionId}.json (inheritsFrom: ${baseMcVersion || '无'})`);
     }
 
@@ -14913,6 +18221,43 @@ async function _importRawZip(zip, filePath, progress, targetVersion = '', abortS
         return { success: false, versionId, error: e.message || '导入失败' };
     }
 }
+
+setTimeout(async () => {
+    try {
+        const accounts = loadAccounts();
+        let refreshed = 0;
+        for (const account of accounts) {
+            if (account.type !== 'microsoft' || !account.refreshToken || !account.tokenExpiresAt) continue;
+            if (account.tokenExpiresAt - Date.now() > 3600000) continue;
+            try {
+                const tokenUrl = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token';
+                const postData = `grant_type=refresh_token&client_id=${MS_CLIENT_ID}&refresh_token=${encodeURIComponent(account.refreshToken)}&scope=XboxLive.signin+offline_access`;
+                const result = await new Promise((resolve, reject) => {
+                    const req = https.request(tokenUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(postData) }, timeout: 15000 }, (res) => {
+                        let d = '';
+                        res.on('data', c => d += c);
+                        res.on('end', () => { try { resolve(JSON.parse(d)); } catch (_) { reject(new Error('invalid response')); } });
+                    });
+                    req.on('error', reject);
+                    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+                    req.write(postData);
+                    req.end();
+                });
+                if (result.access_token && !result.error) {
+                    account.accessToken = result.access_token;
+                    account.refreshToken = result.refresh_token || account.refreshToken;
+                    account.tokenExpiresAt = Date.now() + ((result.expires_in || 3600) * 1000);
+                    refreshed++;
+                }
+            } catch (e) {
+                console.warn(`[Auth] 自动刷新 ${account.name} 的 Token 失败: ${e.message}`);
+            }
+        }
+        if (refreshed > 0) { saveAccounts(accounts); console.log(`[Auth] 自动刷新了 ${refreshed} 个账户的 Token`); }
+    } catch (e) {
+        console.warn('[Auth] Token 自动刷新检查失败:', e.message);
+    }
+}, 10000);
 
 // ============================================================================
 // 模块导出 - 向外部暴露的API接口
@@ -15104,6 +18449,59 @@ async function handleAPI(pathname, req, res, parsedUrl) {
         });
     });
 
+    function yggdrasilRequest(url, body, timeoutMs = 30000, maxRedirects = 3) {
+        return new Promise((resolve, reject) => {
+            let currentUrl = url;
+            let redirectCount = 0;
+            const attempt = (targetUrl) => {
+                const parsed = new URL(targetUrl);
+                const mod = parsed.protocol === 'https:' ? https : http;
+                const reqBody = typeof body === 'string' ? body : JSON.stringify(body);
+                const req = mod.request({
+                    hostname: parsed.hostname,
+                    port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+                    path: parsed.pathname + parsed.search,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(reqBody)
+                    },
+                    timeout: timeoutMs,
+                    agent: parsed.protocol === 'https:' ? SHARED_HTTPS_AGENT : undefined
+                }, (res) => {
+                    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectCount < maxRedirects) {
+                        res.resume();
+                        redirectCount++;
+                        const next = res.headers.location.startsWith('http') ? res.headers.location : `${parsed.protocol}//${parsed.host}${res.headers.location}`;
+                        return attempt(next);
+                    }
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => {
+                        if (res.statusCode < 200 || res.statusCode >= 300) {
+                            let errMsg = `认证服务器返回 HTTP ${res.statusCode}`;
+                            try { const errBody = JSON.parse(data); errMsg = errBody.errorMessage || errBody.error || errMsg; } catch (_) {}
+                            return reject(new Error(errMsg));
+                        }
+                        try { resolve(JSON.parse(data)); }
+                        catch (e) { reject(new Error('认证服务器返回了无效的响应')); }
+                    });
+                });
+                req.on('timeout', () => { req.destroy(); reject(new Error('连接认证服务器超时，请检查网络连接')); });
+                req.on('error', (e) => {
+                    if (e.code === 'ECONNREFUSED') reject(new Error('无法连接到认证服务器，请检查服务器地址是否正确'));
+                    else if (e.code === 'ENOTFOUND') reject(new Error('无法解析认证服务器域名，请检查服务器地址'));
+                    else if (e.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || e.code === 'CERT_HAS_EXPIRED' || e.code.includes('CERT')) reject(new Error('认证服务器证书错误: ' + e.message));
+                    else if (e.code === 'ECONNRESET') reject(new Error('与认证服务器的连接被重置'));
+                    else reject(new Error('连接认证服务器失败: ' + e.message));
+                });
+                req.write(reqBody);
+                req.end();
+            };
+            attempt(currentUrl);
+        });
+    }
+
     try {
         await new Promise(r => setImmediate(r));
         switch (pathname) {
@@ -15131,15 +18529,19 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (forceRefresh || !versionCache) {
                     try {
                         const manifest = await getVersionManifest(forceRefresh);
-                        const versions = manifest.versions.map(v => ({
-                            id: v.id,
-                            type: v.type,
-                            url: v.url,
-                            releaseTime: v.releaseTime,
-                            complianceLevel: v.complianceLevel || 1,
-                            installed: installedIds.has(v.id) || installedBaseIds.has(v.id),
-                            size: ''
-                        }));
+                        const versions = manifest.versions.map(v => {
+                            const corrected = { id: v.id, type: v.type, url: v.url, releaseTime: v.releaseTime };
+                            corrected.type = correctVersionType(corrected);
+                            return {
+                                id: v.id,
+                                type: corrected.type,
+                                url: v.url,
+                                releaseTime: v.releaseTime,
+                                complianceLevel: v.complianceLevel || 1,
+                                installed: installedIds.has(v.id) || installedBaseIds.has(v.id),
+                                size: ''
+                            };
+                        });
 
                         sendJSON({
                             latest: manifest.latest,
@@ -15156,15 +18558,19 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 } else {
                     sendJSON({
                         latest: versionCache.latest || { release: '', snapshot: '' },
-                        versions: (versionCache.versions || []).map(v => ({
-                            id: v.id,
-                            type: v.type,
-                            url: v.url,
-                            releaseTime: v.releaseTime,
-                            complianceLevel: v.complianceLevel || 1,
-                            installed: installedIds.has(v.id) || installedBaseIds.has(v.id),
-                            size: ''
-                        })),
+                        versions: (versionCache.versions || []).map(v => {
+                            const corrected = { id: v.id, type: v.type, url: v.url, releaseTime: v.releaseTime };
+                            corrected.type = correctVersionType(corrected);
+                            return {
+                                id: v.id,
+                                type: corrected.type,
+                                url: v.url,
+                                releaseTime: v.releaseTime,
+                                complianceLevel: v.complianceLevel || 1,
+                                installed: installedIds.has(v.id) || installedBaseIds.has(v.id),
+                                size: ''
+                            };
+                        }),
                         installed: installedList
                     });
 
@@ -15288,8 +18694,8 @@ async function handleAPI(pathname, req, res, parsedUrl) {
 
             case '/api/mods/search': {
                 await new Promise(r => setImmediate(r));
-                const query = parsedUrl.query.query || '';
-                const source = parsedUrl.query.source || 'modrinth';
+                const rawQuery = parsedUrl.query.query || '';
+                const source = parsedUrl.query.source || 'any';
                 const loader = parsedUrl.query.loader || '';
                 const mcVersion = parsedUrl.query.version || '';
                 const category = parsedUrl.query.category || '';
@@ -15297,48 +18703,158 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const limit = parseInt(parsedUrl.query.limit || '15', 10);
                 const offset = parseInt(parsedUrl.query.offset || '0', 10);
 
-                try {
-                    if (source === 'modrinth') {
-                        const facets = [['project_type:mod']];
-                        if (loader) facets.push([`categories:${loader}`]);
-                        if (mcVersion) facets.push([`versions:${mcVersion}`]);
-                        if (category) facets.push([`categories:${category}`]);
-                        const sortMap = { relevance: 'relevance', downloads: 'downloads', newest: 'newest', updated: 'updated' };
-                        const sortField = sortMap[sort] || (query ? 'relevance' : 'downloads');
-                        let searchUrl = `${MODRINTH_API}/search?query=${encodeURIComponent(query)}&index=${sortField}&limit=${limit}&offset=${offset}`;
-                        searchUrl += `&facets=${encodeURIComponent(JSON.stringify(facets))}`;
-                        const result = await cachedFetchJSON(searchUrl, 60000);
-                        const hits = (result.hits || []).map(hit => ({
+                const SEARCH_STOP_WORDS = new Set(['forge', 'fabric', 'for', 'mod', 'quilt', 'neoforge', 'the', 'and', 'of']);
+                function processSearchKeywords(text) {
+                    if (!text) return '';
+                    const lower = text.toLowerCase().trim();
+                    const words = lower.split(/\s+/).map(w => w.replace(/[\[\]]/g, '')).filter(w => {
+                        if (!w) return false;
+                        if (w.length <= 1) return false;
+                        if (SEARCH_STOP_WORDS.has(w)) return false;
+                        return true;
+                    });
+                    const distinct = [...new Set(words)];
+                    if (distinct.length === 0 && text.trim().length > 0) return text.trim().toLowerCase();
+                    const result = distinct.join(' ');
+                    if (lower.includes('optiforge') && !result.includes('optiforge')) return 'optiforge';
+                    if (lower.includes('optifabric') && !result.includes('optifabric')) return 'optifabric';
+                    return result;
+                }
+
+                const processedQuery = processSearchKeywords(rawQuery);
+
+                async function searchModrinth(q, off, lim) {
+                    const facets = [['project_type:mod']];
+                    if (loader) facets.push([`categories:${loader}`]);
+                    if (mcVersion) facets.push([`versions:${mcVersion}`]);
+                    if (category) facets.push([`categories:${category}`]);
+                    const sortMap = { relevance: 'relevance', downloads: 'downloads', newest: 'newest', updated: 'updated', follows: 'follows' };
+                    const sortField = sortMap[sort] || (q ? 'relevance' : 'downloads');
+                    let searchUrl = `${MODRINTH_API}/search?query=${encodeURIComponent(q)}&index=${sortField}&limit=${lim}&offset=${off}`;
+                    searchUrl += `&facets=${encodeURIComponent(JSON.stringify(facets))}`;
+                    const result = await cachedFetchJSON(searchUrl, 60000);
+                    return {
+                        hits: (result.hits || []).map(hit => ({
                             id: hit.project_id, slug: hit.slug, title: hit.title,
                             description: hit.description || '', author: (hit.author || '').replace(/_/g, ''),
                             icon: hit.icon_url || '', downloads: hit.downloads || 0, followers: hit.followers || 0,
                             categories: hit.categories || [], versions: hit.versions || [],
                             dateCreated: hit.date_created || '', dateModified: hit.date_modified || '',
                             source: 'modrinth', installed: false
-                        }));
-                        sendJSON({ hits, total: result.total_hits || hits.length, offset });
-                    } else if (source === 'curseforge') {
-                        const gameId = '432';
-                        const settings = loadSettingsCached();
-                        const cfApiKey = settings.curseforgeApiKey || '$2a$10$bL4bIL5pUWqfcO7KQtnMReakwtfHbNKh6v1uTpKlzhwoueEJQnPnm';
-                        const cfHeaders = { 'x-api-key': cfApiKey };
-                        let searchUrl = `${CURSEFORGE_API}/mods/search?gameId=${gameId}&searchFilter=${encodeURIComponent(query)}&sortOrder=Desc&pageSize=${limit}&index=${offset}`;
-                        if (sort === 'downloads') searchUrl += '&sortField=TotalDownloads';
-                        else if (sort === 'newest') searchUrl += '&sortField=dateReleased';
-                        else if (sort === 'updated') searchUrl += '&sortField=dateModified';
-                        const result = await fetchJSON(searchUrl, cfHeaders);
-                        const hits = (result.data || []).map(mod => ({
+                        })),
+                        total: result.total_hits || 0
+                    };
+                }
+
+                async function searchCurseForge(q, off, lim) {
+                    const settings = loadSettingsCached();
+                    const cfApiKey = settings.curseforgeApiKey || '$2a$10$bL4bIL5pUWqfcO7KQtnMReakwtfHbNKh6v1uTpKlzhwoueEJQnPnm';
+                    const cfHeaders = { 'x-api-key': cfApiKey };
+                    let searchUrl = `${CURSEFORGE_API}/mods/search?gameId=432&searchFilter=${encodeURIComponent(q)}&sortOrder=Desc&classId=6&pageSize=${lim}&index=${off}`;
+                    if (sort === 'downloads') searchUrl += '&sortField=6';
+                    else if (sort === 'newest') searchUrl += '&sortField=11';
+                    else if (sort === 'updated') searchUrl += '&sortField=3';
+                    else searchUrl += '&sortField=2';
+                    if (loader) {
+                        const loaderMap = { forge: 1, fabric: 4, quilt: 5, neoforge: 5 };
+                        const loaderId = loaderMap[loader.toLowerCase()];
+                        if (loaderId) searchUrl += `&modLoaderType=${loaderId}`;
+                    }
+                    if (mcVersion) searchUrl += `&gameVersion=${encodeURIComponent(mcVersion)}`;
+                    const result = await fetchJSON(searchUrl, cfHeaders);
+                    return {
+                        hits: (result.data || []).map(mod => ({
                             id: String(mod.id), slug: mod.slug || '', title: mod.name || 'Unknown',
                             description: mod.summary || '', author: (mod.authors || [])[0] || 'Unknown',
                             icon: mod.logo?.url || '', downloads: mod.downloadCount || 0, followers: mod.followers || 0,
-                            categories: (mod.categories || []).map(c => c.name),
-                            dateCreated: mod.dateCreated || '', dateModified: mod.dateModified || '',
-                            source: 'curseforge', installed: false
-                        }));
-                        sendJSON({ hits, total: result.pagination?.totalCount || hits.length, offset });
-                    } else {
-                        sendError('Invalid source', 400);
+                            categories: (mod.categories || []).map(c => c.name || c.id || ''),
+                            versions: [], dateCreated: mod.dateCreated || '', dateModified: mod.dateModified || '',
+                            source: 'curseforge', installed: false, _cfDateReleased: mod.dateReleased || ''
+                        })),
+                        total: result.pagination?.totalCount || 0
+                    };
+                }
+
+                function isSameProject(a, b) {
+                    if (a.source === b.source) return false;
+                    const slugA = (a.slug || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                    const slugB = (b.slug || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                    if (slugA && slugB && slugA === slugB) return true;
+                    const titleA = (a.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                    const titleB = (b.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                    if (titleA && titleB && titleA === titleB) return true;
+                    const descA = (a.description || '').substring(0, 100).toLowerCase();
+                    const descB = (b.description || '').substring(0, 100).toLowerCase();
+                    if (descA.length > 20 && descB.length > 20 && descA === descB) return true;
+                    return false;
+                }
+
+                function computeScore(item, q) {
+                    let score = 0;
+                    const dl = item.downloads || 0;
+                    if (dl > 0) score += Math.log10(dl + 1) / 9;
+                    if (item.followers > 0) score += Math.log10(item.followers + 1) / 12;
+                    if (q && item.title) {
+                        const t = item.title.toLowerCase();
+                        const ql = q.toLowerCase();
+                        if (t === ql) score += 10;
+                        else if (t.startsWith(ql)) score += 8;
+                        else if (t.includes(ql)) score += 5;
+                        else {
+                            const qWords = ql.split(/\s+/);
+                            let matchCount = 0;
+                            for (const w of qWords) {
+                                if (w && t.includes(w)) matchCount++;
+                            }
+                            if (qWords.length > 0) score += (matchCount / qWords.length) * 4;
+                        }
                     }
+                    if (item.source === 'modrinth') score += 0.1;
+                    return score;
+                }
+
+                try {
+                    let hits = [];
+                    let totalHits = 0;
+
+                    if (source === 'modrinth') {
+                        const r = await searchModrinth(processedQuery, offset, limit);
+                        hits = r.hits;
+                        totalHits = r.total;
+                    } else if (source === 'curseforge') {
+                        const r = await searchCurseForge(processedQuery || rawQuery, offset, limit);
+                        hits = r.hits;
+                        totalHits = r.total;
+                    } else {
+                        const cfLimit = Math.min(limit + 10, 40);
+                        const mrLimit = Math.min(limit + 10, 40);
+                        const fetchSize = Math.max(limit * 2, 40);
+                        const [mrResult, cfResult] = await Promise.all([
+                            searchModrinth(processedQuery, offset, fetchSize).catch(() => ({ hits: [], total: 0 })),
+                            searchCurseForge(processedQuery || rawQuery, offset, fetchSize).catch(() => ({ hits: [], total: 0 }))
+                        ]);
+                        const allRaw = [...mrResult.hits, ...cfResult.hits];
+                        const deduped = [];
+                        for (const item of allRaw) {
+                            if (!deduped.some(d => isSameProject(d, item))) {
+                                deduped.push(item);
+                            }
+                        }
+                        if (sort === 'downloads' || sort === 'newest' || sort === 'updated') {
+                            const sortMap2 = {
+                                downloads: (a, b) => (b.downloads || 0) - (a.downloads || 0),
+                                newest: (a, b) => new Date(b.dateCreated || b._cfDateReleased || 0) - new Date(a.dateCreated || a._cfDateReleased || 0),
+                                updated: (a, b) => new Date(b.dateModified || 0) - new Date(a.dateModified || 0)
+                            };
+                            deduped.sort(sortMap2[sort] || sortMap2.downloads);
+                        } else {
+                            deduped.sort((a, b) => computeScore(b, processedQuery || rawQuery) - computeScore(a, processedQuery || rawQuery));
+                        }
+                        totalHits = Math.max(mrResult.total, cfResult.total);
+                        hits = deduped.slice(offset, offset + limit);
+                    }
+
+                    sendJSON({ hits, total: totalHits, offset, processedQuery: processedQuery !== rawQuery ? processedQuery : undefined });
                 } catch (e) {
                     sendError('搜索失败: ' + e.message);
                 }
@@ -15495,9 +19011,13 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const data = await readBody();
                 const modId = data.modId;
                 const enabled = data.enabled;
+                const verId = data.versionId;
                 if (!modId) { sendError('Missing modId', 400); break; }
-                const settings = loadSettingsCached();
-                let modsPath = getVersionModsDir(settings.selectedVersion);
+                let modsPath = verId ? getVersionModsDir(verId) : null;
+                if (!modsPath) {
+                    const settings = loadSettingsCached();
+                    modsPath = getVersionModsDir(settings.selectedVersion);
+                }
                 if (!modsPath) {
                     const installedVersions = getInstalledVersions();
                     if (installedVersions.length > 0) modsPath = getVersionModsDir(installedVersions[0].id);
@@ -15505,22 +19025,24 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 }
                 if (!fs.existsSync(modsPath)) { sendError('mods文件夹不存在'); break; }
 
-                const enabledPath = path.join(modsPath, modId);
-                const disabledPath = path.join(modsPath, modId + '.disabled');
+                const baseName = modId.endsWith('.disabled') ? modId.replace(/\.disabled$/, '') : modId;
+                const cleanPath = path.join(modsPath, baseName);
+                const disabledPath = path.join(modsPath, baseName + '.disabled');
 
-                if (enabled) {
-                    if (fs.existsSync(disabledPath)) {
-                        fs.renameSync(disabledPath, enabledPath);
-                    } else if (modId.endsWith('.disabled')) {
-                        const realEnabledPath = path.join(modsPath, modId.replace('.disabled', ''));
-                        if (fs.existsSync(enabledPath)) {
-                            fs.renameSync(enabledPath, realEnabledPath);
+                try {
+                    if (enabled) {
+                        if (fs.existsSync(disabledPath)) {
+                            fs.renameSync(disabledPath, cleanPath);
+                        } else if (fs.existsSync(cleanPath)) {
+                        }
+                    } else {
+                        if (fs.existsSync(cleanPath)) {
+                            fs.renameSync(cleanPath, disabledPath);
                         }
                     }
-                } else {
-                    if (fs.existsSync(enabledPath)) {
-                        fs.renameSync(enabledPath, disabledPath);
-                    }
+                } catch (e) {
+                    sendError(`文件操作失败: ${e.message}`);
+                    break;
                 }
                 sendJSON({ success: true, enabled });
                 break;
@@ -15535,12 +19057,25 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (!modsPath) {
                     const installedVersions = getInstalledVersions();
                     if (installedVersions.length > 0) modsPath = getVersionModsDir(installedVersions[0].id);
-                    if (!modsPath) { sendError('请先安装一个游戏版本'); break; }
                 }
-                if (!fs.existsSync(modsPath)) { sendError('mods文件夹不存在'); break; }
-                const modFiles = fs.readdirSync(modsPath).filter(f => f.toLowerCase().includes(modId.toLowerCase()));
-                modFiles.forEach(f => fs.unlinkSync(path.join(modsPath, f)));
-                sendJSON({ success: true, message: `模组 ${modId} 已删除` });
+                const searchDirs = [modsPath];
+                if (modsPath && !resolveVersionIsolation(settings.selectedVersion)) {
+                    const sharedGameDir = settings.gameDir || DATA_DIR;
+                    const sharedModsDir = path.join(sharedGameDir, 'mods');
+                    if (sharedModsDir !== modsPath) searchDirs.push(sharedModsDir);
+                    const homeMinecraftMods = path.join(os.homedir(), 'AppData', 'Roaming', '.minecraft', 'mods');
+                    if (homeMinecraftMods !== modsPath && homeMinecraftMods !== sharedModsDir) searchDirs.push(homeMinecraftMods);
+                }
+                let deletedCount = 0;
+                for (const dir of searchDirs) {
+                    if (!dir || !fs.existsSync(dir)) continue;
+                    const modFiles = fs.readdirSync(dir).filter(f => {
+                        const base = f.toLowerCase().replace('.disabled', '');
+                        return base.includes(modId.toLowerCase());
+                    });
+                    modFiles.forEach(f => { try { fs.unlinkSync(path.join(dir, f)); deletedCount++; } catch (_) {} });
+                }
+                sendJSON({ success: true, message: `已删除 ${deletedCount} 个文件`, deleted: deletedCount });
                 break;
             }
 
@@ -15569,7 +19104,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const settings = loadSettingsCached();
 
                 try {
-                    const storePath = path.join(require('os').homedir(), '.versepc', 'app-store.json');
+                    const storePath = path.join(DATA_DIR, 'app-store.json');
                     if (fs.existsSync(storePath)) {
                         const store = JSON.parse(fs.readFileSync(storePath, 'utf8'));
                         const launchStr = store['versepc_launch_settings'];
@@ -15594,7 +19129,12 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 }
 
                 const accounts = loadAccounts();
-                let account = accounts.find(a => a.id === settings.selectedAccount) || accounts[0] || { username: 'Player', type: 'offline' };
+                if (accounts.length === 0) {
+                    sendJSON({ success: false, error: '未登录，请先添加账户后再启动游戏。' });
+                    global._versepc_launching = false;
+                    break;
+                }
+                let account = accounts.find(a => a.id === settings.selectedAccount) || accounts[0];
 
                 if (account.type === 'microsoft' && account.refreshToken) {
                     const tokenExpiresAt = account.tokenExpiresAt || 0;
@@ -15677,7 +19217,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     }
                 }
 
-                const result = await launchGame(versionId, settings, account);
+                const result = await launchGame(versionId, settings, account, data.checkOnly === true);
                 if (!result.success) {
                     try {
                         if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -15706,6 +19246,21 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 break;
             }
 
+            case '/api/launch/cancel': {
+                global._versepc_launching = false;
+                for (const [sid, inst] of gameInstances) {
+                    try { inst.process.kill(); } catch (e) {}
+                }
+                gameInstances.clear();
+                for (const [sid, sess] of launchSessions) {
+                    sess.status = 'cancelled';
+                    sess.message = '启动已取消';
+                }
+                launchSessions.clear();
+                sendJSON({ success: true, message: '启动已取消' });
+                break;
+            }
+
             case '/api/launch/check': {
                 const lcData = await readBody();
                 const lcVersionId = lcData.versionId;
@@ -15721,6 +19276,17 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     if (extV) { lcExternalDir = extV.externalVersionDir; break; }
                 }
                 const depResult = await checkDependencies(lcCleanId, lcSettings, lcExternalDir);
+                const _javaDiag = { settingsJavaPath: lcSettings.javaPath || '', settingsJavaExists: !!(lcSettings.javaPath && fs.existsSync(lcSettings.javaPath)) };
+                if (lcSettings.javaPath && fs.existsSync(lcSettings.javaPath)) {
+                    const _info = getJavaVersionInfo(lcSettings.javaPath);
+                    _javaDiag.settingsJavaMajor = _info.major;
+                }
+                const _sysJava = detectSystemJava();
+                const _bunJava = detectBundledJava();
+                _javaDiag.systemJavaCount = _sysJava.length;
+                _javaDiag.bundledJavaCount = _bunJava.length;
+                _javaDiag.allJava = [..._bunJava, ..._sysJava].map(j => ({ path: j.path, major: j.majorVersion, source: j.source }));
+                depResult.javaDiagnostics = _javaDiag;
                 if (!depResult.parentVersion.ok || !depResult.forgeCore.ok) {
                     try {
                         if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
@@ -15798,25 +19364,6 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             session.status = 'completed';
                             session.message = `下载完成: ${result.completed} 个成功, ${result.failed} 个失败`;
                             invalidateDepCheckCache(ldCleanId);
-
-                            if (result.failed === 0) {
-                                const versionJson = resolveVersionJson(ldVersionId, ldExternalDir);
-                                const accounts = loadAccounts();
-                                const account = accounts.find(a => a.id === ldSettings.selectedAccount) || accounts[0] || { username: 'Player', type: 'offline' };
-                                const launchResult = await doLaunch(ldVersionId, versionJson, ldSettings, account, ldExternalDir);
-                                session.launchResult = launchResult;
-                                if (launchResult.success) {
-                                    session.status = 'launched';
-                                    session.message = '游戏启动成功';
-                                } else {
-                                    session.status = 'launch_failed';
-                                    session.message = `启动失败: ${launchResult.error}`;
-                                    try {
-                                        if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
-                                        fs.writeFileSync(path.join(LOGS_DIR, `launch-deps-fail-${Date.now()}.json`), JSON.stringify({ versionId: ldVersionId, externalDir: ldExternalDir, launchResult, timestamp: new Date().toISOString() }, null, 2), 'utf-8');
-                                    } catch (_) {}
-                                }
-                            }
                         }
                     }
                 }).catch((e) => {
@@ -15930,7 +19477,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     }
 
                     try {
-                        const args = buildLaunchArguments(versionJson, settings, account, diagVersionId,
+                        const { args } = buildLaunchArguments(versionJson, settings, account, diagVersionId,
                             extDir ? path.dirname(extDir) : path.join(DATA_DIR, 'minecraft'),
                             extDir);
                         diagResult.argsPreview = args;
@@ -16085,7 +19632,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
 
                     let maxMem = globalSettings.maxMemory || 4096;
                     try {
-                        const storePath2 = path.join(require('os').homedir(), '.versepc', 'app-store.json');
+                        const storePath2 = path.join(DATA_DIR, 'app-store.json');
                         if (fs.existsSync(storePath2)) {
                             const store2 = JSON.parse(fs.readFileSync(storePath2, 'utf8'));
                             const ls2 = store2['versepc_launch_settings'];
@@ -16126,7 +19673,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     scriptContent += `echo Max Memory: ${maxMem}MB\r\n`;
                     scriptContent += `echo ============================================\r\n`;
                     scriptContent += `echo.\r\n\r\n`;
-                    scriptContent += `"${javaPath}" -Xmx${maxMem}M -Xms${minMem}M ${jvmArgs} -Djava.library.path="${path.join(verDir, 'natives')}" -Dminecraft.launcher.brand=VersePC -Dminecraft.launcher.version=1.0 -cp "${classPathParts.join(';')}" ${mainClass} --username Player --version ${esId} --gameDir "${gameDir}" --assetsDir "${assetsDir}" --assetIndex ${assetIndex} --uuid 00000000-0000-0000-0000-000000000000 --accessToken 0 --userType legacy ${gameArgs} ${customGameArgs}\r\n`;
+                    scriptContent += `"${javaPath}" -Xmx${maxMem}M -Xms${minMem}M ${jvmArgs} -Djava.library.path="${path.join(verDir, 'natives')}" -Dminecraft.launcher.brand=VersePC -Dminecraft.launcher.version=${PKG_VERSION} -cp "${classPathParts.join(';')}" ${mainClass} --username Player --version ${esId} --gameDir "${gameDir}" --assetsDir "${assetsDir}" --assetIndex ${assetIndex} --uuid 00000000-0000-0000-0000-000000000000 --accessToken 0 --userType legacy ${gameArgs} ${customGameArgs}\r\n`;
                     scriptContent += `echo.\r\n`;
                     scriptContent += `echo Game exited.\r\n`;
                     scriptContent += `pause\r\n`;
@@ -16173,10 +19720,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const interval = setInterval(() => {
                         const s = repairSessions.get(rpSessionId);
                         if (!s || s.status === 'completed' || s.status === 'failed' || s.status === 'cancelled') {
-                            if (s) res.write(`data: ${JSON.stringify({ status: s.status, progress: s.progress, message: s.message, stage: s.stage, checkedFiles: s.checkedFiles, totalFiles: s.totalFiles, missingFiles: s.missingFiles, repairedFiles: s.repairedFiles, currentFile: s.currentFile })}\n\n`);
+                            if (s) res.write(`data: ${JSON.stringify({ status: s.status, progress: s.progress, message: s.message, stage: s.stage, checkedFiles: s.checkedFiles, totalFiles: s.totalFiles, missingFiles: s.missingFiles, repairedFiles: s.repairedFiles, currentFile: s.currentFile, logFile: s._logFile })}\n\n`);
                             res.end(); clearInterval(interval); return;
                         }
-                        res.write(`data: ${JSON.stringify({ status: s.status, progress: s.progress, message: s.message, stage: s.stage, checkedFiles: s.checkedFiles, totalFiles: s.totalFiles, missingFiles: s.missingFiles, repairedFiles: s.repairedFiles, currentFile: s.currentFile })}\n\n`);
+                        res.write(`data: ${JSON.stringify({ status: s.status, progress: s.progress, message: s.message, stage: s.stage, checkedFiles: s.checkedFiles, totalFiles: s.totalFiles, missingFiles: s.missingFiles, repairedFiles: s.repairedFiles, currentFile: s.currentFile, logFile: s._logFile })}\n\n`);
                     }, 300);
                     req.on('close', () => { clearInterval(interval); res.end(); });
                 } else {
@@ -16184,7 +19731,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         status: rpSession.status, progress: rpSession.progress, message: rpSession.message,
                         stage: rpSession.stage, checkedFiles: rpSession.checkedFiles, totalFiles: rpSession.totalFiles,
                         missingFiles: rpSession.missingFiles, repairedFiles: rpSession.repairedFiles,
-                        currentFile: rpSession.currentFile
+                        currentFile: rpSession.currentFile, logFile: rpSession._logFile
                     });
                 }
                 break;
@@ -16200,36 +19747,191 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 break;
             }
 
-            case '/api/version/delete': {
-                const body6 = await readBody();
-                const { versionId: dvId } = body6;
-                if (!dvId) { sendError('Missing versionId', 400); break; }
+            case '/api/version/delete-chain': {
+                const dcBody = await readBody();
+                const { versionId: dcId } = dcBody;
+                if (!dcId) { sendError('Missing versionId', 400); break; }
                 try {
-                    const toDelete = findVersionChain(dvId);
-                    let versionsData = loadVersions();
-                    versionsData = versionsData.filter(v => !toDelete.includes(v.id));
-                    saveVersions(versionsData);
+                    const versionsDirs = [VERSIONS_DIR];
+                    const extFolders = loadExternalFolders();
+                    for (const folder of extFolders) {
+                        if (folder.path && fs.existsSync(folder.path)) versionsDirs.push(folder.path);
+                    }
 
-                    for (const id of toDelete) {
-                        const verDir = path.join(VERSIONS_DIR, id);
-                        if (!fs.existsSync(verDir)) continue;
-                        const verModsDir = path.join(verDir, 'mods');
-                        if (fs.existsSync(verModsDir)) {
-                            try {
-                                const modFiles = fs.readdirSync(verModsDir).filter(f => f.endsWith('.jar') || f.endsWith('.zip') || f.endsWith('.disabled'));
-                                if (modFiles.length > 0) {
-                                    console.log(`[Delete] 清理版本 ${id} 的 ${modFiles.length} 个模组文件`);
-                                }
-                            } catch (e) {}
+                    const versionMeta = {};
+                    const childrenMap = {};
+
+                    for (const dir of versionsDirs) {
+                        if (!fs.existsSync(dir)) continue;
+                        for (const d of fs.readdirSync(dir)) {
+                            const jsonPath = path.join(dir, d, `${d}.json`);
+                            if (fs.existsSync(jsonPath)) {
+                                try {
+                                    const json = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+                                    const parent = json.inheritsFrom || null;
+                                    versionMeta[d] = { inheritsFrom: parent };
+                                    if (parent) {
+                                        if (!childrenMap[parent]) childrenMap[parent] = [];
+                                        childrenMap[parent].push(d);
+                                    }
+                                } catch (_) {}
+                            }
                         }
                     }
 
-                    cleanupVersionChain(dvId);
+                    const deletionSet = new Set([dcId]);
+                    const willDelete = [dcId];
+                    const willSkip = [];
+                    const visited = new Set([dcId]);
 
-                    _versionsCache = null;
-                    _versionsCacheTime = 0;
+                    function collectDescendants(parentId) {
+                        const children = childrenMap[parentId] || [];
+                        for (const child of children) {
+                            if (visited.has(child)) continue;
+                            visited.add(child);
+                            const meta = versionMeta[child];
+                            if (meta && meta.inheritsFrom && deletionSet.has(meta.inheritsFrom)) {
+                                deletionSet.add(child);
+                                willDelete.push(child);
+                            } else {
+                                willSkip.push(child);
+                            }
+                            collectDescendants(child);
+                        }
+                    }
 
-                    sendJSON({ success: true, deleted: toDelete });
+                    collectDescendants(dcId);
+                    sendJSON({ success: true, willDelete, willSkip });
+                } catch (e) { sendJSON({ success: false, error: e.message }); }
+                break;
+            }
+
+            case '/api/version/delete': {
+                const body6 = await readBody();
+                const { versionId: dvId, permanent: dvPermanent } = body6;
+                if (!dvId) { sendError('Missing versionId', 400); break; }
+                try {
+                    const cleanId = dvId.replace(' [外部]', '');
+                    const isExternal = dvId.includes('[外部]');
+                    let deleted = false;
+                    let deleteError = '';
+
+                    if (isExternal) {
+                        const settings = loadSettingsCached();
+                        const extFolders = loadExternalFolders();
+                        const matchFolder = extFolders.find(f => {
+                            const checkId = dvId.replace(' [外部]', '');
+                            return f.name === checkId || f.path.includes(checkId);
+                        });
+                        if (matchFolder) {
+                            const externalFolders = loadExternalFolders();
+                            const idx = externalFolders.findIndex(f => f.path === matchFolder.path);
+                            if (idx >= 0) {
+                                externalFolders.splice(idx, 1);
+                                saveExternalFolders(externalFolders);
+                            }
+                            const extSettingsDir = path.join(DATA_DIR, 'external-settings');
+                            const extSettingsFile = path.join(extSettingsDir, `${cleanId.replace(/[/\\?%*:|"<>]/g, '_')}-settings.json`);
+                            try { if (fs.existsSync(extSettingsFile)) fs.unlinkSync(extSettingsFile); } catch (_) {}
+                            deleted = true;
+                        } else {
+                            deleted = true;
+                        }
+                    } else {
+                        const versionDir = path.join(VERSIONS_DIR, cleanId);
+                        if (fs.existsSync(versionDir)) {
+                            if (dvPermanent) {
+                                for (let attempt = 1; attempt <= 5; attempt++) {
+                                    try {
+                                        fs.rmSync(versionDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+                                        deleted = true;
+                                        break;
+                                    } catch (e) {
+                                        try {
+                                            const { execSync } = require('child_process');
+                                            execSync(`rmdir /s /q "${versionDir}"`, { timeout: 10000, windowsHide: true });
+                                            deleted = true;
+                                            break;
+                                        } catch (_) {}
+                                        if (attempt < 5) {
+                                            try {
+                                                const残留 = fs.readdirSync(versionDir);
+                                                for (const f of 残留) {
+                                                    try { fs.unlinkSync(path.join(versionDir, f)); } catch (_) {}
+                                                }
+                                                if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true });
+                                                deleted = true;
+                                                break;
+                                            } catch (_) {}
+                                            const delayMs = attempt * 1000;
+                                            const start = Date.now();
+                                            while (Date.now() - start < delayMs) {}
+                                        } else {
+                                            deleteError = e.message || '文件可能被占用';
+                                        }
+                                    }
+                                }
+                            } else {
+                                try {
+                                    try {
+                                        const recycleBin = require('recycle-bin');
+                                        await recycleBin(versionDir);
+                                        deleted = true;
+                                    } catch (_) {
+                                        const { execSync } = require('child_process');
+                                        const escapedDir = versionDir.replace(/'/g, "''");
+                                        execSync(`powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('${escapedDir}', 'OnlyErrorDialogs', 'SendToRecycleBin')"`, { timeout: 30000, stdio: 'pipe' });
+                                        deleted = true;
+                                    }
+                                } catch (e) {
+                                    try {
+                                        fs.rmSync(versionDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+                                        deleted = true;
+                                    } catch (e2) {
+                                        deleteError = e2.message || '回收站删除失败';
+                                    }
+                                }
+                            }
+                        } else {
+                            deleted = true;
+                        }
+                    }
+
+                    if (deleted) {
+                        let allDeletedIds = [dvId];
+                        if (!isExternal) {
+                            try {
+                                const chainInfo = findVersionChain(cleanId);
+                                const vanillaPattern = /^\d+\.\d+(\.\d+)?(-rc\d+|-pre\d+|-snapshot.*)?$/i;
+                                const chainIds = (chainInfo || []).filter(cid => cid !== cleanId && !vanillaPattern.test(cid));
+                                for (const cid of chainIds) {
+                                    const chainDir = path.join(VERSIONS_DIR, cid);
+                                    if (fs.existsSync(chainDir)) {
+                                        try {
+                                            fs.rmSync(chainDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+                                            if (!allDeletedIds.includes(cid)) allDeletedIds.push(cid);
+                                        } catch (_) {}
+                                    } else {
+                                        if (!allDeletedIds.includes(cid)) allDeletedIds.push(cid);
+                                    }
+                                }
+                            } catch (chainErr) {
+                                console.error('[version-delete] 链式清理失败:', chainErr.message);
+                            }
+                        }
+
+                        let versionsData = loadVersions();
+                        const removeIds = new Set(allDeletedIds);
+                        versionsData = versionsData.filter(v => !removeIds.has(v.id));
+                        saveVersions(versionsData);
+
+                        _versionsCache = null;
+                        _versionsCacheTime = 0;
+
+                        sendJSON({ success: true, deleted: allDeletedIds, permanent: !!dvPermanent });
+                    } else {
+                        sendJSON({ success: false, error: `删除失败: ${deleteError || '文件可能被占用，请关闭游戏后重试'}`, permanent: !!dvPermanent });
+                    }
                 } catch (e) { sendJSON({ success: false, error: e.message }); }
                 break;
             }
@@ -16489,11 +20191,13 @@ async function handleAPI(pathname, req, res, parsedUrl) {
 
                     const imModsDir = getVersionModsDir(imVersionId);
                     await scanInstalledDir(imModsDir, '本地');
-                    const imSharedGameDir = imSettings.gameDir || DATA_DIR;
-                    const imSharedModsDir = path.join(imSharedGameDir, 'mods');
-                    if (imSharedModsDir !== imModsDir) await scanInstalledDir(imSharedModsDir, '共享');
-                    const imHomeMods = path.join(os.homedir(), 'AppData', 'Roaming', '.minecraft', 'mods');
-                    if (imHomeMods !== imModsDir && imHomeMods !== imSharedModsDir) await scanInstalledDir(imHomeMods, '.minecraft');
+                    if (!resolveVersionIsolation(imVersionId)) {
+                        const imSharedGameDir = imSettings.gameDir || DATA_DIR;
+                        const imSharedModsDir = path.join(imSharedGameDir, 'mods');
+                        if (imSharedModsDir !== imModsDir) await scanInstalledDir(imSharedModsDir, '共享');
+                        const imHomeMods = path.join(os.homedir(), 'AppData', 'Roaming', '.minecraft', 'mods');
+                        if (imHomeMods !== imModsDir && imHomeMods !== imSharedModsDir) await scanInstalledDir(imHomeMods, '.minecraft');
+                    }
                     sendJSON(mods);
                 } catch (e) { sendJSON([]); }
                 break;
@@ -16589,9 +20293,21 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                 );
                                 if (requiredDeps.length > 0) {
                                     const depIds = requiredDeps.map(d => `"${d.project_id}"`).join(',');
-                                    const depProjects = await cachedFetchJSON(`${MODRINTH_API}/projects?ids=[${depIds}]`, 300000);
+                                    let depProjects = [];
+                                    try { depProjects = await cachedFetchJSON(`${MODRINTH_API}/projects?ids=[${depIds}]`, 300000) || []; } catch (e) {}
+                                    const depProjMap = {};
+                                    for (const p of depProjects) { depProjMap[p.id] = p; }
+                                    const missingDepIds = requiredDeps.filter(d => !depProjMap[d.project_id]);
+                                    if (missingDepIds.length > 0) {
+                                        const retries = await Promise.allSettled(missingDepIds.map(d => cachedFetchJSON(`${MODRINTH_API}/project/${d.project_id}`, 120000)));
+                                        for (let i = 0; i < missingDepIds.length; i++) {
+                                            if (retries[i].status === 'fulfilled' && retries[i].value) {
+                                                depProjMap[missingDepIds[i].project_id] = retries[i].value;
+                                            }
+                                        }
+                                    }
                                     const depVersionPromises = requiredDeps.map(async dep => {
-                                        const proj = depProjects?.find(p => p.id === dep.project_id);
+                                        const proj = depProjMap[dep.project_id];
                                         let compatibleVersion = null;
                                         if (proj) {
                                             try {
@@ -16703,10 +20419,21 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             const depIds = depList.map(d => `"${d.projectId}"`).join(',');
                             let depProjects = [];
                             try { depProjects = await cachedFetchJSON(`${MODRINTH_API}/projects?ids=[${depIds}]`, 300000) || []; } catch (e) {}
+                            const projMap = {};
+                            for (const p of depProjects) { projMap[p.id] = p; }
+                            const missingProjects = depList.filter(d => !projMap[d.projectId]);
+                            if (missingProjects.length > 0) {
+                                const retries = await Promise.allSettled(missingProjects.map(d => cachedFetchJSON(`${MODRINTH_API}/project/${d.projectId}`, 120000)));
+                                for (let i = 0; i < missingProjects.length; i++) {
+                                    if (retries[i].status === 'fulfilled' && retries[i].value) {
+                                        projMap[missingProjects[i].projectId] = retries[i].value;
+                                    }
+                                }
+                            }
                             for (const dep of depList) {
                                 if (visited.has(dep.projectId)) continue;
                                 visited.add(dep.projectId);
-                                const proj = depProjects.find(p => p.id === dep.projectId);
+                                const proj = projMap[dep.projectId];
                                 let compatibleVersion = null;
                                 try {
                                     let depVerUrl = `${MODRINTH_API}/project/${dep.projectId}/version`;
@@ -17217,6 +20944,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     startTime: inst.startTime,
                     gameReady: inst.gameReady || false,
                     readyTime: inst.readyTime || null,
+                    loadStage: inst.loadStage || 0,
                     launchDuration: inst.readyTime ? (inst.readyTime - inst.startTime) : null,
                     running: true,
                 }));
@@ -17248,6 +20976,193 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 } else {
                     sendJSON({ success: false, error: '游戏未在运行' });
                 }
+                break;
+            }
+
+            case '/api/cleanup': {
+                const settings = loadSettingsCached();
+                const gameDir = settings.gameDir || DATA_DIR;
+                const results = {};
+                let totalBytes = 0;
+
+                const safeRmDir = (dir) => {
+                    if (!fs.existsSync(dir)) return 0;
+                    let bytes = 0;
+                    try {
+                        const entries = fs.readdirSync(dir, { withFileTypes: true });
+                        for (const entry of entries) {
+                            const fp = path.join(dir, entry.name);
+                            if (entry.isDirectory()) {
+                                bytes += safeRmDir(fp);
+                            } else {
+                                try {
+                                    bytes += fs.statSync(fp).size;
+                                    fs.unlinkSync(fp);
+                                } catch (e) {}
+                            }
+                        }
+                        try { fs.rmdirSync(dir); } catch (e) {}
+                    } catch (e) {}
+                    return bytes;
+                };
+
+                const scanDirSize = (dir) => {
+                    if (!fs.existsSync(dir)) return 0;
+                    let bytes = 0;
+                    try {
+                        const entries = fs.readdirSync(dir, { withFileTypes: true });
+                        for (const entry of entries) {
+                            const fp = path.join(dir, entry.name);
+                            if (entry.isDirectory()) {
+                                bytes += scanDirSize(fp);
+                            } else {
+                                try { bytes += fs.statSync(fp).size; } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                    return bytes;
+                };
+
+                const cleanVersionLogs = () => {
+                    let bytes = 0;
+                    const verDir = path.join(DATA_DIR, 'versions');
+                    if (!fs.existsSync(verDir)) return 0;
+                    try {
+                        const versions = fs.readdirSync(verDir);
+                        for (const v of versions) {
+                            for (const sub of ['logs', 'crash-reports']) {
+                                const d = path.join(verDir, v, sub);
+                                if (fs.existsSync(d)) bytes += safeRmDir(d);
+                            }
+                            const mcLog = path.join(verDir, v, 'latest.log');
+                            if (fs.existsSync(mcLog)) {
+                                try { bytes += fs.statSync(mcLog).size; fs.unlinkSync(mcLog); } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                    return bytes;
+                };
+
+                const cleanTempDir = () => {
+                    const tmpDir = path.join(DATA_DIR, 'temp');
+                    if (!fs.existsSync(tmpDir)) return 0;
+                    return safeRmDir(tmpDir);
+                };
+
+                const cleanNatives = () => {
+                    if (!fs.existsSync(NATIVES_DIR)) return 0;
+                    let bytes = 0;
+                    try {
+                        const entries = fs.readdirSync(NATIVES_DIR, { withFileTypes: true });
+                        for (const entry of entries) {
+                            if (entry.isDirectory()) {
+                                bytes += safeRmDir(path.join(NATIVES_DIR, entry.name));
+                            }
+                        }
+                    } catch (e) {}
+                    return bytes;
+                };
+
+                const cleanIconCache = () => {
+                    if (!fs.existsSync(ICON_CACHE_DIR)) return 0;
+                    return safeRmDir(ICON_CACHE_DIR);
+                };
+
+                const cleanModpackCache = () => {
+                    const mpDir = path.join(gameDir, 'modpacks');
+                    if (!fs.existsSync(mpDir)) return 0;
+                    let bytes = 0;
+                    try {
+                        const files = fs.readdirSync(mpDir);
+                        for (const f of files) {
+                            if (f.endsWith('.mrpack') || f.endsWith('.zip')) {
+                                const fp = path.join(mpDir, f);
+                                try { bytes += fs.statSync(fp).size; fs.unlinkSync(fp); } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                    return bytes;
+                };
+
+                const cleanDownloadCache = () => {
+                    const cacheDir = path.join(DATA_DIR, 'cache');
+                    if (!fs.existsSync(cacheDir)) return 0;
+                    let bytes = 0;
+                    try {
+                        const entries = fs.readdirSync(cacheDir, { withFileTypes: true });
+                        for (const entry of entries) {
+                            if (entry.isFile() && entry.name !== '.gitkeep') {
+                                const fp = path.join(cacheDir, entry.name);
+                                try { bytes += fs.statSync(fp).size; fs.unlinkSync(fp); } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
+                    return bytes;
+                };
+
+                results.gameLogs = cleanVersionLogs();
+                results.tempFiles = cleanTempDir();
+                results.natives = cleanNatives();
+                results.iconCache = cleanIconCache();
+                results.modpackCache = cleanModpackCache();
+                results.downloadCache = cleanDownloadCache();
+                totalBytes = Object.values(results).reduce((a, b) => a + b, 0);
+
+                sendJSON({
+                    success: true,
+                    freedBytes: totalBytes,
+                    freedMB: Math.round(totalBytes / (1024 * 1024) * 100) / 100,
+                    details: results,
+                    message: `清理完成，释放 ${Math.round(totalBytes / (1024 * 1024) * 100) / 100} MB 空间`
+                });
+                break;
+            }
+
+            case '/api/cleanup/scan': {
+                const scanResults = {};
+                let scanTotal = 0;
+                const scanDir = (dir) => {
+                    if (!fs.existsSync(dir)) return 0;
+                    let b = 0;
+                    try {
+                        const e = fs.readdirSync(dir, { withFileTypes: true });
+                        for (const f of e) {
+                            const fp = path.join(dir, f.name);
+                            if (f.isDirectory()) b += scanDir(fp);
+                            else try { b += fs.statSync(fp).size; } catch (_) {}
+                        }
+                    } catch (_) {}
+                    return b;
+                };
+                const verDir = path.join(DATA_DIR, 'versions');
+                if (fs.existsSync(verDir)) {
+                    try {
+                        for (const v of fs.readdirSync(verDir)) {
+                            for (const sub of ['logs', 'crash-reports']) {
+                                const d = path.join(verDir, v, sub);
+                                scanResults[`${v}/${sub}`] = scanDir(d);
+                            }
+                        }
+                    } catch (_) {}
+                }
+                scanResults['temp'] = scanDir(path.join(DATA_DIR, 'temp'));
+                scanResults['natives'] = scanDir(NATIVES_DIR);
+                scanResults['iconCache'] = scanDir(ICON_CACHE_DIR);
+                scanResults['cache'] = scanDir(path.join(DATA_DIR, 'cache'));
+                const settings = loadSettingsCached();
+                const gDir = settings.gameDir || DATA_DIR;
+                const mpDir = path.join(gDir, 'modpacks');
+                if (fs.existsSync(mpDir)) {
+                    try {
+                        for (const f of fs.readdirSync(mpDir)) {
+                            if (f.endsWith('.mrpack') || f.endsWith('.zip')) {
+                                try { scanResults['modpacks'] = (scanResults['modpacks'] || 0) + fs.statSync(path.join(mpDir, f)).size; } catch (_) {}
+                            }
+                        }
+                    } catch (_) {}
+                }
+                scanTotal = Object.values(scanResults).reduce((a, b) => a + b, 0);
+                sendJSON({ success: true, details: scanResults, totalBytes: scanTotal, totalMB: Math.round(scanTotal / (1024 * 1024) * 100) / 100 });
                 break;
             }
 
@@ -17286,18 +21201,42 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     'Connection': 'keep-alive'
                 });
                 let lastLen = 0;
+                let lastInstanceLen = 0;
+                const SSE_BATCH_LIMIT = 200;
                 const interval = setInterval(() => {
+                    let activeInst = null;
+                    for (const [sid, inst] of gameInstances) {
+                        activeInst = inst;
+                        break;
+                    }
+                    if (activeInst && activeInst.logBuffer.length > lastInstanceLen) {
+                        const newLines = activeInst.logBuffer.slice(lastInstanceLen);
+                        for (let i = 0; i < newLines.length; i++) {
+                            res.write(`data: ${JSON.stringify({ line: newLines[i] })}\n\n`);
+                        }
+                        lastInstanceLen = activeInst.logBuffer.length;
+                    }
                     if (gameLogBuffer.length > lastLen) {
-                        const newLines = gameLogBuffer.slice(lastLen);
-                        newLines.forEach(line => {
-                            res.write(`data: ${JSON.stringify({ line })}\n\n`);
-                        });
-                        lastLen = gameLogBuffer.length;
+                        const raw = gameLogBuffer.length - lastLen;
+                        const take = Math.min(raw, SSE_BATCH_LIMIT);
+                        const newLines = gameLogBuffer.slice(lastLen, lastLen + take);
+                        if (newLines.length <= 50) {
+                            for (let i = 0; i < newLines.length; i++) {
+                                res.write(`data: ${JSON.stringify({ line: newLines[i] })}\n\n`);
+                            }
+                        } else {
+                            res.write(`data: ${JSON.stringify({ batch: newLines })}\n\n`);
+                        }
+                        lastLen += take;
+                        if (raw > SSE_BATCH_LIMIT) {
+                            console.warn(`[LogStream] 日志积压 ${raw} 行, 仅推送 ${take} 行`);
+                        }
                     }
                     if (gameInstances.size === 0 && lastLen > 0) {
                         res.write(`data: ${JSON.stringify({ event: 'exited' })}\n\n`);
+                        clearInterval(interval);
                     }
-                }, 500);
+                }, 800);
                 req.on('close', () => clearInterval(interval));
                 break;
             }
@@ -17563,9 +21502,9 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             selectedAccount: '',
                             downloadSource: 'auto',
                             versionSource: 'auto',
-                            maxThreads: 32,
+                            maxThreads: 64,
                             enableChunkDownload: true,
-                            maxChunksPerFile: 8,
+                            maxChunksPerFile: 64,
                             speedLimit: 0,
                             targetDir: '',
                             sslVerify: false,
@@ -18111,7 +22050,8 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         break;
                     }
                     const fileName = primaryFile.filename || `${mpProjectId}.mrpack`;
-                    const downloadDir = path.join(DATA_DIR, 'modpacks');
+                    const _mpSettings = loadSettingsCached();
+                    const downloadDir = getVersionSubDir(_mpSettings.selectedVersion, 'modpacks') || path.join(_mpSettings.gameDir || DATA_DIR, 'modpacks');
                     if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
                     const destPath = path.join(downloadDir, fileName);
                     const downloadUrl = primaryFile.url;
@@ -18470,7 +22410,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 
                 installSessions.set(sessionId, {
                     versionId: details.id, status: 'preparing', progress: 0, stage: 'preparing',
-                    message: '准备安装...', startTime: Date.now(), details, errors: [],
+                    message: '准备安装...', startTime: Date.now(), lastActivity: Date.now(), details, errors: [],
                     loaderInfo, downloadSource,
                     _abortController: new AbortController()
                 });
@@ -18492,6 +22432,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const interval = setInterval(() => {
                         const s = installSessions.get(sessionId);
                         if (!s) { clearInterval(interval); res.end(); return; }
+                        s.lastActivity = Date.now();
                         res.write(`data: ${JSON.stringify({
                             sessionId, versionId: s.versionId, status: s.status, progress: s.progress,
                             stage: s.stage, message: s.message, currentFile: s.currentFile || '',
@@ -18507,6 +22448,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     }, 300);
                     req.on('close', () => clearInterval(interval));
                 } else {
+                    session.lastActivity = Date.now();
                     sendJSON({
                         sessionId, versionId: session.versionId, status: session.status, progress: session.progress,
                         stage: session.stage, message: session.message, currentFile: session.currentFile || '',
@@ -18538,6 +22480,26 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     session.status = 'cancelled'; session.message = '下载已取消';
                     if (session._abortController) { try { session._abortController.abort(); } catch (e) {} }
                     sendJSON({ success: true });
+                } else if (customDownloadSessions.has(sessionId)) {
+                    const session = customDownloadSessions.get(sessionId);
+                    session.status = 'cancelled'; session.message = '下载已取消';
+                    if (session.abortController) { try { session.abortController.abort(); } catch (e) {} }
+                    sendJSON({ success: true });
+                } else if (javaDownloadAbortControllers.has(sessionId)) {
+                    const controller = javaDownloadAbortControllers.get(sessionId);
+                    controller.abort();
+                    javaDownloadAbortControllers.delete(sessionId);
+                    const javaFile = path.join(DATA_DIR, `java-download-${sessionId}.json`);
+                    if (fs.existsSync(javaFile)) {
+                        try {
+                            const st = JSON.parse(fs.readFileSync(javaFile, 'utf-8'));
+                            if (st.status !== 'completed' && st.status !== 'error' && st.status !== 'cancelled') {
+                                st.status = 'cancelled'; st.message = '下载已取消';
+                                fs.writeFileSync(javaFile, JSON.stringify(st));
+                            }
+                        } catch (e) {}
+                    }
+                    sendJSON({ success: true });
                 } else {
                     sendError('Invalid session ID', 404);
                 }
@@ -18547,16 +22509,53 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             case '/api/delete-version': {
                 const data = await readBody();
                 const versionId = data.versionId;
+                const dvPermanent = !!data.permanent;
                 if (!versionId) { sendError('Missing versionId', 400); break; }
                 if (!versionId || /[\\/]|^\./.test(versionId)) { sendError('Invalid versionId', 400); break; }
                 const versionDir = path.join(VERSIONS_DIR, versionId);
                 const resolvedVersionDir = path.resolve(versionDir);
                 if (!resolvedVersionDir.startsWith(path.resolve(VERSIONS_DIR))) { sendError('Invalid versionId path', 400); break; }
                 if (fs.existsSync(versionDir)) {
-                    fs.rmSync(versionDir, { recursive: true, force: true });
+                    let ok = false;
+                    if (dvPermanent) {
+                        for (let i = 0; i < 5; i++) {
+                            try { fs.rmSync(versionDir, { recursive: true, force: true }); ok = true; break; } catch (e) {
+                                try { execSync(`rmdir /s /q "${versionDir}"`, { timeout: 10000, windowsHide: true }); ok = true; break; } catch (_) {}
+                                try {
+                                    const残留 = fs.readdirSync(versionDir);
+                                    for (const f of 残留) { try { fs.unlinkSync(path.join(versionDir, f)); } catch (_) {} }
+                                    if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true });
+                                    ok = true; break;
+                                } catch (_) {}
+                                if (i < 4) try { execSync('ping -n 1 127.0.0.1 >nul 2>&1', { timeout: 1000 }); } catch (_e) {}
+                            }
+                        }
+                    } else {
+                        try {
+                            try {
+                                const recycleBin = require('recycle-bin');
+                                await recycleBin(versionDir);
+                                ok = true;
+                            } catch (_) {
+                                const { execSync: execSyncLocal } = require('child_process');
+                                const escapedDir = versionDir.replace(/'/g, "''");
+                                execSyncLocal(`powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('${escapedDir}', 'OnlyErrorDialogs', 'SendToRecycleBin')"`, { timeout: 30000, stdio: 'pipe' });
+                                ok = true;
+                            }
+                        } catch (e) {
+                            try {
+                                fs.rmSync(versionDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+                                ok = true;
+                            } catch (_) {}
+                        }
+                    }
                     _versionsCache = null;
                     _versionsCacheTime = 0;
-                    sendJSON({ success: true, message: `Version ${versionId} deleted` });
+                    if (ok) {
+                        sendJSON({ success: true, message: `Version ${versionId} deleted`, permanent: dvPermanent });
+                    } else {
+                        sendJSON({ success: false, error: '删除失败，文件可能被其他进程占用', permanent: dvPermanent });
+                    }
                 } else {
                     sendError('Version not found', 404);
                 }
@@ -18666,53 +22665,9 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const neoVersion = data.neoVersion;
                 if (!gameVersion || !neoVersion) { sendError('Missing parameters', 400); break; }
                 try {
-                    const baseResult = await ensureBaseVersionInstalled(gameVersion);
-                    if (baseResult.error) {
-                        sendJSON({ success: false, error: baseResult.error });
-                        break;
-                    }
-                    
-                    const versionId = `${gameVersion}-neoforge-${neoVersion}`;
-                    const versionDir = path.join(VERSIONS_DIR, versionId);
-                    if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true });
-
-                    const neoUrl = `${NEOFORGE_API_URL}/versions/${encodeURIComponent(`net.neoforged:neoforge:${neoVersion}`)}?type=json`;
-                    const neoData = await fetchJSON(neoUrl);
-
-                    const versionJson = {
-                        id: versionId,
-                        inheritsFrom: gameVersion,
-                        mainClass: 'cpw.mods.bootstraplauncher.BootstrapLauncher',
-                        type: 'release',
-                        libraries: [...(neoData.libraries || [])],
-                        arguments: {
-                            game: ['--launchTarget', 'neoforgeclient', '--fml.neoForgeVersion', neoVersion, '--fml.mcVersion', gameVersion],
-                            jvm: []
-                        }
-                    };
-
-                    for (const lib of (versionJson.libraries || [])) {
-                        if (lib.downloads?.artifact?.url) {
-                            const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
-                            if (!fs.existsSync(libPath)) {
-                                try { await downloadFile(lib.downloads.artifact.url, libPath); } catch (e) {}
-                            }
-                        }
-                    }
-
-                    const jsonPath = path.join(versionDir, `${versionId}.json`);
-                    fs.writeFileSync(jsonPath, JSON.stringify(versionJson, null, 2));
-                    sendJSON({ success: true, versionId });
+                    const result = await installNeoForge(gameVersion, neoVersion);
+                    sendJSON(result);
                 } catch (e) {
-                    try {
-                        const versionDir = path.join(VERSIONS_DIR, `${gameVersion}-neoforge-${neoVersion}`);
-                        if (fs.existsSync(versionDir)) {
-                            fs.rmSync(versionDir, { recursive: true, force: true });
-                            console.log(`[NeoForge] Cleaned up failed version directory: ${versionDir}`);
-                        }
-                    } catch (cleanupErr) {
-                        console.error(`[NeoForge] Failed to cleanup version directory:`, cleanupErr.message);
-                    }
                     sendJSON({ success: false, error: e.message });
                 }
                 break;
@@ -19072,11 +23027,11 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const versionId = parsedUrl.query.id || '';
                 if (!versionId) { sendError('Missing id', 400); break; }
 
-                const cacheKey = `${versionId}_${parsedUrl.query.type || 'release'}_${parsedUrl.query.forge || ''}_${parsedUrl.query.fabric || ''}_${parsedUrl.query.neoforge || ''}_${parsedUrl.query.modpack || ''}`;
+                const cacheKey = `${versionId}_${parsedUrl.query.type || 'release'}_${parsedUrl.query.forge || ''}_${parsedUrl.query.fabric || ''}_${parsedUrl.query.neoforge || ''}_${parsedUrl.query.modpack || ''}_${parsedUrl.query.ext || ''}`;
                 const cached = VERSION_ICON_CACHE.get(cacheKey);
                 if (cached && Date.now() - cached.time < VERSION_ICON_CACHE_DURATION) {
                     res.writeHead(200, {
-                        'Content-Type': 'image/png',
+                        'Content-Type': cached.mime || 'image/png',
                         'Cache-Control': 'no-cache, no-store, must-revalidate',
                         'Pragma': 'no-cache',
                         'Expires': '0',
@@ -19087,9 +23042,69 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 }
 
                 try {
+                    const cleanId = versionId.replace(' [外部]', '');
+                    let customIconData = null;
+                    let customIconMime = 'image/png';
+
+                    const iconFileNames = ['icon.png', 'pack.png', 'logo.png'];
+                    const pclLogoPath = 'PCL/Logo.png';
+
+                    function _tryFindIcon(dir) {
+                        if (!dir || !fs.existsSync(dir)) return null;
+                        const pclLogo = path.join(dir, pclLogoPath);
+                        if (fs.existsSync(pclLogo)) {
+                            try { return { data: fs.readFileSync(pclLogo), mime: 'image/png' }; } catch (e) {}
+                        }
+                        for (const fn of iconFileNames) {
+                            const fp = path.join(dir, fn);
+                            if (fs.existsSync(fp)) {
+                                try {
+                                    const data = fs.readFileSync(fp);
+                                    if (fn.endsWith('.png')) return { data, mime: 'image/png' };
+                                    if (fn.endsWith('.jpg') || fn.endsWith('.jpeg')) return { data, mime: 'image/jpeg' };
+                                    return { data, mime: 'image/png' };
+                                } catch (e) {}
+                            }
+                        }
+                        return null;
+                    }
+
+                    const internalDir = path.join(VERSIONS_DIR, cleanId);
+                    customIconData = _tryFindIcon(internalDir);
+
+                    if (!customIconData && parsedUrl.query.extDir) {
+                        customIconData = _tryFindIcon(parsedUrl.query.extDir);
+                        if (!customIconData) {
+                            const extRoot = path.dirname(path.dirname(parsedUrl.query.extDir));
+                            customIconData = _tryFindIcon(extRoot);
+                        }
+                    }
+
+                    if (!customIconData) {
+                        const mcVersionsDir = path.join(MINECRAFT_DIR, 'versions', cleanId);
+                        customIconData = _tryFindIcon(mcVersionsDir);
+                    }
+
+                    if (customIconData) {
+                        VERSION_ICON_CACHE.set(cacheKey, { data: customIconData.data, mime: customIconData.mime, time: Date.now() });
+                        res.writeHead(200, {
+                            'Content-Type': customIconData.mime,
+                            'Cache-Control': 'no-cache, no-store, must-revalidate',
+                            'Pragma': 'no-cache',
+                            'Expires': '0',
+                            'X-VersionIcon-Custom': 'true'
+                        });
+                        res.end(customIconData.data);
+                        console.log(`[VersionIcon] ${versionId} -> 自定义图标`);
+                        break;
+                    }
+
                     const blockIconMap = {
-                        'snapshot': 'CobbleStone.png',
-                        'release': 'Grass.png'
+                        'snapshot': 'CommandBlock.png',
+                        'release': 'Grass.png',
+                        'special': 'GoldBlock.png',
+                        'old_beta': 'CobbleStone.png',
+                        'old_alpha': 'CobbleStone.png'
                     };
                     const versionType = parsedUrl.query.type || 'release';
                     const isForge = parsedUrl.query.forge === 'true';
@@ -19106,7 +23121,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const blockPath = path.join(__dirname, 'img', blockFile);
                     if (fs.existsSync(blockPath)) {
                         const iconData = fs.readFileSync(blockPath);
-                        VERSION_ICON_CACHE.set(cacheKey, { data: iconData, time: Date.now() });
+                        VERSION_ICON_CACHE.set(cacheKey, { data: iconData, mime: 'image/png', time: Date.now() });
                         res.writeHead(200, {
                             'Content-Type': 'image/png',
                             'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -19114,7 +23129,6 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             'Expires': '0'
                         });
                         res.end(iconData);
-                        console.log(`[VersionIcon] ${versionId} -> ${blockFile}`);
                     } else {
                         res.writeHead(302, { Location: '/img/Grass.png' });
                         res.end();
@@ -19489,21 +23503,22 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             case '/api/open-folder': {
                 const data = await readBody();
                 const folder = data.folder || 'data';
-                let targetPath = DATA_DIR;
+                const _ofSettings = loadSettingsCached();
+                const _ofGameDir = _ofSettings.gameDir || DATA_DIR;
+                let targetPath = _ofGameDir;
                 switch (folder) {
                     case 'minecraft': targetPath = MINECRAFT_DIR; break;
                     case 'versions': targetPath = VERSIONS_DIR; break;
                     case 'mods': {
-                        const settings = loadSettingsCached();
-                        const modsDir = getVersionModsDir(settings.selectedVersion);
-                        targetPath = modsDir || path.join(DATA_DIR, 'mods');
+                        const modsDir = getVersionModsDir(_ofSettings.selectedVersion);
+                        targetPath = modsDir || path.join(_ofGameDir, 'mods');
                         break;
                     }
                     case 'assets': targetPath = ASSETS_DIR; break;
                     case 'logs': targetPath = LOGS_DIR; break;
                     case 'crash-reports': {
                         const crDir = getVersionSubDir(null, 'crash-reports');
-                        targetPath = crDir || path.join(DATA_DIR, 'crash-reports');
+                        targetPath = crDir || path.join(_ofGameDir, 'crash-reports');
                         break;
                     }
                     case 'shaderpacks': {
@@ -19512,7 +23527,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             if (!fs.existsSync(spDir)) fs.mkdirSync(spDir, { recursive: true });
                             targetPath = spDir;
                         } else {
-                            targetPath = path.join(DATA_DIR, 'shaderpacks');
+                            targetPath = path.join(_ofGameDir, 'shaderpacks');
                         }
                         break;
                     }
@@ -19522,7 +23537,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             if (!fs.existsSync(rpDir)) fs.mkdirSync(rpDir, { recursive: true });
                             targetPath = rpDir;
                         } else {
-                            targetPath = path.join(DATA_DIR, 'resourcepacks');
+                            targetPath = path.join(_ofGameDir, 'resourcepacks');
                         }
                         break;
                     }
@@ -19532,7 +23547,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             if (!fs.existsSync(dpDir)) fs.mkdirSync(dpDir, { recursive: true });
                             targetPath = dpDir;
                         } else {
-                            targetPath = path.join(DATA_DIR, 'datapacks');
+                            targetPath = path.join(_ofGameDir, 'datapacks');
                         }
                         break;
                     }
@@ -19543,6 +23558,13 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         } else {
                             const settings = loadSettingsCached();
                             targetPath = settings.gameDir || DATA_DIR;
+                        }
+                        break;
+                    }
+                    case 'custom': {
+                        const customPath = data.customPath || '';
+                        if (customPath && fs.existsSync(customPath)) {
+                            targetPath = customPath;
                         }
                         break;
                     }
@@ -19663,7 +23685,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             versions = await cachedFetchJSON(versionUrl, 600000, 3, 25000);
                         } catch (mirrorErr) {
                             console.warn(`[Modrinth] 镜像请求失败，直接请求官方API: ${mirrorErr.message}`);
-                            const officialUrl = `https://api.modrinth.com/v2/project/${encodedId}/version${params.length > 0 ? '?' + params.join('&') : ''}`;
+                            const officialUrl = `${MODRINTH_API}/project/${encodedId}/version${params.length > 0 ? '?' + params.join('&') : ''}`;
                             versions = await fetchJSON(officialUrl, 2, 30000);
                         }
                         const result = (versions || []).map(v => ({
@@ -19787,9 +23809,6 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (!dvVersionId && !dvProjectId) { sendError('Missing versionId or projectId', 400); break; }
 
                 let destDir = dvSavePath;
-                if (!destDir && dvVersionId) {
-                    destDir = getVersionModsDir(dvVersionId);
-                }
                 if (!destDir) {
                     const settings = loadSettingsCached();
                     destDir = getVersionModsDir(settings.selectedVersion);
@@ -19926,9 +23945,16 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                     if (session) {
                                         session.currentDep = di + 1;
                                         session.message = `下载依赖 ${dep.fileName}`;
-                                        session.progress = 50 + Math.round((di / depDownloads.length) * 50);
                                     }
-                                    await downloadFile(dep.url, dep.dest, null, 2);
+                                    await downloadFile(dep.url, dep.dest, (depProgress) => {
+                                        const s = modDownloadSessions.get(sessionId);
+                                        if (s) {
+                                            const depBase = 50 + Math.round((di / depDownloads.length) * 50);
+                                            const depWeight = 50 / depDownloads.length;
+                                            s.progress = Math.min(99, depBase + Math.round(depProgress.progress * depWeight / 100));
+                                            s.message = `下载依赖 ${dep.fileName} ${depProgress.progress.toFixed(0)}%`;
+                                        }
+                                    }, 2);
                                 }
 
                                 const session = modDownloadSessions.get(sessionId);
@@ -20072,6 +24098,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             result[pid] = {
                                 id: project?.id || pid,
                                 title: project?.title || pid,
+                                slug: project?.slug || '',
                                 icon: project?.icon_url || '',
                                 description: (project?.description || '').substring(0, 100),
                                 downloads: project?.downloads || 0,
@@ -20092,47 +24119,95 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     }
                     const missingIds = rdvIds.filter(pid => !result[pid] || !result[pid].title || result[pid].title === pid);
                     if (missingIds.length > 0) {
-                        const cfResults = await Promise.allSettled(missingIds.map(async cid => {
+                        // 策略1: 对缺失的ID逐个重试 Modrinth 单项目查询
+                        const retryResults = await Promise.allSettled(missingIds.map(async rid => {
                             try {
-                                const modInfo = await cachedFetchJSON(`${CURSEFORGE_API}/mods/${cid}`, 120000, { 'x-api-key': cfApiKey });
-                                const proj = modInfo?.data;
-                                if (!proj) return null;
-                                let compatibleVersion = null;
-                                if (rdvGameVersion) {
-                                    const filesList = await cachedFetchJSON(`${CURSEFORGE_API}/mods/${cid}/files?gameVersion=${encodeURIComponent(rdvGameVersion)}&pageSize=5`, 120000, { 'x-api-key': cfApiKey });
-                                    const cfFiles = filesList?.data || [];
-                                    const cfFile = cfFiles[0] || null;
-                                    if (cfFile) {
-                                        compatibleVersion = {
-                                            id: String(cfFile.id),
-                                            version_number: cfFile.displayName || cfFile.fileName,
-                                            files: [{ filename: cfFile.fileName, primary: true }],
-                                            game_versions: cfFile.gameVersions || [],
-                                            loaders: cfFile.sortableGameVersions?.map(s => s.gameVersionTypeId) || []
-                                        };
+                                const proj = await cachedFetchJSON(`${MODRINTH_API}/project/${rid}`, 120000);
+                                if (proj && proj.title) {
+                                    let compatibleVersion = null;
+                                    if (rdvGameVersion || rdvLoader) {
+                                        const vr = await cachedFetchJSON(`${MODRINTH_API}/project/${rid}/version${versionQueryString}`, 120000);
+                                        const filtered = (vr || []).filter(v => {
+                                            const gv = v.game_versions || [];
+                                            const loaders = (v.loaders || []).map(l => l.toLowerCase());
+                                            let match = true;
+                                            if (rdvGameVersion && !gv.includes(rdvGameVersion)) match = false;
+                                            if (rdvLoader && !loaders.includes(rdvLoader.toLowerCase())) match = false;
+                                            return match;
+                                        });
+                                        compatibleVersion = filtered[0] || null;
                                     }
+                                    return {
+                                        rid,
+                                        data: {
+                                            id: proj.id || rid,
+                                            title: proj.title,
+                                            icon: proj.icon_url || '',
+                                            description: (proj.description || '').substring(0, 100),
+                                            downloads: proj.downloads || 0,
+                                            hasCompatibleVersion: !!compatibleVersion,
+                                            versionId: compatibleVersion?.id || '',
+                                            versionNumber: compatibleVersion?.version_number || '',
+                                            fileName: compatibleVersion?.files?.find(f => f.primary)?.filename || compatibleVersion?.files?.[0]?.filename || '',
+                                            gameVersions: compatibleVersion?.game_versions || [],
+                                            loaders: compatibleVersion?.loaders || []
+                                        }
+                                    };
                                 }
-                                return {
-                                    cid,
-                                    data: {
-                                        id: String(proj.id),
-                                        title: proj.name,
-                                        icon: proj.logo?.thumbnailUrl || proj.logo?.url || '',
-                                        description: (proj.summary || '').substring(0, 100),
-                                        downloads: proj.downloadCount || 0,
-                                        hasCompatibleVersion: !!compatibleVersion,
-                                        versionId: compatibleVersion?.id || '',
-                                        versionNumber: compatibleVersion?.version_number || '',
-                                        fileName: compatibleVersion?.files?.[0]?.filename || '',
-                                        gameVersions: compatibleVersion?.game_versions || [],
-                                        loaders: compatibleVersion?.loaders || []
-                                    }
-                                };
-                            } catch (e) { return null; }
+                            } catch (e) {}
+                            return null;
                         }));
-                        for (const r of cfResults) {
+                        for (const r of retryResults) {
                             if (r.status === 'fulfilled' && r.value) {
-                                result[r.value.cid] = r.value.data;
+                                result[r.value.rid] = r.value.data;
+                            }
+                        }
+
+                        // 策略2: 对仍然缺失的ID，用 Modrinth search 按 slug 搜索
+                        const stillMissing = rdvIds.filter(pid => !result[pid] || !result[pid].title || result[pid].title === pid);
+                        if (stillMissing.length > 0) {
+                            const searchResults = await Promise.allSettled(stillMissing.map(async sid => {
+                                try {
+                                    const sr = await cachedFetchJSON(`${MODRINTH_API}/search?query=${encodeURIComponent(sid)}&limit=1`, 60000);
+                                    const hit = sr?.hits?.[0];
+                                    if (hit && hit.title) {
+                                        return { sid, data: { id: hit.project_id || sid, title: hit.title, icon: hit.icon_url || '', description: (hit.description || '').substring(0, 100), downloads: hit.downloads || 0 } };
+                                    }
+                                } catch (e) {}
+                                return null;
+                            }));
+                            for (const r of searchResults) {
+                                if (r.status === 'fulfilled' && r.value) {
+                                    const v = r.value.data;
+                                    result[r.value.sid] = { ...result[r.value.sid], ...v, hasCompatibleVersion: false, versionId: '', versionNumber: '', fileName: '', gameVersions: [], loaders: [] };
+                                }
+                            }
+                        }
+
+                        // 策略3: 对仍然缺失的ID，仅对数字ID尝试 CurseForge
+                        const cfMissing = rdvIds.filter(pid => (!result[pid] || !result[pid].title || result[pid].title === pid) && /^\d+$/.test(pid));
+                        if (cfMissing.length > 0) {
+                            const cfResults = await Promise.allSettled(cfMissing.map(async cid => {
+                                try {
+                                    const modInfo = await cachedFetchJSON(`${CURSEFORGE_API}/mods/${cid}`, 120000, { 'x-api-key': cfApiKey });
+                                    const proj = modInfo?.data;
+                                    if (!proj) return null;
+                                    let compatibleVersion = null;
+                                    if (rdvGameVersion) {
+                                        const filesList = await cachedFetchJSON(`${CURSEFORGE_API}/mods/${cid}/files?gameVersion=${encodeURIComponent(rdvGameVersion)}&pageSize=5`, 120000, { 'x-api-key': cfApiKey });
+                                        const cfFiles = filesList?.data || [];
+                                        const cfFile = cfFiles[0] || null;
+                                        if (cfFile) {
+                                            compatibleVersion = { id: String(cfFile.id), version_number: cfFile.displayName || cfFile.fileName, files: [{ filename: cfFile.fileName, primary: true }], game_versions: cfFile.gameVersions || [], loaders: cfFile.sortableGameVersions?.map(s => s.gameVersionTypeId) || [] };
+                                        }
+                                    }
+                                    return { cid, data: { id: String(proj.id), title: proj.name, icon: proj.logo?.thumbnailUrl || proj.logo?.url || '', description: (proj.summary || '').substring(0, 100), downloads: proj.downloadCount || 0, hasCompatibleVersion: !!compatibleVersion, versionId: compatibleVersion?.id || '', versionNumber: compatibleVersion?.version_number || '', fileName: compatibleVersion?.files?.[0]?.filename || '', gameVersions: compatibleVersion?.game_versions || [], loaders: compatibleVersion?.loaders || [] } };
+                                } catch (e) { return null; }
+                            }));
+                            for (const r of cfResults) {
+                                if (r.status === 'fulfilled' && r.value) {
+                                    result[r.value.cid] = r.value.data;
+                                }
                             }
                         }
                     }
@@ -20424,16 +24499,16 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (rdSavePath) {
                     destDir = rdSavePath;
                 } else if (rdType === 'modpack') {
-                    destDir = path.join(DATA_DIR, 'modpacks');
+                    destDir = getVersionSubDir(targetVersionId, 'modpacks') || path.join(settings.gameDir || DATA_DIR, 'modpacks');
                 } else if (rdType === 'resourcepack') {
                     destDir = targetVersionId ? getVersionSubDir(targetVersionId, 'resourcepacks') : null;
-                    if (!destDir) destDir = path.join(DATA_DIR, 'resourcepacks');
+                    if (!destDir) destDir = path.join(settings.gameDir || DATA_DIR, 'resourcepacks');
                 } else if (rdType === 'shader') {
                     destDir = targetVersionId ? getVersionSubDir(targetVersionId, 'shaderpacks') : null;
-                    if (!destDir) destDir = path.join(DATA_DIR, 'shaderpacks');
+                    if (!destDir) destDir = path.join(settings.gameDir || DATA_DIR, 'shaderpacks');
                 } else if (rdType === 'datapack') {
                     destDir = targetVersionId ? getVersionSubDir(targetVersionId, 'datapacks') : null;
-                    if (!destDir) destDir = path.join(DATA_DIR, 'datapacks');
+                    if (!destDir) destDir = path.join(settings.gameDir || DATA_DIR, 'datapacks');
                 } else {
                     destDir = getVersionModsDir(targetVersionId);
                     if (!destDir) {
@@ -20471,6 +24546,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     downloadUrl = primaryFile.url;
                     fileName = primaryFile.filename;
                     fileSize = primaryFile.size || 0;
+                    const expectedSha1 = primaryFile.hashes?.sha1 || '';
 
                     if (!downloadUrl) {
                         console.error('[Download] File URL is empty, file data:', JSON.stringify(primaryFile));
@@ -20500,41 +24576,80 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     });
 
                     sendJSON({ success: true, sessionId, fileName: safeName });
+                    console.log(`[Modpack] 开始下载: ${safeName} (${fileSize} bytes, URL: ${downloadUrl?.substring(0, 80)}...)`);
 
                     (async () => {
                         try {
-                            await downloadFileChunked(downloadUrl, destPath, {
-                                onProgress: (p) => {
+                            const _mpTimeout = fileSize > 50 * 1024 * 1024 ? 600000 : fileSize > 20 * 1024 * 1024 ? 300000 : 120000;
+                            const _mpOverallTimeout = Math.max(_mpTimeout * 2, 300000);
+                            const _mpOverallTimer = setTimeout(() => {
+                                console.error(`[Modpack] ⚠ 总下载超时 (${Math.round(_mpOverallTimeout / 1000)}s), 中止`);
+                                abortController.abort();
+                            }, _mpOverallTimeout);
+                            let _mpMaxPct = 0;
+                            let _mpMaxBytes = 0;
+                            const _mpOnProgress = (p) => {
+                                try {
                                     const session = modDownloadSessions.get(sessionId);
                                     if (session) {
-                                        if (session.status === 'cancelled') {
-                                            session._abortController?.abort();
-                                            throw new Error('下载已取消');
-                                        }
-                                        session.progress = rdType === 'modpack' ? Math.round(p.progress * 0.45) : Math.round(p.progress);
+                                        if (session.status === 'cancelled') { session._abortController?.abort(); return; }
+                                        const rawPct = Math.round(p.progress || 0);
+                                        const pct = Math.max(rawPct, _mpMaxPct);
+                                        if (rawPct >= _mpMaxPct) _mpMaxPct = rawPct;
+                                        const curBytes = p.bytesDownloaded || 0;
+                                        if (curBytes >= _mpMaxBytes) _mpMaxBytes = curBytes;
+                                        session.progress = rdType === 'modpack' ? Math.round(pct * 0.45) : pct;
                                         session.downloadSpeed = p.speed || 0;
-                                        session.bytesDownloaded = p.bytesDownloaded || 0;
+                                        session.bytesDownloaded = _mpMaxBytes;
                                         session.totalSize = p.totalBytes || fileSize;
-                                        session.message = `下载 ${safeName} ${p.progress.toFixed(0)}%`;
+                                        const speedKB = p.speed ? Math.round(p.speed / 1024) : 0;
+                                        session.message = `下载 ${safeName} ${pct}% (${speedKB}KB/s)`;
                                         session.currentFile = safeName;
                                         session.phase = 'download';
+                                        if (!session._lastLogPct || pct - session._lastLogPct >= 10 || pct === 100) {
+                                            session._lastLogPct = pct;
+                                            console.log(`[Modpack] 下载进度: ${safeName} ${pct}% (${speedKB}KB/s)`);
+                                        }
                                         if (rdType === 'modpack') {
                                             if (!session.stageHistory) session.stageHistory = [];
                                             const dlIdx = session.stageHistory.findIndex(s => s.stage === 'download');
-                                            const dlStage = { stage: 'download', message: `下载整合包 ${safeName}`, progress: Math.round(p.progress) };
+                                            const dlStage = { stage: 'download', message: `下载整合包 ${safeName} ${pct}%`, progress: pct };
                                             if (dlIdx >= 0) { session.stageHistory[dlIdx] = dlStage; } else { session.stageHistory.push(dlStage); }
                                         }
                                         if (session.files && session.files[0]) {
-                                            session.files[0].progress = Math.round(p.progress);
+                                            session.files[0].progress = pct;
                                             session.files[0].status = 'downloading';
                                             session.files[0].size = p.totalBytes || fileSize;
                                         }
                                     }
-                                },
-                                retries: 2,
-                                abortSignal: abortController.signal,
-                                timeout: 300000
-                            });
+                                } catch (_) {}
+                            };
+                            console.log(`[Modpack] 开始下载: ${safeName} (URL: ${downloadUrl?.substring(0, 80)}...)`);
+                            const _mpUrls = getMirrorUrls(downloadUrl);
+                            const _mpAgent = new https.Agent({ keepAlive: false, maxSockets: 16, timeout: 120000 });
+                            for (const _tryUrl of _mpUrls) {
+                                if (abortController.signal && abortController.signal.aborted) break;
+                                try {
+                                    console.log(`[Modpack] 尝试: ${_tryUrl.substring(0, 80)}...`);
+                                    await downloadFileChunked(_tryUrl, destPath, { onProgress: _mpOnProgress, retries: 0, abortSignal: abortController.signal, timeout: 600000, agent: _mpAgent });
+                                    if (fs.existsSync(destPath) && fs.statSync(destPath).size > 0) { console.log(`[Modpack] 下载成功: ${safeName}`); break; }
+                                } catch (e) {
+                                    if (abortController.signal && abortController.signal.aborted) break;
+                                    console.warn(`[Modpack] 失败: ${e.message}`);
+                                }
+                            }
+                            try { _mpAgent.destroy(); } catch (_) {}
+                            clearTimeout(_mpOverallTimer);
+
+                            if (!fs.existsSync(destPath) || fs.statSync(destPath).size === 0) {
+                                console.error(`[Modpack] 下载失败: ${safeName}`);
+                                const sFail = modDownloadSessions.get(sessionId);
+                                if (sFail && sFail.status !== 'cancelled') {
+                                    sFail.status = 'failed'; sFail.progress = 100;
+                                    sFail.message = '整合包文件下载失败，请检查网络连接后重试';
+                                }
+                                return;
+                            }
 
                             const sessionBeforeImport = modDownloadSessions.get(sessionId);
                             if (sessionBeforeImport && sessionBeforeImport.status === 'cancelled') {
@@ -20544,6 +24659,77 @@ async function handleAPI(pathname, req, res, parsedUrl) {
 
                             if (rdType === 'modpack' && (safeName.endsWith('.mrpack') || safeName.endsWith('.zip'))) {
                                 try {
+                                    let verified = false;
+                                    for (let verifyAttempt = 0; verifyAttempt < 3; verifyAttempt++) {
+                                        if (verifyAttempt > 0) {
+                                            const s2 = modDownloadSessions.get(sessionId);
+                                            if (s2) { s2.message = `文件校验失败，重新下载中 (${verifyAttempt}/2)...`; s2.progress = 5; }
+                                            console.log(`[Modpack] 文件校验失败，第 ${verifyAttempt} 次重试下载`);
+                                            try { if (fs.existsSync(destPath)) fs.unlinkSync(destPath); } catch (e) {}
+                                            const retryMirrors = getMirrorUrls(downloadUrl).filter(u => u !== downloadUrl);
+                                            try {
+                                                await downloadFileChunked(downloadUrl, destPath, {
+                                                    onProgress: (p) => {
+                                                        const s3 = modDownloadSessions.get(sessionId);
+                                                        if (s3) { s3.progress = Math.round(p.progress * 0.4); s3.message = `重新下载中 ${p.progress.toFixed(0)}%`; }
+                                                    },
+                                                    retries: 3,
+                                                    abortSignal: abortController.signal,
+                                                    timeout: _mpTimeout,
+                                                    mirrors: retryMirrors.length > 0 ? retryMirrors : undefined
+                                                });
+                                            } catch (dlErr) {
+                                                console.error(`[Modpack] 重试下载失败:`, dlErr.message);
+                                                continue;
+                                            }
+                                        }
+
+                                        try {
+                                            const dlStat = fs.statSync(destPath);
+                                            if (expectedSha1) {
+                                                const hash = require('crypto').createHash('sha1');
+                                                const stream = fs.createReadStream(destPath);
+                                                await new Promise((res, rej) => {
+                                                    stream.on('data', (chunk) => hash.update(chunk));
+                                                    stream.on('end', res);
+                                                    stream.on('error', rej);
+                                                });
+                                                const computedSha1 = hash.digest('hex');
+                                                if (computedSha1 !== expectedSha1) {
+                                                    console.error(`[Modpack] SHA1 校验失败: 期望 ${expectedSha1}, 实际 ${computedSha1}, 大小 ${dlStat.size}/${fileSize}`);
+                                                    continue;
+                                                }
+                                                console.log(`[Modpack] SHA1 校验通过: ${computedSha1}`);
+                                            } else if (fileSize > 0 && Math.abs(dlStat.size - fileSize) > 1024) {
+                                                console.error(`[Modpack] 文件大小不匹配: 期望 ${fileSize}, 实际 ${dlStat.size}`);
+                                                continue;
+                                            }
+                                            const headBuf = Buffer.alloc(4);
+                                            const fd2 = fs.openSync(destPath, 'r');
+                                            fs.readSync(fd2, headBuf, 0, 4, 0);
+                                            fs.closeSync(fd2);
+                                            if (headBuf[0] !== 0x50 || headBuf[1] !== 0x4B) {
+                                                console.error(`[Modpack] ZIP magic bytes 无效: ${headBuf.toString('hex')}`);
+                                                continue;
+                                            }
+                                            verified = true;
+                                            break;
+                                        } catch (ve) {
+                                            console.error(`[Modpack] 验证异常:`, ve.message);
+                                            continue;
+                                        }
+                                    }
+
+                                    if (!verified) {
+                                        const sFail = modDownloadSessions.get(sessionId);
+                                        if (sFail) {
+                                            sFail.status = 'failed'; sFail.progress = 100;
+                                            sFail.message = '整合包文件下载不完整或已损坏，请检查网络连接后重试';
+                                        }
+                                        try { if (fs.existsSync(destPath)) fs.unlinkSync(destPath); } catch (e) {}
+                                        return;
+                                    }
+
                                     const session = modDownloadSessions.get(sessionId);
                                     if (session) {
                                         if (session.status === 'cancelled') {
@@ -20560,17 +24746,23 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                     }
 
                                     const importResult = await importModpackFromPath(destPath, (p) => {
-                                        const s = modDownloadSessions.get(sessionId);
-                                        if (s) {
-                                            if (s.status === 'cancelled') return;
-                                            const np = 45 + Math.round(p.progress * 0.55);
-                                            s.progress = Math.max(s.progress || 0, np);
-                                            s.message = p.message || '安装中...';
-                                            s.phase = p.stage || 'install';
-                                            s.currentFile = p.currentFile || '';
-                                            if (p.files && p.files.length > 0) s.files = p.files;
-                                            if (p.stageHistory && p.stageHistory.length > 0) s.stageHistory = p.stageHistory;
-                                        }
+                                        try {
+                                            const s = modDownloadSessions.get(sessionId);
+                                            if (s) {
+                                                if (s.status === 'cancelled') return;
+                                                const np = 45 + Math.round(p.progress * 0.55);
+                                                s.progress = Math.max(s.progress || 0, np);
+                                                s.message = p.message || '安装中...';
+                                                s.phase = p.stage || 'install';
+                                                s.currentFile = p.currentFile || '';
+                                                if (p.files && p.files.length > 0) s.files = p.files;
+                                                if (p.stageHistory && p.stageHistory.length > 0) s.stageHistory = p.stageHistory;
+                                                if (!s._lastImportLog || Date.now() - s._lastImportLog >= 3000) {
+                                                    s._lastImportLog = Date.now();
+                                                    console.log(`[Modpack] 导入进度: ${p.stage} ${Math.round(p.progress)}% - ${p.message || ''}`);
+                                                }
+                                            }
+                                        } catch (_) {}
                                     }, rdType === 'modpack' ? '' : targetVersionId, abortController.signal);
 
                                     const s = modDownloadSessions.get(sessionId);
@@ -20580,6 +24772,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                     }
 
                                     if (importResult.success) {
+                                        console.log(`[Modpack] 导入完成: "${importResult.name || packName}" (${importResult.versionId || ''})${importResult.warning ? ' 警告: ' + importResult.warning : ''}`);
                                         if (s) {
                                             s.status = 'completed'; s.progress = 100;
                                             s.message = `整合包 "${importResult.name || packName}" 安装完成！`;
@@ -20706,6 +24899,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
 
                         const jsonPath = path.join(ofVersionDir, `${ofVersionId}.json`);
                         fs.writeFileSync(jsonPath, JSON.stringify(ofVersionJson, null, 2));
+                        _invalidateResolvedJsonCache(ofVersionId);
                     } else {
                         const ofLibName = `optifine:OptiFine:${ofGameVer2}_${ofType}`;
                         const ofLibPathRel = `optifine/OptiFine/${ofGameVer2}_${ofType}/OptiFine-${ofGameVer2}_${ofType}.jar`;
@@ -20723,6 +24917,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         };
                         const jsonPath = path.join(ofVersionDir, `${ofVersionId}.json`);
                         fs.writeFileSync(jsonPath, JSON.stringify(fallbackJson, null, 2));
+                        _invalidateResolvedJsonCache(ofVersionId);
                     }
 
                     try { fs.unlinkSync(ofInstallerPath); } catch (e) {}
@@ -20734,6 +24929,11 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             }
 
             case '/api/authlib-injector/info': {
+                const aiInfoServerUrl = parsedUrl.query.serverUrl || '';
+                if (aiInfoServerUrl && !aiInfoServerUrl.startsWith('https://')) {
+                    sendJSON({ success: false, error: '第三方登录服务器必须使用 HTTPS 协议' }, 400);
+                    break;
+                }
                 try {
                     const aiData = await fetchJSON('https://authlib-injector.yushi.moe/artifact/latest.json');
                     sendJSON({
@@ -20748,6 +24948,11 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             }
 
             case '/api/authlib-injector/download': {
+                const aiInfoServerUrl2 = parsedUrl.query.serverUrl || '';
+                if (aiInfoServerUrl2 && !aiInfoServerUrl2.startsWith('https://')) {
+                    sendJSON({ success: false, error: '第三方登录服务器必须使用 HTTPS 协议' }, 400);
+                    break;
+                }
                 const aiDir = path.join(DATA_DIR, 'authlib-injector');
                 if (!fs.existsSync(aiDir)) fs.mkdirSync(aiDir, { recursive: true });
                 try {
@@ -20756,65 +24961,30 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const aiPath = path.join(aiDir, `authlib-injector-${aiData2.version}.jar`);
                     if (!fs.existsSync(aiPath)) {
                         await downloadFile(aiUrl, aiPath);
+                        const fileBuffer = fs.readFileSync(aiPath);
+                        const actualHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+                        // TODO: 替换为 authlib-injector 已知版本的 SHA256 哈希值
+                        const KNOWN_HASHES = {
+                        };
+                        const expectedHash = KNOWN_HASHES[aiData2.version];
+                        if (expectedHash && actualHash !== expectedHash) {
+                            fs.unlinkSync(aiPath);
+                            sendError('authlib-injector SHA256 校验失败，文件可能被篡改');
+                            break;
+                        }
+                        if (aiData2.checksums && aiData2.checksums.sha256) {
+                            if (actualHash !== aiData2.checksums.sha256) {
+                                fs.unlinkSync(aiPath);
+                                sendError('authlib-injector 文件校验失败，请重试');
+                                break;
+                            }
+                        }
                     }
                     sendJSON({ success: true, path: aiPath, version: aiData2.version });
                 } catch (e) {
                     sendError('下载authlib-injector失败: ' + e.message);
                 }
                 break;
-            }
-
-            function yggdrasilRequest(url, body, timeoutMs = 30000, maxRedirects = 3) {
-                return new Promise((resolve, reject) => {
-                    let currentUrl = url;
-                    let redirectCount = 0;
-                    const attempt = (targetUrl) => {
-                        const parsed = new URL(targetUrl);
-                        const mod = parsed.protocol === 'https:' ? https : http;
-                        const reqBody = typeof body === 'string' ? body : JSON.stringify(body);
-                        const req = mod.request({
-                            hostname: parsed.hostname,
-                            port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-                            path: parsed.pathname + parsed.search,
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Content-Length': Buffer.byteLength(reqBody)
-                            },
-                            timeout: timeoutMs,
-                            agent: parsed.protocol === 'https:' ? SHARED_HTTPS_AGENT : undefined
-                        }, (res) => {
-                            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectCount < maxRedirects) {
-                                res.resume();
-                                redirectCount++;
-                                const next = res.headers.location.startsWith('http') ? res.headers.location : `${parsed.protocol}//${parsed.host}${res.headers.location}`;
-                                return attempt(next);
-                            }
-                            let data = '';
-                            res.on('data', chunk => data += chunk);
-                            res.on('end', () => {
-                                if (res.statusCode < 200 || res.statusCode >= 300) {
-                                    let errMsg = `认证服务器返回 HTTP ${res.statusCode}`;
-                                    try { const errBody = JSON.parse(data); errMsg = errBody.errorMessage || errBody.error || errMsg; } catch (_) {}
-                                    return reject(new Error(errMsg));
-                                }
-                                try { resolve(JSON.parse(data)); }
-                                catch (e) { reject(new Error('认证服务器返回了无效的响应')); }
-                            });
-                        });
-                        req.on('timeout', () => { req.destroy(); reject(new Error('连接认证服务器超时，请检查网络连接')); });
-                        req.on('error', (e) => {
-                            if (e.code === 'ECONNREFUSED') reject(new Error('无法连接到认证服务器，请检查服务器地址是否正确'));
-                            else if (e.code === 'ENOTFOUND') reject(new Error('无法解析认证服务器域名，请检查服务器地址'));
-                            else if (e.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || e.code === 'CERT_HAS_EXPIRED' || e.code.includes('CERT')) reject(new Error('认证服务器证书错误: ' + e.message));
-                            else if (e.code === 'ECONNRESET') reject(new Error('与认证服务器的连接被重置'));
-                            else reject(new Error('连接认证服务器失败: ' + e.message));
-                        });
-                        req.write(reqBody);
-                        req.end();
-                    };
-                    attempt(currentUrl);
-                });
             }
 
             async function ensureAuthlibInjector() {
@@ -20826,6 +24996,24 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         if (!fs.existsSync(aiDir)) fs.mkdirSync(aiDir, { recursive: true });
                         const aiPath = path.join(aiDir, `authlib-injector-${aiData.version}.jar`);
                         await downloadFile(aiData.download_url, aiPath);
+                        const fileBuffer = fs.readFileSync(aiPath);
+                        const actualHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+                        // TODO: 替换为 authlib-injector 已知版本的 SHA256 哈希值
+                        const KNOWN_HASHES = {
+                        };
+                        const expectedHash = KNOWN_HASHES[aiData.version];
+                        if (expectedHash && actualHash !== expectedHash) {
+                            fs.unlinkSync(aiPath);
+                            console.error('[Authlib] SHA256 校验失败，文件可能被篡改');
+                            return;
+                        }
+                        if (aiData.checksums && aiData.checksums.sha256) {
+                            if (actualHash !== aiData.checksums.sha256) {
+                                fs.unlinkSync(aiPath);
+                                console.error('[Authlib] 文件校验失败');
+                                return;
+                            }
+                        }
                     } catch (e) {
                         console.log('[Authlib] 下载失败:', e.message);
                     }
@@ -20835,6 +25023,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             case '/api/accounts/thirdparty-verify': {
                 const verifyUrl = parsedUrl.query.serverUrl;
                 if (!verifyUrl) { sendError('Missing serverUrl', 400); break; }
+                if (verifyUrl && !verifyUrl.startsWith('https://')) {
+                    sendJSON({ error: '出于安全考虑，仅支持 HTTPS 协议的认证服务器' });
+                    break;
+                }
                 try {
                     let apiUrl = verifyUrl.replace(/\/$/, '');
                     const info = await fetchJSON(apiUrl, 2, 10000);
@@ -20858,6 +25050,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const tlPassword = tlData.password;
                 if (!tlServerUrl || !tlUsername || !tlPassword) {
                     sendError('Missing required fields', 400); break;
+                }
+                if (tlServerUrl && !tlServerUrl.startsWith('https://')) {
+                    sendJSON({ error: '出于安全考虑，仅支持 HTTPS 协议的认证服务器' });
+                    break;
                 }
 
                 try {
@@ -20915,7 +25111,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             clientToken: authResult.clientToken,
                             selectedProfile: profile,
                             requestUser: true
-                        }, 30000);
+                        }, 300000);
                         if (refreshResult.accessToken) {
                             authResult.accessToken = refreshResult.accessToken;
                             if (refreshResult.selectedProfile) {
@@ -20984,6 +25180,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const spProfileName = spData.profileName;
                 if (!spAccessToken || !spProfileId || !spServerUrl) {
                     sendError('Missing required fields', 400); break;
+                }
+                if (spServerUrl && !spServerUrl.startsWith('https://')) {
+                    sendJSON({ error: '出于安全考虑，仅支持 HTTPS 协议的认证服务器' });
+                    break;
                 }
 
                 try {
@@ -21524,9 +25724,37 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const settings = loadSettingsCached();
                     exportParts.push(`[环境信息]`);
                     exportParts.push(`数据目录: ${DATA_DIR}`);
+                    exportParts.push(`JAVA_DIR: ${JAVA_DIR}`);
                     exportParts.push(`Java路径: ${settings.javaPath || '自动检测'}`);
+                    if (settings.javaPath && fs.existsSync(settings.javaPath)) {
+                        const _pInfo = getJavaVersionInfo(settings.javaPath);
+                        exportParts.push(`Java路径版本: ${_pInfo.version} (major=${_pInfo.major})`);
+                    }
+                    exportParts.push(`JAVA_HOME: ${process.env.JAVA_HOME || '未设置'}`);
                     exportParts.push(`最大内存: ${settings.maxMemory || 2048}MB`);
                     exportParts.push(`版本隔离: ${settings.versionIsolation ? '是' : '否'}`);
+                    exportParts.push('');
+
+                    exportParts.push(`[Java检测]`);
+                    try {
+                        const _sysJava = detectSystemJava();
+                        const _bunJava = detectBundledJava();
+                        exportParts.push(`系统Java: ${_sysJava.length}个`);
+                        _sysJava.forEach(j => exportParts.push(`  - ${j.path} (版本=${j.version}, major=${j.majorVersion}, 来源=${j.source})`));
+                        exportParts.push(`内置Java: ${_bunJava.length}个`);
+                        _bunJava.forEach(j => exportParts.push(`  - ${j.path} (版本=${j.version}, major=${j.majorVersion}, 来源=${j.source})`));
+                        if (fs.existsSync(JAVA_DIR)) {
+                            const _javaDirs = fs.readdirSync(JAVA_DIR, { withFileTypes: true }).filter(d => d.isDirectory());
+                            exportParts.push(`JAVA_DIR内容: ${_javaDirs.map(d => d.name).join(', ')}`);
+                        }
+                        const _mcRuntime = path.join(MINECRAFT_DIR, 'runtime');
+                        if (fs.existsSync(_mcRuntime)) {
+                            const _rtDirs = fs.readdirSync(_mcRuntime, { withFileTypes: true }).filter(d => d.isDirectory());
+                            exportParts.push(`.minecraft/runtime内容: ${_rtDirs.map(d => d.name).join(', ')}`);
+                        }
+                    } catch (e) {
+                        exportParts.push(`Java检测异常: ${e.message}`);
+                    }
                     exportParts.push('');
 
                     if (lastGameExitAnalysis) {
@@ -21691,7 +25919,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const settings = loadSettingsCached();
                     const accounts = loadAccounts();
                     const account = accounts.find(a => a.id === settings.selectedAccount) || accounts[0] || { username: 'Player', type: 'offline' };
-                    const args = buildLaunchArguments(versionJson, settings, account);
+                    const { args } = buildLaunchArguments(versionJson, settings, account);
                     sendJSON({ args, javaPath: settings.javaPath || 'auto-detect' });
                 } catch (e) {
                     sendError('预览失败: ' + e.message);
@@ -21727,6 +25955,8 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     
                     const sessionId = `java-${Date.now()}`;
                     const sessionFile = path.join(DATA_DIR, `java-download-${sessionId}.json`);
+                    const abortController = new AbortController();
+                    javaDownloadAbortControllers.set(sessionId, abortController);
                     
                     fs.writeFileSync(sessionFile, JSON.stringify({
                         status: 'starting',
@@ -21735,7 +25965,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         startTime: Date.now()
                     }));
                     
-                    downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorIndex || 0);
+                    downloadJavaAsync(majorVersion, sessionId, sessionFile, mirrorIndex || 0, abortController.signal);
                     
                     sendJSON({ sessionId: sessionId });
                 } catch (e) {
@@ -21761,7 +25991,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const status = JSON.parse(fs.readFileSync(sessionFile, 'utf-8'));
                     sendJSON(status);
                     
-                    if (status.status === 'completed' || status.status === 'error') {
+                    if (status.status === 'completed' || status.status === 'error' || status.status === 'cancelled') {
                         setTimeout(() => {
                             try { fs.unlinkSync(sessionFile); } catch (e) {}
                         }, 60000);
@@ -21769,6 +25999,35 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 } catch (e) {
                     sendJSON({ status: 'error', error: e.message });
                 }
+                break;
+            }
+
+            case '/api/java/cancel': {
+                const cancelData = parsedUrl.query.sessionId
+                    ? { sessionId: parsedUrl.query.sessionId }
+                    : (req.method === 'POST' ? await readBody().catch(() => ({})) : {});
+                const cancelSid = cancelData.sessionId;
+                if (!cancelSid) {
+                    sendError('缺少sessionId参数', 400);
+                    break;
+                }
+                const controller = javaDownloadAbortControllers.get(cancelSid);
+                if (controller) {
+                    controller.abort();
+                    javaDownloadAbortControllers.delete(cancelSid);
+                }
+                const cancelFile = path.join(DATA_DIR, `java-download-${cancelSid}.json`);
+                if (fs.existsSync(cancelFile)) {
+                    try {
+                        const st = JSON.parse(fs.readFileSync(cancelFile, 'utf-8'));
+                        if (st.status !== 'completed' && st.status !== 'error' && st.status !== 'cancelled') {
+                            st.status = 'cancelled';
+                            st.message = '下载已取消';
+                            fs.writeFileSync(cancelFile, JSON.stringify(st));
+                        }
+                    } catch (e) {}
+                }
+                sendJSON({ success: true, message: '已取消Java下载' });
                 break;
             }
 
@@ -22191,10 +26450,11 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     let defaultPath = getVersionSubDir(reqVid, 'mods');
                     if (!defaultPath) {
                         const installedVersions = getInstalledVersions();
+                        const fallbackBase = settings.gameDir || DATA_DIR;
                         if (installedVersions.length > 0) {
-                            defaultPath = getVersionSubDir(installedVersions[0].id, 'mods') || path.join(MINECRAFT_DIR, 'mods');
+                            defaultPath = getVersionSubDir(installedVersions[0].id, 'mods') || path.join(fallbackBase, 'mods');
                         } else {
-                            defaultPath = path.join(MINECRAFT_DIR, 'mods');
+                            defaultPath = path.join(fallbackBase, 'mods');
                         }
                     }
                     sendJSON(defaultPath);
@@ -22242,6 +26502,80 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     sendJSON({ success: true });
                 } catch (e) {
                     sendError(e.message);
+                }
+                break;
+            }
+
+            case '/api/download-custom': {
+                const dcBody = await readBody();
+                const dcUrl = dcBody.url || '';
+                const dcSavePath = dcBody.savePath || '';
+                const dcFileName = dcBody.fileName || '';
+                if (!dcUrl) { sendError('请输入下载地址', 400); break; }
+                if (!dcSavePath) { sendError('请选择保存位置', 400); break; }
+
+                const dcFinalName = dcFileName || path.basename(new URL(dcUrl).pathname) || 'download';
+                const dcDestDir = dcSavePath;
+                if (!fs.existsSync(dcDestDir)) fs.mkdirSync(dcDestDir, { recursive: true });
+                const dcDestPath = path.join(dcDestDir, dcFinalName);
+
+                const dcSessionId = `custom-${Date.now()}`;
+                const dcAbort = new AbortController();
+                customDownloadSessions.set(dcSessionId, {
+                    status: 'downloading', progress: 0, message: '准备下载...',
+                    fileName: dcFinalName, totalSize: 0, downloaded: 0, abortController: dcAbort
+                });
+
+                sendJSON({ success: true, sessionId: dcSessionId, destPath: dcDestPath });
+
+                (async () => {
+                    try {
+                        await downloadFile(dcUrl, dcDestPath, (p) => {
+                            const s = customDownloadSessions.get(dcSessionId);
+                            if (s) {
+                                s.progress = Math.round(p.progress);
+                                s.downloaded = p.bytesDownloaded || 0;
+                                s.totalSize = p.totalBytes || 0;
+                                s.message = `下载中 ${p.progress.toFixed(0)}%`;
+                            }
+                        }, 3, dcAbort.signal);
+
+                        const s = customDownloadSessions.get(dcSessionId);
+                        if (s) {
+                            s.status = 'completed';
+                            s.progress = 100;
+                            s.message = `${dcFinalName} 下载完成！`;
+                        }
+                    } catch (e) {
+                        const s = customDownloadSessions.get(dcSessionId);
+                        if (s) {
+                            s.status = e.name === 'AbortError' ? 'cancelled' : 'failed';
+                            s.message = e.name === 'AbortError' ? '下载已取消' : `下载失败: ${e.message}`;
+                        }
+                    }
+                })();
+                break;
+            }
+
+            case '/api/download-custom/status': {
+                const dcsId = parsedUrl.query.sessionId;
+                if (!dcsId || !customDownloadSessions.has(dcsId)) { sendJSON({ status: 'not_found' }); break; }
+                const dcs = customDownloadSessions.get(dcsId);
+                sendJSON({ status: dcs.status, progress: dcs.progress, message: dcs.message, fileName: dcs.fileName, totalSize: dcs.totalSize, downloaded: dcs.downloaded });
+                break;
+            }
+
+            case '/api/download-custom/cancel': {
+                const dccBody = await readBody();
+                const dccId = dccBody.sessionId;
+                if (dccId && customDownloadSessions.has(dccId)) {
+                    const dcc = customDownloadSessions.get(dccId);
+                    if (dcc.abortController) dcc.abortController.abort();
+                    dcc.status = 'cancelled';
+                    dcc.message = '下载已取消';
+                    sendJSON({ success: true });
+                } else {
+                    sendError('Invalid session', 404);
                 }
                 break;
             }
@@ -22632,6 +26966,11 @@ function analyzeExitCode(code, versionId) {
                 } else if (content.includes('Unable to make protected final') || content.includes('does not export')) {
                     analysis.reason = 'Java版本过高导致模块访问限制';
                     analysis.suggestion = '请降级Java版本或使用Java 8/17启动';
+                } else if (content.includes('ClassCastException') && content.includes('AppClassLoader') && content.includes('URLClassLoader')) {
+                    // 参照 PCL2: 低版本 Forge/launchwrapper 与 Java 9+ 不兼容
+                    // 例如 1.7.10/1.12.2 整合包在 Java 17 下会因 launchwrapper 内部 AppClassLoader → URLClassLoader 强转失败
+                    analysis.reason = 'Java版本过高（旧版 launchwrapper 不兼容 Java 9+）';
+                    analysis.suggestion = '该整合包需要 Java 8 才能运行。\n修复: 1)启动设置→Java→选择 JRE 8  2)启动器设置中关闭"自动选择高版本 Java"';
                 } else if (content.includes('FMLCommonSetupEvent') || content.includes('fml')) {
                     analysis.reason = 'Forge/Fabric初始化失败';
                     analysis.suggestion = '请检查模组兼容性，尝试移除最近添加的模组';
@@ -22658,6 +26997,7 @@ function analyzeExitCode(code, versionId) {
 }
 
 function logStartupInfo() {
+    rotateLogs();
     validateInstalledVersions();
     console.log(`\n  VersePC - Minecraft Launcher`);
     console.log(`  ────────────────────────────────────────`);
@@ -22687,5 +27027,93 @@ function logStartupInfo() {
             console.log('  Warning: Could not fetch version manifest (will retry)');
         });
     }, 100);
+
+    setTimeout(async () => {
+        try {
+            const accounts = loadAccounts();
+            const msAccounts = accounts.filter(a => a.type === 'microsoft' && a.refreshToken);
+            if (msAccounts.length === 0) return;
+            const now = Date.now();
+            for (const account of msAccounts) {
+                const tokenExpiresAt = account.tokenExpiresAt || 0;
+                if (tokenExpiresAt && now < tokenExpiresAt - 3600000) continue;
+                try {
+                    console.log(`[Auth] Auto-refreshing token for: ${account.username || account.id}`);
+                    const tokenUrl = `https://login.microsoftonline.com/consumers/oauth2/v2.0/token`;
+                    const postData = `grant_type=refresh_token&client_id=${MS_CLIENT_ID}&refresh_token=${encodeURIComponent(account.refreshToken)}&scope=XboxLive.signin+offline_access`;
+                    const msTokenResult = await new Promise((resolve, reject) => {
+                        const req = https.request(tokenUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(postData) },
+                            timeout: 15000
+                        }, (res) => {
+                            let data = '';
+                            res.on('data', chunk => data += chunk);
+                            res.on('end', () => {
+                                if (res.statusCode >= 400) {
+                                    try { const errBody = JSON.parse(data); resolve(errBody); } catch (e) { resolve({ error: `HTTP ${res.statusCode}` }); }
+                                    return;
+                                }
+                                try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('Invalid response')); }
+                            });
+                        });
+                        req.on('error', (e) => reject(e));
+                        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+                        req.write(postData);
+                        req.end();
+                    });
+                    if (!msTokenResult.error && msTokenResult.access_token) {
+                        const msAccessToken = msTokenResult.access_token;
+                        const msRefreshTokenNew = msTokenResult.refresh_token || account.refreshToken;
+                        const xblResult = await fetchJSONWithMethod('https://user.auth.xboxlive.com/user/authenticate', 'POST', JSON.stringify({
+                            Properties: { AuthMethod: 'RPS', SiteName: 'user.auth.xboxlive.com', RpsTicket: `d=${msAccessToken}` },
+                            RelyingParty: 'http://auth.xboxlive.com', TokenType: 'JWT'
+                        }), { 'Content-Type': 'application/json' });
+                        const xblToken = xblResult.Token;
+                        const xblUhs = xblResult.DisplayClaims?.xui?.[0]?.uhs || '';
+                        const xstsResult = await fetchJSONWithMethod('https://xsts.auth.xboxlive.com/xsts/authorize', 'POST', JSON.stringify({
+                            Properties: { SandboxId: 'RETAIL', UserTokens: [xblToken] },
+                            RelyingParty: 'rp://api.minecraftservices.com/', TokenType: 'JWT'
+                        }), { 'Content-Type': 'application/json' });
+                        if (!xstsResult.XErr) {
+                            const xstsToken = xstsResult.Token;
+                            const xstsUhs = xstsResult.DisplayClaims?.xui?.[0]?.uhs || xblUhs;
+                            const mcResult = await fetchJSONWithMethod('https://api.minecraftservices.com/authentication/login_with_xbox', 'POST', JSON.stringify({
+                                identityToken: `XBL3.0 x=${xstsUhs};${xstsToken}`
+                            }), { 'Content-Type': 'application/json' });
+                            if (mcResult.access_token) {
+                                const refreshNow = new Date();
+                                account.accessToken = mcResult.access_token;
+                                account.refreshToken = msRefreshTokenNew;
+                                account.tokenExpiresAt = refreshNow.getTime() + (msTokenResult.expires_in || 3600) * 1000;
+                                account.lastRefreshed = refreshNow.toISOString();
+                                try {
+                                    const refreshProfile = await fetchJSONWithAuth('https://api.minecraftservices.com/minecraft/profile', mcResult.access_token);
+                                    if (refreshProfile && refreshProfile.skins && Array.isArray(refreshProfile.skins)) {
+                                        const activeSkin = refreshProfile.skins.find(s => s.state === 'ACTIVE');
+                                        if (activeSkin) {
+                                            account.skinUrl = activeSkin.url;
+                                            account.skinModel = activeSkin.variant === 'SLIM' ? 'slim' : 'default';
+                                        }
+                                    }
+                                    if (refreshProfile && refreshProfile.name) account.username = refreshProfile.name;
+                                } catch (pfErr) { console.warn(`[Auth] Refresh skin failed: ${pfErr.message}`); }
+                                const accts = loadAccounts();
+                                const idx = accts.findIndex(a => a.id === account.id);
+                                if (idx >= 0) { accts[idx] = { ...accts[idx], ...account }; saveAccounts(accts); }
+                                console.log(`[Auth] Token refreshed successfully for: ${account.username}`);
+                            }
+                        }
+                    } else {
+                        console.warn(`[Auth] Token refresh failed for ${account.username}: ${msTokenResult.error}`);
+                    }
+                } catch (e) {
+                    console.warn(`[Auth] Token refresh error for ${account.username}: ${e.message}`);
+                }
+            }
+        } catch (e) {
+            console.warn(`[Auth] Auto-refresh startup error: ${e.message}`);
+        }
+    }, 2000);
 }
 /* @versepc-protected: anti-ai-plagiarism-v1.0 */

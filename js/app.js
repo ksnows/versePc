@@ -79,6 +79,30 @@ const dlManager = {
         this.updateFab();
         this.render();
     },
+    async cancel(id) {
+        const task = this.tasks.get(id);
+        if (!task || task.status !== 'downloading') return;
+        task.status = 'cancelling';
+        task.message = '正在取消...';
+        this.updateDom(id);
+        try {
+            if (task.sessionId) {
+                if (task.type === 'java') {
+                    await API.cancelJavaDownload(task.sessionId);
+                } else {
+                    await fetch(`/api/install-cancel?sessionId=${encodeURIComponent(task.sessionId)}`, { method: 'POST' });
+                }
+            }
+            task.status = 'failed';
+            task.message = '已取消';
+            task.progress = Math.min(task.progress, 100);
+        } catch (e) {
+            task.status = 'failed';
+            task.message = '取消失败: ' + (e.message || e);
+        }
+        this.updateFab();
+        this.updateDom(id);
+    },
     update(id, data) {
         const task = this.tasks.get(id);
         if (!task) return;
@@ -106,6 +130,13 @@ const dlManager = {
             task.progress = smoothProgress;
             task._smoothProgress = smoothProgress;
         }
+        const now = Date.now();
+        const isTerminal = data.status === 'completed' || data.status === 'failed';
+        const lastUpdate = task._lastDomUpdate || 0;
+        if (!isTerminal && now - lastUpdate < 200) {
+            return;
+        }
+        task._lastDomUpdate = now;
         this.updateFab();
         this.updateDom(id);
     },
@@ -118,7 +149,7 @@ const dlManager = {
         const percent = taskEl.querySelector('.dl-task-percent');
         if (fill) {
             fill.style.width = t.progress + '%';
-            fill.className = 'dl-task-progress-fill' + (t.status === 'completed' ? ' dl-task-progress-fill--completed' : t.status === 'failed' ? ' dl-task-progress-fill--failed' : '');
+            fill.className = 'dl-task-progress-fill' + (t.status === 'completed' ? ' dl-task-progress-fill--completed' : (t.status === 'failed' || t.status === 'cancelling') ? ' dl-task-progress-fill--failed' : '');
         }
         if (percent) percent.textContent = Math.round(t.progress) + '%';
         const statusEl = taskEl.querySelector('.dl-task-status');
@@ -161,7 +192,7 @@ const dlManager = {
                 }
             }
         }
-        if (t.status === 'completed' || t.status === 'failed') {
+        if (t.status !== 'downloading' && t.status !== 'cancelling') {
             if (!taskEl.querySelector('.dl-task-actions')) {
                 const actionsDiv = document.createElement('div');
                 actionsDiv.className = 'dl-task-actions';
@@ -172,6 +203,15 @@ const dlManager = {
                 actionsDiv.appendChild(btn);
                 taskEl.appendChild(actionsDiv);
             }
+        } else if (t.status === 'downloading' && !taskEl.querySelector('.dl-task-actions')) {
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'dl-task-actions';
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-danger btn-sm';
+            btn.textContent = '取消';
+            btn.addEventListener('click', () => dlManager.cancel(id));
+            actionsDiv.appendChild(btn);
+            taskEl.appendChild(actionsDiv);
         }
     },
     buildFilesHtml(files) {
@@ -289,6 +329,10 @@ const dlManager = {
             let actionsHtml = '';
             if (t.status === 'completed' || t.status === 'failed') {
                 actionsHtml = '<div class="dl-task-actions"><button class="btn btn-secondary btn-sm dl-task-remove-btn" data-task-id="' + escapeHtml(id) + '">移除</button></div>';
+            } else if (t.status === 'downloading') {
+                actionsHtml = '<div class="dl-task-actions"><button class="btn btn-danger btn-sm dl-task-cancel-btn" data-task-id="' + escapeHtml(id) + '">取消</button></div>';
+            } else if (t.status === 'cancelling') {
+                actionsHtml = '<div class="dl-task-actions"><button class="btn btn-secondary btn-sm" disabled>取消中...</button></div>';
             }
             const arrowHtml = isExpandable ? '<svg class="dl-task-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>' : '';
             const headerClass = isExpandable ? 'dl-task-header dl-task-toggle-btn' : 'dl-task-header';
@@ -316,12 +360,120 @@ const dlManager = {
         list.querySelectorAll('.dl-task-remove-btn').forEach(el => {
             el.addEventListener('click', () => dlManager.remove(el.dataset.taskId));
         });
+        list.querySelectorAll('.dl-task-cancel-btn').forEach(el => {
+            el.addEventListener('click', () => dlManager.cancel(el.dataset.taskId));
+        });
     }
 };
 
 function clearCompletedDownloads() {
     const toRemove = [...dlManager.tasks.entries()].filter(([_, t]) => t.status === 'completed' || t.status === 'failed').map(([id]) => id);
     toRemove.forEach(id => dlManager.remove(id));
+}
+
+let _customDlSessionId = null;
+let _customDlPollTimer = null;
+let _customDlSavePath = '';
+
+async function browseCustomDlPath() {
+    const result = await window.electronAPI.showOpenDialog({ properties: ['openDirectory'], title: '选择保存位置' });
+    if (result && result.filePaths && result.filePaths.length > 0) {
+        document.getElementById('custom-dl-path').value = result.filePaths[0];
+        _customDlSavePath = result.filePaths[0];
+    }
+}
+
+function openCustomDlFolder() {
+    const p = _customDlSavePath || document.getElementById('custom-dl-path')?.value || '';
+    if (p) {
+        fetch('/api/open-folder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: 'custom', customPath: p }) });
+    } else {
+        showToast('请先选择保存位置', 'info');
+    }
+}
+
+async function startCustomDownload() {
+    const url = document.getElementById('custom-dl-url')?.value?.trim() || '';
+    const savePath = document.getElementById('custom-dl-path')?.value?.trim() || '';
+    const fileName = document.getElementById('custom-dl-filename')?.value?.trim() || '';
+
+    if (!url) { showToast('请输入下载地址', 'error'); return; }
+    if (!savePath) { showToast('请选择保存位置', 'error'); return; }
+
+    try { new URL(url); } catch (e) { showToast('请输入有效的下载地址', 'error'); return; }
+
+    document.getElementById('custom-dl-start-btn').style.display = 'none';
+    document.getElementById('custom-dl-cancel-btn').style.display = '';
+    document.getElementById('custom-dl-progress').style.display = '';
+    document.getElementById('custom-dl-progress-fill').style.width = '0%';
+    document.getElementById('custom-dl-progress-text').textContent = '0%';
+    document.getElementById('custom-dl-status').textContent = '正在连接...';
+
+    try {
+        const res = await fetch('/api/download-custom', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, savePath, fileName })
+        });
+        const result = await res.json();
+        if (result.error) {
+            showToast(result.error, 'error');
+            resetCustomDlUI();
+            return;
+        }
+        _customDlSessionId = result.sessionId;
+        _customDlSavePath = savePath;
+        pollCustomDlProgress();
+    } catch (e) {
+        showToast('下载请求失败: ' + e.message, 'error');
+        resetCustomDlUI();
+    }
+}
+
+function pollCustomDlProgress() {
+    if (_customDlPollTimer) clearInterval(_customDlPollTimer);
+    _customDlPollTimer = setInterval(async () => {
+        if (!_customDlSessionId) { clearInterval(_customDlPollTimer); return; }
+        try {
+            const res = await fetch(`/api/download-custom/status?sessionId=${encodeURIComponent(_customDlSessionId)}`);
+            const data = await res.json();
+            if (data.status === 'not_found') { clearInterval(_customDlPollTimer); resetCustomDlUI(); return; }
+
+            document.getElementById('custom-dl-progress-fill').style.width = data.progress + '%';
+            document.getElementById('custom-dl-progress-text').textContent = data.progress + '%';
+            document.getElementById('custom-dl-status').textContent = data.message || '';
+
+            if (data.status === 'completed') {
+                clearInterval(_customDlPollTimer);
+                showToast('下载完成！', 'success');
+                resetCustomDlUI();
+            } else if (data.status === 'failed' || data.status === 'cancelled') {
+                clearInterval(_customDlPollTimer);
+                showToast(data.message || '下载失败', 'error');
+                resetCustomDlUI();
+            }
+        } catch (e) {}
+    }, 500);
+}
+
+async function cancelCustomDownload() {
+    if (_customDlSessionId) {
+        try {
+            await fetch('/api/download-custom/cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId: _customDlSessionId })
+            });
+        } catch (e) {}
+    }
+    if (_customDlPollTimer) clearInterval(_customDlPollTimer);
+    resetCustomDlUI();
+}
+
+function resetCustomDlUI() {
+    _customDlSessionId = null;
+    document.getElementById('custom-dl-start-btn').style.display = '';
+    document.getElementById('custom-dl-cancel-btn').style.display = 'none';
 }
 let launchDepPollTimer = null;
 let modMultiSelectMode = false;
@@ -669,6 +821,17 @@ function initAllCustomSelects() {
         ]);
     }
 
+    if (!customSelectInstances['mod-filter-source']) {
+        customSelectInstances['mod-filter-source'] = new CustomSelect('mod-filter-source-wrapper', {
+            onChange: () => loadMods()
+        });
+        customSelectInstances['mod-filter-source'].setOptions([
+            { value: 'any', text: '全部' },
+            { value: 'modrinth', text: 'Modrinth' },
+            { value: 'curseforge', text: 'CurseForge' }
+        ]);
+    }
+
     if (!customSelectInstances['mod-filter-category']) {
         customSelectInstances['mod-filter-category'] = new CustomSelect('mod-filter-category-wrapper', {
             onChange: () => loadMods()
@@ -980,30 +1143,18 @@ var ANNOUNCEMENT_CONTENT = {
     title: 'VersePC 小规模测试公告',
     body: `
         <div class="announcement-section">
-            <p>感谢您参与 VersePC 小规模测试！软件目前仍处于开发阶段，可能存在未发现的 bug，欢迎反馈至：</p>
-            <p style="font-weight:bold;text-align:center;margin:12px 0;">doujie2978166201@163.com</p>
-        </div>
-
-        <div class="announcement-section">
-            <h4>主要功能</h4>
+            <h4>更新内容</h4>
             <ul>
-                <li><strong>版本管理</strong> — 原版、Forge、Fabric、NeoForge、Quilt 一键安装，支持版本隔离</li>
-                <li><strong>模组管理</strong> — 内置 Modrinth / CurseForge 搜索下载，支持批量操作与更新检测</li>
-                <li><strong>资源下载</strong> — 光影、材质、数据包、地图一站式获取</li>
-                <li><strong>账户管理</strong> — Microsoft 正版登录 + 离线模式，支持皮肤与披风</li>
-                <li><strong>Java 管理</strong> — 自动检测 + 一键下载安装 Java 8/11/17</li>
-                <li><strong>整合包</strong> — Modrinth / CurseForge 整合包浏览安装</li>
-                <li><strong>AI 分析</strong> — 崩溃日志 AI 智能分析，提供修复建议</li>
-                <li><strong>个性化</strong> — 深色/浅色主题、自定义背景</li>
+                <li>修复了 80 余个 bug</li>
+                <li>新增了许多神秘东西</li>
             </ul>
         </div>
 
         <div class="announcement-section">
-            <h4>注意事项</h4>
+            <h4>⚠️ 重要提示</h4>
             <ul>
-                <li>测试期间可能存在功能不稳定，敬请谅解</li>
-                <li>如有建议或 bug 报告，请通过邮件详细描述（附截图或日志更佳）</li>
-                <li>感谢每一位测试者的支持！</li>
+                <li style="color:#e74c3c;font-weight:bold;">当前版本请勿下载安装 Forge 或 NeoForge 版本的任何内容，否则将无法启动游戏</li>
+                <li>如需使用 Forge，可通过"添加已有文件夹"导入外部 Forge 版本</li>
             </ul>
         </div>
 
@@ -1133,7 +1284,7 @@ function generateColorAvatar(username, size) {
     return canvas.toDataURL('image/png');
 }
 
-const VERSION_TYPE_LABELS = { release: '正式版', snapshot: '快照版', old_beta: '旧测试版', old_alpha: '旧内测版', '(old)': '旧版' };
+const VERSION_TYPE_LABELS = { release: '正式版', snapshot: '快照版', special: '愚人节版', old_beta: '旧测试版', old_alpha: '旧内测版', '(old)': '旧版' };
 function getVersionTypeLabel(v) {
     const type = v.type || 'release';
     let label = VERSION_TYPE_LABELS[type] || type;
@@ -1439,7 +1590,7 @@ function setupTabs() {
             parent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
 
-            if (tab === 'release' || tab === 'snapshot' || tab === 'installed') {
+            if (tab === 'release' || tab === 'snapshot' || tab === 'special' || tab === 'old' || tab === 'installed') {
                 currentVersionTab = tab;
                 renderVersions();
             } else if (tab === 'installed-mods') {
@@ -1545,6 +1696,7 @@ function setupModBrowse() {
     bindFilter('mod-filter-version');
     bindFilter('mod-filter-category');
     bindFilter('mod-filter-sort');
+    bindFilter('mod-filter-source');
 }
 
 function setupAccountButtons() {
@@ -1791,6 +1943,8 @@ async function downloadJava(majorVersion) {
         document.getElementById('java-progress-fill').style.width = '0%';
         document.getElementById('java-progress-text').textContent = '0%';
         document.getElementById('java-progress-message').textContent = '准备下载...';
+        const cancelBtn = document.getElementById('java-cancel-btn');
+        if (cancelBtn) { cancelBtn.style.display = 'inline-block'; cancelBtn.disabled = false; cancelBtn.textContent = '取消下载'; }
         
         if (javaDownloadPollTimer) clearInterval(javaDownloadPollTimer);
         javaDownloadPollTimer = setInterval(pollJavaDownloadStatus, 500);
@@ -1798,6 +1952,24 @@ async function downloadJava(majorVersion) {
         showToast('开始下载Java ' + majorVersion, 'info');
     } catch (e) {
         showToast('启动下载失败: ' + e.message, 'error');
+    }
+}
+
+async function cancelJavaDownload() {
+    if (!javaDownloadSessionId) return;
+    const cancelBtn = document.getElementById('java-cancel-btn');
+    if (cancelBtn) { cancelBtn.disabled = true; cancelBtn.textContent = '取消中...'; }
+    try {
+        await API.cancelJavaDownload(javaDownloadSessionId);
+        if (javaDownloadPollTimer) { clearInterval(javaDownloadPollTimer); javaDownloadPollTimer = null; }
+        const msgEl = document.getElementById('java-progress-message');
+        if (msgEl) msgEl.textContent = '下载已取消';
+        if (cancelBtn) cancelBtn.style.display = 'none';
+        javaDownloadSessionId = null;
+        showToast('Java下载已取消', 'info');
+    } catch (e) {
+        showToast('取消失败: ' + e.message, 'error');
+        if (cancelBtn) { cancelBtn.disabled = false; cancelBtn.textContent = '取消下载'; }
     }
 }
 
@@ -1838,6 +2010,8 @@ async function pollJavaDownloadStatus() {
             clearInterval(javaDownloadPollTimer);
             javaDownloadPollTimer = null;
             javaDownloadSessionId = null;
+            const cancelBtn2 = document.getElementById('java-cancel-btn');
+            if (cancelBtn2) cancelBtn2.style.display = 'none';
             
             showToast('Java安装成功！环境变量已自动配置', 'success');
             
@@ -1849,8 +2023,18 @@ async function pollJavaDownloadStatus() {
             clearInterval(javaDownloadPollTimer);
             javaDownloadPollTimer = null;
             javaDownloadSessionId = null;
+            const cancelBtn3 = document.getElementById('java-cancel-btn');
+            if (cancelBtn3) cancelBtn3.style.display = 'none';
             
             showToast('安装失败: ' + (status.message || '未知错误'), 'error');
+        } else if (status.status === 'cancelled') {
+            clearInterval(javaDownloadPollTimer);
+            javaDownloadPollTimer = null;
+            javaDownloadSessionId = null;
+            const cancelBtn4 = document.getElementById('java-cancel-btn');
+            if (cancelBtn4) cancelBtn4.style.display = 'none';
+            
+            document.getElementById('java-progress-message').textContent = '下载已取消';
         }
     } catch (e) {
         console.error('轮询Java下载状态失败:', e);
@@ -1953,7 +2137,7 @@ async function loadSettings() {
 
         sv('setting-download-source').value = settings.downloadSource || 'auto';
         sv('setting-version-source').value = settings.versionSource || 'auto';
-        const maxThreads = settings.maxThreads || 32;
+        const maxThreads = settings.maxThreads || 64;
         sv('setting-max-threads').value = maxThreads;
         const threadCountEl = document.getElementById('thread-count-value');
         if (threadCountEl) threadCountEl.textContent = maxThreads;
@@ -1961,7 +2145,7 @@ async function loadSettings() {
         if (enableChunkEl) enableChunkEl.checked = settings.enableChunkDownload !== false;
         const maxChunksEl = document.getElementById('setting-max-chunks-per-file');
         if (maxChunksEl) {
-            const maxChunks = settings.maxChunksPerFile || 8;
+            const maxChunks = settings.maxChunksPerFile || 64;
             maxChunksEl.value = maxChunks;
             const chunkLabel = document.getElementById('chunk-count-value');
             if (chunkLabel) chunkLabel.textContent = maxChunks;
@@ -2025,9 +2209,9 @@ async function saveCurrentSettings() {
 
         downloadSource: g('setting-download-source')?.value || 'mojang',
         versionSource: g('setting-version-source')?.value || 'mojang',
-        maxThreads: parseInt(g('setting-max-threads')?.value || '4', 10),
+        maxThreads: parseInt(g('setting-max-threads')?.value || '64', 10),
         enableChunkDownload: g('setting-enable-chunk-download') ? g('setting-enable-chunk-download').checked : true,
-        maxChunksPerFile: g('setting-max-chunks-per-file') ? parseInt(g('setting-max-chunks-per-file').value, 10) : 8,
+        maxChunksPerFile: g('setting-max-chunks-per-file') ? parseInt(g('setting-max-chunks-per-file').value, 10) : 64,
         speedLimit: parseInt(g('setting-speed-limit')?.value || '0', 10),
         targetDir: g('setting-target-dir')?.value || '',
         sslVerify: g('setting-ssl-verify')?.checked || false,
@@ -2130,13 +2314,15 @@ async function updateVersionSelects() {
     }
 
     const versionOptions = installedVersions.map(v => {
-        let text = v.isExternal ? v.id.replace(' [外部]', '') : v.id;
-        let subtext = '';
-        if (v.isModpack) { text += ` [${v.modpackLoader || '整合包'}]`; subtext = v.modpackLoader || '整合包'; }
-        else if (v.isFabric) { text += ' [Fabric]'; subtext = 'Fabric Loader'; }
-        else if (v.isForge) { text += ' [Forge]'; subtext = 'Forge'; }
-        else if (v.isNeoForge) { text += ' [NeoForge]'; subtext = 'NeoForge'; }
-        else { subtext = 'Vanilla'; }
+        const customName = v.customName || '';
+        let baseName = v.isExternal ? v.id.replace(' [外部]', '') : v.id;
+        let text = customName || baseName;
+        let subtext = customName ? baseName : '';
+        if (v.isModpack) { text += ` [${v.modpackLoader || '整合包'}]`; subtext = (subtext ? subtext + ' · ' : '') + (v.modpackLoader || '整合包'); }
+        else if (v.isFabric) { text += ' [Fabric]'; subtext = (subtext ? subtext + ' · ' : '') + 'Fabric Loader'; }
+        else if (v.isForge) { text += ' [Forge]'; subtext = (subtext ? subtext + ' · ' : '') + 'Forge'; }
+        else if (v.isNeoForge) { text += ' [NeoForge]'; subtext = (subtext ? subtext + ' · ' : '') + 'NeoForge'; }
+        else { subtext = (subtext ? subtext + ' · ' : '') + 'Vanilla'; }
         if (v.isExternal) { subtext += ' · 外部文件夹'; }
         return { value: v.id, text: text, subtext: subtext };
     });
@@ -2145,6 +2331,13 @@ async function updateVersionSelects() {
         launchVersionCustomSelect.setOptions(versionOptions);
         if (currentVal && versionOptions.find(o => o.value === currentVal)) {
             launchVersionCustomSelect.setValue(currentVal);
+        } else if (versionOptions.length > 0) {
+            launchVersionCustomSelect.setValue(versionOptions[0].value);
+            _cachedLastLaunchVersion = versionOptions[0].value;
+            try { window.electronAPI.store.set('versepc_last_launch_version', versionOptions[0].value); } catch (_) {}
+        } else {
+            launchVersionCustomSelect.setValue('');
+            _cachedLastLaunchVersion = '';
         }
     }
 
@@ -2158,6 +2351,8 @@ async function updateVersionSelects() {
     homeVersionCustomSelect.setOptions(versionOptions);
     if (currentVal && versionOptions.find(o => o.value === currentVal)) {
         homeVersionCustomSelect.setValue(currentVal);
+    } else if (versionOptions.length > 0) {
+        homeVersionCustomSelect.setValue(versionOptions[0].value);
     }
 
     const homeList = document.getElementById('home-installed-list');
@@ -2171,7 +2366,8 @@ async function updateVersionSelects() {
             const fabricParam = v.isFabric ? '&fabric=true' : '';
             const neoforgeParam = v.isNeoForge ? '&neoforge=true' : '';
             const modpackParam = v.isModpack ? '&modpack=true' : '';
-            const iconUrl = `/api/version-icon?${iconParams}${forgeParam}${fabricParam}${neoforgeParam}${modpackParam}&_t=${versionIconsTimestamp}`;
+            const extDirParam = v.externalVersionDir ? `&extDir=${encodeURIComponent(v.externalVersionDir)}` : '';
+            const iconUrl = `/api/version-icon?${iconParams}${forgeParam}${fabricParam}${neoforgeParam}${modpackParam}${extDirParam}&_t=${versionIconsTimestamp}`;
             if (v.isModpack) { badge = v.modpackLoader || '整合包'; badgeClass = 'modpack'; }
             else if (v.isFabric) { badge = 'Fabric'; badgeClass = 'fabric'; }
             else if (v.isForge) { badge = 'Forge'; badgeClass = 'forge'; }
@@ -2201,6 +2397,8 @@ function renderVersions() {
 
     if (currentVersionTab === 'installed') {
         versions = installedVersions;
+    } else if (currentVersionTab === 'old') {
+        versions = allVersions.filter(v => v.type === 'old_beta' || v.type === 'old_alpha');
     } else {
         versions = allVersions.filter(v => v.type === currentVersionTab);
     }
@@ -2212,13 +2410,14 @@ function renderVersions() {
 
     container.innerHTML = versions.map(v => {
         const isInInstalledTab = currentVersionTab === 'installed';
-        const iconClass = v.type === 'snapshot' || v.type === 'old_alpha' || v.type === 'old_beta' ? (v.type === 'snapshot' ? 'snapshot' : 'old') : (isInInstalledTab ? 'installed' : 'release');
+        const iconClass = v.type === 'snapshot' ? 'snapshot' : v.type === 'special' ? 'special' : (v.type === 'old_beta' || v.type === 'old_alpha') ? 'old' : (isInInstalledTab ? 'installed' : 'release');
         const iconParams = `id=${encodeURIComponent(v.id)}&type=${v.type || 'release'}`;
         const forgeParam = v.isForge ? '&forge=true' : '';
         const fabricParam = v.isFabric ? '&fabric=true' : '';
         const neoforgeParam = v.isNeoForge ? '&neoforge=true' : '';
         const modpackParam = v.isModpack ? '&modpack=true' : '';
-        const iconUrl = `/api/version-icon?${iconParams}${forgeParam}${fabricParam}${neoforgeParam}${modpackParam}&_t=${versionIconsTimestamp}`;
+        const extDirParam = v.externalVersionDir ? `&extDir=${encodeURIComponent(v.externalVersionDir)}` : '';
+        const iconUrl = `/api/version-icon?${iconParams}${forgeParam}${fabricParam}${neoforgeParam}${modpackParam}${extDirParam}&_t=${versionIconsTimestamp}`;
 
         if (isInInstalledTab) {
             const externalBadgeHtml = v.isExternal ? '<span style="display:inline-block;background:rgba(255,165,0,0.15);color:#ffa500;font-size:10px;padding:1px 6px;border-radius:4px;margin-left:6px">外部文件夹</span>' : '';
@@ -2505,7 +2704,7 @@ function openVersionDetail(versionId, versionUrl, versionType) {
     const iconParams = `id=${encodeURIComponent(versionId)}&type=${versionType}`;
     document.getElementById('verdetail-icon').src = `/api/version-icon?${iconParams}&_t=${versionIconsTimestamp}`;
     document.getElementById('verdetail-name').textContent = versionId;
-    const typeLabels = { release: '正式版', snapshot: '快照版', old_beta: '旧测试版', old_alpha: '旧内测版' };
+    const typeLabels = { release: '正式版', snapshot: '快照版', special: '愚人节版', old_beta: '旧测试版', old_alpha: '旧内测版' };
     document.getElementById('verdetail-meta').textContent = typeLabels[versionType] || versionType || '正式版';
     
     const mojangRadio = document.querySelector('input[name="download-source"][value="mojang"]');
@@ -2789,33 +2988,38 @@ function getStageText(stage) {
     return map[stage] || stage || '';
 }
 
+let _shiftKeyDown = false;
+document.addEventListener('keydown', (e) => { if (e.key === 'Shift') _shiftKeyDown = true; });
+document.addEventListener('keyup', (e) => { if (e.key === 'Shift') _shiftKeyDown = false; });
+
 async function deleteVersion(versionId) {
     const isExternal = versionId.includes('[外部]');
-    if (isExternal) {
-        const confirmed = await showConfirmDialog('移除外部版本', `确定要从列表中移除 ${versionId} 吗？\n（不会删除实际游戏文件）`, '移除', '取消');
-        if (!confirmed) return;
-        try {
-            await API.deleteVersion(versionId);
-            showToast(`已移除 ${versionId}`, 'success');
-            await loadVersions(true);
-        } catch (e) { showToast('移除失败', 'error'); }
-        return;
-    }
     const ver = installedVersions.find(v => v.id === versionId);
+    const isPermanent = !isExternal && _shiftKeyDown;
     let warningParts = [];
     if (ver?.hasMods) warningParts.push('模组');
     if (ver?.hasSaves) warningParts.push('存档');
     if (ver?.hasResourcepacks) warningParts.push('资源包');
-    let confirmMsg = `确定要删除版本 ${versionId} 吗？`;
+    let confirmMsg = isExternal
+        ? `确定要从列表中移除 ${versionId} 吗？\n（不会删除实际游戏文件）`
+        : isPermanent
+            ? `确定要永久删除版本 ${versionId} 吗？\n（无法恢复）`
+            : `确定要删除版本 ${versionId} 吗？\n（将移入回收站）`;
+
     if (warningParts.length > 0) {
         confirmMsg += `\n\n⚠ 由于该版本开启了版本隔离，删除版本时该版本对应的${warningParts.join('、')}等文件也将被一并删除！`;
     }
-    const confirmed = await showConfirmDialog('版本删除确认', confirmMsg, '删除', '取消');
+
+    const confirmed = await showConfirmDialog(isExternal ? '移除外部版本' : isPermanent ? '永久删除' : '版本删除确认', confirmMsg, isExternal ? '移除' : isPermanent ? '永久删除' : '删除', '取消');
     if (!confirmed) return;
     try {
-        await API.deleteVersion(versionId);
-        showToast(`版本 ${versionId} 已删除`, 'success');
-        await loadVersions(true);
+        const r = await API.deleteVersion(versionId, isPermanent);
+        if (r.success) {
+            showToast(`版本 ${versionId} 已${isPermanent ? '永久删除' : '删除'}`, 'success');
+            await loadVersions(true);
+        } else {
+            showToast(r.error || '删除失败', 'error');
+        }
     } catch (e) { showToast('删除失败', 'error'); }
 }
 
@@ -3086,6 +3290,25 @@ function populateModVersionFilter() {
     updateCustomSelectOptions('resourcepack-filter-version', versionOptions);
 }
 
+function translateChineseModQuery(query) {
+    if (!query || !/[\u4e00-\u9fff]/.test(query)) return query;
+    const q = query.toLowerCase().trim();
+    const matches = [];
+    for (const [slug, chineseName] of Object.entries(MOD_CHINESE_NAMES)) {
+        const parts = chineseName.split(/[·（(]/);
+        const mainName = (parts[0] || '').trim();
+        if (mainName.includes(q) || chineseName.includes(q)) {
+            matches.push({ slug, weight: mainName === q ? 100 : mainName.startsWith(q) ? 50 : chineseName.includes(q) ? 20 : 0 });
+        }
+    }
+    if (matches.length > 0) {
+        matches.sort((a, b) => b.weight - a.weight);
+        const slugs = [...new Set(matches.filter(m => m.weight >= 20).map(m => m.slug))];
+        if (slugs.length > 0) return slugs.slice(0, 5).join(' ');
+    }
+    return query;
+}
+
 async function loadMods() {
     const container = document.getElementById('mod-browse-list');
     container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>加载中...</p></div>';
@@ -3097,9 +3320,12 @@ async function loadMods() {
     const version = getCustomSelectValue('mod-filter-version');
     const category = getCustomSelectValue('mod-filter-category');
     const sort = getCustomSelectValue('mod-filter-sort');
+    const sourceFilter = getCustomSelectValue('mod-filter-source') || 'any';
+
+    const translatedQuery = translateChineseModQuery(modSearchQuery);
 
     try {
-        const data = await API.searchMods(modSearchQuery, 'modrinth', loader, version, category, sort, 15, modSearchOffset);
+        const data = await API.searchMods(translatedQuery, sourceFilter, loader, version, category, sort, 15, modSearchOffset);
         const hits = data.hits || [];
         modSearchTotal = data.total || 0;
         modSearchResults = hits;
@@ -3115,7 +3341,9 @@ async function loadMods() {
                     (modMultiSelectMode ? '<div class="mod-checkbox' + (isSelected ? ' checked' : '') + '" data-mod-id="' + mod.id + '" onclick="event.stopPropagation();toggleModSelect(\'' + mod.id + '\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>' : '') +
                     '<div class="mod-icon"><img src="' + escapeHtml(mod.icon || '') + '" alt="" loading="lazy" onerror="this.style.display=\'none\';this.parentElement.classList.add(\'mod-icon--fallback\')"></div>' +
                     '<div class="mod-info">' +
-                        '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(mod.id || mod.slug, mod.title)) + '</div>' +
+                        '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(mod.id || mod.slug, mod.title)) +
+                            (sourceFilter === 'any' ? ' <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + (mod.source === 'curseforge' ? '#f1643620;color:#f16436;border:1px solid #f1643630' : '#4caf5020;color:#4caf50;border:1px solid #4caf5030') + ';font-weight:500;vertical-align:middle">' + (mod.source === 'curseforge' ? 'CF' : 'MR') + '</span>' : '') +
+                        '</div>' +
                         '<div class="mod-desc">' + escapeHtml(mod.description) + '</div>' +
                         '<div class="mod-meta">' +
                             '<span>\u2B07 ' + formatNumber(mod.downloads) + '</span>' +
@@ -4218,12 +4446,30 @@ async function loadModDependencies() {
                 resolved[pid] = {
                     id: info.id || pid,
                     title: info.title || pid,
+                    slug: info.slug || '',
                     icon: info.icon || '',
                     description: info.description || '',
                     downloads: info.downloads || 0
                 };
             }
             mdDepsResolved = resolved;
+
+            const failedIds = depIds.filter(pid => {
+                const r = resolved[pid];
+                return !r || !r.title || r.title === pid;
+            });
+            if (failedIds.length > 0) {
+                try {
+                    const retryRes = await API.resolveDepVersions(failedIds, '', '', 'modrinth');
+                    for (const pid of failedIds) {
+                        const ri = retryRes[pid];
+                        if (ri && ri.title && ri.title !== pid) {
+                            resolved[pid] = { ...resolved[pid], ...ri };
+                        }
+                    }
+                    mdDepsResolved = resolved;
+                } catch (e) { console.warn('[ModInstall] 依赖检查失败:', e.message); }
+            }
 
             const compatibleCount = requiredDeps.filter(d => versionInfo[d.projectId]?.hasCompatibleVersion).length;
             const incompatibleCount = requiredDeps.filter(d => !versionInfo[d.projectId]?.hasCompatibleVersion).length;
@@ -4419,7 +4665,7 @@ async function downloadAllDeps() {
                     gameVersion, loader, savePath, false
                 );
                 if (result.success && result.sessionId) {
-                    showModDownloadModal(result.fileName, result.sessionId, savePath);
+                    showModDownloadModal(result.fileName, result.sessionId, savePath, dep.icon || '');
                 } else {
                     showToast(`${dep.title}: ${result.error || '下载失败'}`, 'error');
                 }
@@ -4739,7 +4985,7 @@ function showModpackInstallModal(fileName, sessionId) {
                 return;
             }
             if (data.phase === 'importing') {
-                const timer = setTimeout(poll, 300);
+                const timer = setTimeout(poll, 500);
                 modDownloadPollTimers.push(timer);
                 return;
             }
@@ -4753,7 +4999,7 @@ function showModpackInstallModal(fileName, sessionId) {
                 dlManager.update(taskId, { status: 'failed', message: '会话已失效' });
                 return;
             }
-            const timer = setTimeout(poll, 300);
+            const timer = setTimeout(poll, 500);
             modDownloadPollTimers.push(timer);
         } catch (e) {
             const timer = setTimeout(poll, 800);
@@ -4768,7 +5014,7 @@ function getDownloadStageText(data) {
     if (data.status === 'completed') return '安装完成';
     if (data.status === 'failed') return data.message || '安装失败';
     if (data.status === 'cancelled') return '已取消';
-    if (data.phase === 'base' && data.message && data.message !== '正在准备基础版本...') return data.message;
+    if (data.message && data.phase !== 'importing') return data.message;
     const phaseMap = {
         'download':        '下载整合包文件...',
         'read':            '正在读取整合包...',
@@ -4852,13 +5098,13 @@ async function showModInstallConfirm(projectId, source, versionId, fileId) {
         if (versionId) {
             showToast('正在检查前置依赖...', 'info');
             try {
-                const depResult = await API.getModDependencies(versionId, source, currentGameVersion, currentLoader, md.projectId || md.slug);
+                const depResult = await API.getModDependencies(versionId, source, currentGameVersion, currentLoader, projectId);
                 const deps = depResult.dependencies || [];
                 if (deps.length > 0) {
                     showDependencyDialog(projectId, source, versionId, fileId, savePath, deps, currentGameVersion, currentLoader);
                     return;
                 }
-            } catch (e) {}
+            } catch (e) { console.warn('[ModInstall] 依赖检查失败:', e.message); }
         }
 
         proceedModInstall(projectId, source, versionId, fileId, savePath, true);
@@ -5012,7 +5258,7 @@ async function downloadDepWithNestedDeps(projectId, source, versionId, savePath,
             dlManager.add(mainDlId, mainResult.fileName || '前置模组', 'mod', '', '');
             dlManager.update(mainDlId, { progress: 0, status: 'downloading', message: '下载中...' });
             dlManager.update(taskId, { progress: 10, message: '主模组下载中...' });
-            showModDownloadModal(mainResult.fileName, mainResult.sessionId, savePath);
+            showModDownloadModal(mainResult.fileName, mainResult.sessionId, savePath, currentModDetailData?.icon || '');
         } else {
             dlManager.update(taskId, { status: 'failed', message: mainResult.error || '主模组下载失败' });
             return;
@@ -5033,7 +5279,7 @@ async function downloadDepWithNestedDeps(projectId, source, versionId, savePath,
                     const depDlId = 'dep-' + dep.projectId + '-' + Date.now();
                     dlManager.add(depDlId, dep.title || depResult.fileName, 'mod', '', dep.icon || '');
                     dlManager.update(depDlId, { progress: 0, status: 'downloading', message: '下载中...' });
-                    showModDownloadModal(depResult.fileName, depResult.sessionId, savePath);
+                    showModDownloadModal(depResult.fileName, depResult.sessionId, savePath, dep.icon || '');
                 }
             } catch (e) {
                 console.warn(`[Deps] 下载依赖 ${dep.title} 失败:`, e.message);
@@ -5123,7 +5369,7 @@ async function proceedModInstall(projectId, source, versionId, fileId, savePath,
         if (result.success) {
             mdDepsCache.clear();
             dlManager.remove(pendingTaskId);
-            showModDownloadModal(result.fileName, result.sessionId, savePath);
+            showModDownloadModal(result.fileName, result.sessionId, savePath, iconUrl);
         } else {
             dlManager.update(pendingTaskId, { status: 'failed', message: result.error || '下载失败' });
             showToast(result.error || '下载失败', 'error');
@@ -5165,7 +5411,8 @@ async function quickInstallMod(projectId, source, versionId, fileId) {
     try {
         const currentGameVersion = getCustomSelectValue('mod-filter-version') || '';
         const currentLoader = getCustomSelectValue('mod-filter-loader') || '';
-        const result = await API.downloadModVersion(versionId || '', projectId, source, fileId || '', currentGameVersion, currentLoader);
+        const savePath = await resolveModSavePath();
+        const result = await API.downloadModVersion(versionId || '', projectId, source, fileId || '', currentGameVersion, currentLoader, savePath);
         if (result.success) {
             mdDepsCache.clear();
             dlManager.remove(pendingTaskId);
@@ -5181,10 +5428,10 @@ async function quickInstallMod(projectId, source, versionId, fileId) {
     }
 }
 
-function showModDownloadModal(fileName, sessionId, savePath) {
+function showModDownloadModal(fileName, sessionId, savePath, iconUrl) {
     const taskId = 'mod-' + sessionId;
-    const iconUrl = currentModDetailData?.icon || '';
-    dlManager.add(taskId, fileName || '模组下载', 'mod', sessionId, iconUrl);
+    const resolvedIcon = iconUrl || currentModDetailData?.icon || '';
+    dlManager.add(taskId, fileName || '模组下载', 'mod', sessionId, resolvedIcon);
     navigateToPage('downloads');
 
     modDownloadPollTimers.forEach(t => clearTimeout(t));
@@ -5696,6 +5943,7 @@ function terracottaStartPolling() {
             _lastTerracottaStateIndex = stateIndex;
             idleCount = 0;
             pollInterval = 1500;
+            if (terracottaPollTimer) { clearInterval(terracottaPollTimer); terracottaPollTimer = setInterval(doPoll, pollInterval); }
 
             const profiles = result.profiles || state.profiles || [];
             const difficulty = result.difficulty || state.difficulty || null;
@@ -5710,7 +5958,8 @@ function terracottaStartPolling() {
                     document.getElementById('terracotta-conn-status').textContent = '正在启动房间...';
                     document.getElementById('terracotta-conn-status').style.color = 'var(--blue)';
                 } else if (stateType === 'host-ok') {
-                    const roomCode = state.room || result.roomCode || '';
+                    const roomObj = state.room;
+                    const roomCode = (typeof roomObj === 'object' && roomObj !== null) ? (roomObj.code || '') : (roomObj || result.roomCode || '');
                     document.getElementById('terracotta-roomcode').textContent = roomCode;
                     const profileText = profiles.length > 0 ? ` (${profiles.length}人已连接)` : '';
                     document.getElementById('terracotta-conn-status').textContent = '房间已创建 (P2P)' + profileText;
@@ -5737,7 +5986,8 @@ function terracottaStartPolling() {
                     document.getElementById('terracotta-conn-status').textContent = '正在建立P2P连接...' + diffText;
                     document.getElementById('terracotta-conn-status').style.color = 'var(--blue)';
                 } else if (stateType === 'guest-ok') {
-                    const connectUrl = state.url || result.virtualIP || '';
+                    const rawUrl = state.url || result.virtualIP || '';
+                    const connectUrl = rawUrl.startsWith('127.0.0.1') ? rawUrl : `127.0.0.1${rawUrl.includes(':') ? ':' + rawUrl.split(':').pop() : ''}`;
                     document.getElementById('terracotta-roomcode').textContent = connectUrl;
                     document.getElementById('terracotta-connect-addr').textContent = connectUrl;
                     const profileText = profiles.length > 0 ? ` (${profiles.length}人在线)` : '';
@@ -5973,7 +6223,9 @@ async function accLoadStatus() {
             if (status.state) {
                 const stateType = status.state.state;
                 if (stateType === 'host-ok' && status.state.room) {
-                    document.getElementById('acc-status-invitation').textContent = status.state.room;
+                    const roomVal = status.state.room;
+                    const roomStr = (typeof roomVal === 'object' && roomVal !== null) ? (roomVal.code || '') : roomVal;
+                    document.getElementById('acc-status-invitation').textContent = roomStr;
                     document.getElementById('acc-status-peers').textContent = '1';
                 } else if (stateType === 'guest-ok' && status.state.url) {
                     document.getElementById('acc-status-connect').textContent = status.state.url;
@@ -7061,20 +7313,41 @@ async function handleLaunch() {
 
     try {
         setLaunchStep('auth', 'running', '正在验证登录状态...');
-        await new Promise(r => setTimeout(r, 300));
+        const accountsResult = await API.getAccounts();
+        const accounts = Array.isArray(accountsResult) ? accountsResult : (accountsResult.accounts || []);
+        if (accounts.length === 0) {
+            setLaunchStep('auth', 'failed', '未登录，请先添加账户');
+            showLaunchError('未登录，请先在账户管理中添加账户后再启动游戏。');
+            window._versepc_launching = false;
+            launchBtn.disabled = false;
+            homeLaunchBtn.disabled = false;
+            return;
+        }
         setLaunchStep('auth', 'success', '登录验证通过');
 
         setLaunchStep('java-check', 'running', '正在检测 Java 环境...');
         
-        const depCheck = await API.launchCheck(versionId);
+        let externalVersionDir = null;
+        try {
+            const vInfo = await API.getVersions();
+            if (vInfo && vInfo.versions) {
+                const v = vInfo.versions.find(x => x.id === versionId);
+                if (v && v.externalDir) externalVersionDir = v.externalDir;
+            }
+        } catch (_) {}
+        const depCheck = await API.launchCheck(versionId, externalVersionDir);
         const requiredJava = (depCheck.java && depCheck.java.required) || 21;
         
         console.log(`[Launch] 版本 ${versionId} 需要Java ${requiredJava}+`);
         
         if (!depCheck.java || !depCheck.java.ok) {
             const requiredVer = requiredJava;
-            setLaunchStep('java-check', 'error', `未找到 Java ${requiredVer}+`);
-            showLaunchError(`未找到合适的Java运行环境（需要 Java ${requiredVer}+），请前往 Java 管理页面安装或配置。<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
+            const maxVer = depCheck.java.maxVersion;
+            const rangeDesc = maxVer && maxVer < 999 ? `${requiredVer}~${maxVer}` : `${requiredVer}+`;
+            const serverMsg = depCheck.java.message || '';
+            setLaunchStep('java-check', 'error', `未找到 Java ${rangeDesc}`);
+            const detailMsg = serverMsg || `未找到合适的Java运行环境（需要 Java ${rangeDesc}）`;
+            showLaunchError(`${detailMsg}<br><a href="#" onclick="event.preventDefault();closeLaunchModal();navigateToPage('java')" style="color:var(--accent);text-decoration:underline;cursor:pointer;">前往 Java 管理页面 →</a>`);
             launchBtn.disabled = false;
             homeLaunchBtn.disabled = false;
             window._versepc_launching = false;
@@ -7136,9 +7409,17 @@ async function handleLaunch() {
         if (hasMissing || assetsMissing) {
             const missingCount = (depCheck.missingFiles && depCheck.missingFiles.length) || (depCheck.assets ? depCheck.assets.missing : 0);
             setLaunchStep('download', 'running', `正在下载 ${missingCount} 个缺失文件...`);
-            const dlResult = await API.launchGame(versionId);
+            const dlResult = await API.launchGame(versionId, { checkOnly: true });
             if (dlResult.needDownload && dlResult.sessionId) {
                 pollLaunchDownload(dlResult.sessionId, versionId, requiredJava);
+                window._versepc_launching = false;
+                return;
+            }
+            if (dlResult.error) {
+                setLaunchStep('download', 'error', dlResult.error);
+                showLaunchError(dlResult.error);
+                launchBtn.disabled = false;
+                homeLaunchBtn.disabled = false;
                 window._versepc_launching = false;
                 return;
             }
@@ -7671,6 +7952,14 @@ function updateLaunchDownloadProgress(pct, msg, detailData) {
 }
 
 function cancelLaunchFlow() {
+    if (window._launchDlPollInterval) {
+        clearInterval(window._launchDlPollInterval);
+        window._launchDlPollInterval = null;
+    }
+    window._versepc_launching = false;
+    if (typeof API !== 'undefined' && API.cancelLaunch) {
+        API.cancelLaunch().catch(() => {});
+    }
     closeLaunchModal();
     const launchBtn = document.getElementById('launch-btn');
     const homeLaunchBtn = document.getElementById('home-launch-btn');
@@ -7693,6 +7982,7 @@ async function pollLaunchDownload(sessionId, versionId, requiredJava) {
         let smoothPct = 0;
         
         const pollInterval = setInterval(async () => {
+            window._launchDlPollInterval = pollInterval;
             try {
                 const dlStatus = await API.getLaunchSessionStatus(sessionId);
                 
@@ -7857,7 +8147,24 @@ function startGameLogStream() {
                     gameLogEventSource = null;
                     return;
                 }
-                if (data.line) {
+                if (data.batch && Array.isArray(data.batch)) {
+                    const frag = document.createDocumentFragment();
+                    const batchLen = data.batch.length;
+                    for (let i = 0; i < batchLen; i++) {
+                        const line = data.batch[i];
+                        let type = '';
+                        if (line.includes('ERROR') || line.includes('FATAL') || line.includes('Exception')) type = 'error';
+                        else if (line.includes('WARN')) type = 'warn';
+                        else if (line.includes('[VersePC]')) type = 'info';
+                        const el = document.createElement('div');
+                        el.className = 'console-line' + (type ? ' ' + type : '');
+                        el.textContent = line;
+                        frag.appendChild(el);
+                    }
+                    consoleOutput.appendChild(frag);
+                    while (consoleOutput.children.length > 500) consoleOutput.removeChild(consoleOutput.firstChild);
+                    consoleOutput.scrollTop = consoleOutput.scrollHeight;
+                } else if (data.line) {
                     let type = '';
                     const line = data.line;
                     if (line.includes('ERROR') || line.includes('FATAL') || line.includes('Exception')) type = 'error';
@@ -8192,6 +8499,64 @@ async function openFolder(folder) {
     catch (e) { showToast('无法打开文件夹', 'error'); }
 }
 
+let _cleanupData = null;
+async function cleanupScan() {
+    const btn = document.getElementById('cleanup-scan-btn');
+    const info = document.getElementById('cleanup-size-info');
+    const details = document.getElementById('cleanup-details');
+    const runBtn = document.getElementById('cleanup-run-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '扫描中...'; }
+    try {
+        const res = await API.cleanupScan();
+        if (!res.success) { showToast('扫描失败: ' + (res.error || ''), 'error'); return; }
+        _cleanupData = res;
+        if (info) info.textContent = `可清理 ${res.totalMB} MB`;
+        if (runBtn) runBtn.disabled = res.totalBytes <= 0;
+        if (details) {
+            const labels = { gameLogs: '游戏日志', tempFiles: '临时文件', natives: '本地库缓存', iconCache: '图标缓存', modpackCache: '整合包缓存', cache: '下载缓存' };
+            const items = Object.entries(res.details || {}).filter(([, v]) => v > 0).map(([k, v]) => {
+                const label = labels[k] || k;
+                const mb = Math.round(v / (1024 * 1024) * 100) / 100;
+                return `${label}: ${mb} MB`;
+            });
+            if (items.length === 0) {
+                details.innerHTML = '<span style="color:var(--green)">暂无可清理的垃圾文件</span>';
+                if (runBtn) runBtn.disabled = true;
+            } else {
+                details.innerHTML = items.map(s => `<div>• ${s}</div>`).join('');
+            }
+            details.style.display = 'block';
+        }
+    } catch (e) {
+        showToast('扫描失败: ' + (e.message || e), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '扫描'; }
+    }
+}
+
+async function cleanupRun() {
+    if (!_cleanupData || _cleanupData.totalBytes <= 0) { showToast('暂无可清理的内容', 'info'); return; }
+    const runBtn = document.getElementById('cleanup-run-btn');
+    const scanBtn = document.getElementById('cleanup-scan-btn');
+    const info = document.getElementById('cleanup-size-info');
+    const details = document.getElementById('cleanup-details');
+    if (runBtn) { runBtn.disabled = true; runBtn.textContent = '清理中...'; }
+    if (scanBtn) scanBtn.disabled = true;
+    try {
+        const res = await API.cleanupRun();
+        if (!res.success) { showToast('清理失败: ' + (res.error || ''), 'error'); return; }
+        showToast(res.message || '清理完成', 'success');
+        _cleanupData = null;
+        if (info) info.textContent = '已清理';
+        if (details) { details.style.display = 'none'; details.innerHTML = ''; }
+    } catch (e) {
+        showToast('清理失败: ' + (e.message || e), 'error');
+    } finally {
+        if (runBtn) { runBtn.disabled = false; runBtn.textContent = '一键清理'; }
+        if (scanBtn) scanBtn.disabled = false;
+    }
+}
+
 function applyAccentColor(color) {
     if (!color || typeof color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(color)) return;
     document.documentElement.style.setProperty('--accent', color);
@@ -8200,6 +8565,7 @@ function applyAccentColor(color) {
     const b = parseInt(color.slice(5, 7), 16);
     document.documentElement.style.setProperty('--accent-glow', `rgba(${r}, ${g}, ${b}, 0.3)`);
     document.documentElement.style.setProperty('--accent-hover', `rgba(${r}, ${g}, ${b}, 0.85)`);
+    document.documentElement.style.setProperty('--accent-rgb', `${r}, ${g}, ${b}`);
 }
 
 function switchTheme(themeName) {
@@ -8445,11 +8811,24 @@ async function importModpackFromFile() {
                         if (window.electronAPI.removeImportProgressListener) window.electronAPI.removeImportProgressListener();
                         window.electronAPI.onImportProgress(function (data) {
                             const stageText = getImportStageText(data.message);
+                            let speedText = '';
+                            if (data.files && data.files.length > 0) {
+                                let totalSpeed = 0;
+                                let activeCount = 0;
+                                for (const f of data.files) {
+                                    if (f.s === 'downloading' && f.sp > 0) { totalSpeed += f.sp; activeCount++; }
+                                }
+                                if (totalSpeed > 0) {
+                                    const speedMB = (totalSpeed / 1024 / 1024).toFixed(1);
+                                    const speedKB = (totalSpeed / 1024).toFixed(0);
+                                    speedText = totalSpeed > 1024 * 1024 ? ` | ${speedMB} MB/s` : ` | ${speedKB} KB/s`;
+                                }
+                            }
                             console.log(`[Modpack][前端] 进度: ${data.stage} ${data.progress}% ${data.message}` + (data.stageHistory ? ` (阶段数: ${data.stageHistory.length})` : ''));
                             dlManager.update(taskId, {
                                 progress: data.progress || 0,
                                 status: 'downloading',
-                                message: stageText,
+                                message: stageText + speedText,
                                 stageHistory: data.stageHistory || []
                             });
                         });
@@ -8931,10 +9310,11 @@ async function openVersionSettings(versionId, versionName) {
     currentSettingsVersionId = versionId;
     _modMgrSettingsLoaded = false;
     _exportTreeLoaded = false;
-    document.getElementById('vset-title').textContent = '版本设置 - ' + (versionName || versionId);
-    document.getElementById('export-name').value = versionName || versionId;
-
     const versionInfo = installedVersions.find(v => v.id === versionId);
+    const displayName = versionInfo?.customName || versionName || versionId;
+    document.getElementById('vset-title').textContent = '版本设置 - ' + displayName;
+    document.getElementById('export-name').value = displayName;
+
     const externalInfoEl = document.getElementById('vset-external-info');
     if (externalInfoEl) {
         if (versionInfo && versionInfo.isExternal) {
@@ -8967,6 +9347,12 @@ async function loadVersionSettingsUI() {
     try {
         const settings = await API.getVersionSettings(currentSettingsVersionId);
         currentVersionSettings = settings;
+
+        const customNameInput = document.getElementById('vset-custom-name');
+        if (customNameInput) customNameInput.value = settings.customName || '';
+
+        const descriptionInput = document.getElementById('vset-description');
+        if (descriptionInput) descriptionInput.value = settings.description || '';
 
         const isolationSelect = document.getElementById('vset-isolation');
         if (isolationSelect) {
@@ -9044,6 +9430,18 @@ function saveCurrentVersionSetting(key, value) {
             if (currentVersionSettings) currentVersionSettings[key] = value;
         }
     }).catch(e => console.error('[VersionSettings] Save error:', e));
+}
+
+function refreshVersionDisplayName() {
+    if (!currentSettingsVersionId) return;
+    const customName = document.getElementById('vset-custom-name')?.value || '';
+    const versionInfo = installedVersions.find(v => v.id === currentSettingsVersionId);
+    if (versionInfo) versionInfo.customName = customName;
+    const displayName = customName || currentSettingsVersionId;
+    document.getElementById('vset-title').textContent = '版本设置 - ' + displayName;
+    const vItem = document.querySelector(`.version-item[data-version-id="${CSS.escape(currentSettingsVersionId)}"] .version-item-name`);
+    if (vItem) vItem.textContent = displayName;
+    updateVersionSelects();
 }
 
 function closeVersionSettings() {
@@ -9390,18 +9788,34 @@ async function deleteCurrentVersion() {
         if (ver?.hasSaves) warningParts.push('存档');
         if (ver?.hasResourcepacks) warningParts.push('资源包');
         let confirmMsg = `确定要删除版本 ${currentSettingsVersionId} 吗？此操作不可撤销！`;
+
+        let chainInfo = '';
+        try {
+            const chainResult = await API.getDeleteChain(currentSettingsVersionId);
+            if (chainResult.success && chainResult.willDelete && chainResult.willDelete.length > 1) {
+                const otherVersions = chainResult.willDelete.filter(id => id !== currentSettingsVersionId);
+                if (otherVersions.length > 0) {
+                    chainInfo = `\n\n同时将删除关联版本：\n${otherVersions.map(id => '• ' + id).join('\n')}`;
+                }
+            }
+        } catch (_) {}
+
         if (warningParts.length > 0) {
             confirmMsg += `\n\n⚠ 由于该版本开启了版本隔离，删除版本时该版本对应的${warningParts.join('、')}等文件也将被一并删除！`;
         }
+        if (chainInfo) confirmMsg += chainInfo;
+
         const confirmed = await showConfirmDialog('版本删除确认', confirmMsg, '删除', '取消');
         if (!confirmed) return;
     }
+    const deletedVersionId = currentSettingsVersionId;
     try {
-        const r = await API.deleteVersion(currentSettingsVersionId);
+        const r = await API.deleteVersion(deletedVersionId);
         if (r.success) {
-            showToast('版本已删除', 'success');
+            const deletedNames = r.deleted ? r.deleted.join('、') : deletedVersionId;
+            showToast(`版本 ${deletedNames} 已删除`, 'success');
             closeVersionSettings();
-            loadVersions(true);
+            await loadVersions(true);
         } else {
             showToast(r.error || '删除失败', 'error');
         }
@@ -9634,7 +10048,7 @@ function goDownloadMods() {
 
 function toggleModInManager(fileName, disable) {
     if (!currentSettingsVersionId) return;
-    API.toggleMod(fileName, !disable).then(r => {
+    API.toggleMod(fileName, !disable, currentSettingsVersionId).then(r => {
         if (r.success) {
             showToast(disable ? '已禁用' : '已启用', 'success');
             loadInstalledModsForSettings();
@@ -9945,7 +10359,10 @@ function applyLauncherWindowSize(windowSize) {
 
 async function browseGameDir() {
     try {
-        const result = await window.electronAPI.showOpenDialog({ properties: ['openDirectory'] });
+        const current = document.getElementById('setting-game-dir').value;
+        const opts = { properties: ['openDirectory'] };
+        if (current) opts.defaultPath = current;
+        const result = await window.electronAPI.showOpenDialog(opts);
         if (result && result.filePaths && result.filePaths.length > 0) {
             document.getElementById('setting-game-dir').value = result.filePaths[0];
         }
@@ -10134,6 +10551,22 @@ async function selectWallpaper(element) {
     if (speedRow) speedRow.style.display = isPanorama ? '' : 'none';
     const mouseFollowRow = document.getElementById('panoramaMouseFollowRow');
     if (mouseFollowRow) mouseFollowRow.style.display = isPanorama ? '' : 'none';
+
+    if (isPanorama) {
+        try {
+            const savedTheme = await window.electronAPI?.store?.get('versepc_panorama_theme');
+            if (savedTheme) {
+                const themeEl = document.querySelector(`.panorama-theme-option[data-theme="${savedTheme}"]`);
+                if (themeEl) {
+                    document.querySelectorAll('.panorama-theme-option').forEach(opt => opt.classList.remove('active'));
+                    themeEl.classList.add('active');
+                    if (typeof setPanoramaTheme === 'function') setPanoramaTheme(savedTheme);
+                }
+            }
+        } catch (e) {
+            console.warn('[Settings] Failed to restore panorama theme:', e);
+        }
+    }
 
     if (isCustom) {
         const fileLabel = document.getElementById('custom-wallpaper-file-label');

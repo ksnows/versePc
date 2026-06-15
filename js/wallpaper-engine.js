@@ -61,6 +61,7 @@ class WallpaperEngine {
         this._onMouseMove = this._onMouseMove.bind(this);
         this._animate = this._animate.bind(this);
         this._savedRotationSpeed = 0.005;
+        this._savedPanoramaTheme = 'overworld';
     }
 
     start() {
@@ -152,6 +153,9 @@ class WallpaperEngine {
         this.renderer = (factories[this.currentMode] || factories.panorama)();
 
         if (this.currentMode === 'panorama') {
+            if (this.renderer && this.renderer.setTheme && this._savedPanoramaTheme) {
+                this.renderer.setTheme(this._savedPanoramaTheme);
+            }
             if (this.renderer && this.renderer.setRotationSpeed) {
                 this.renderer.setRotationSpeed(this._savedRotationSpeed);
             }
@@ -656,6 +660,7 @@ function setWallpaperFitMode(mode) {
 }
 
 function setPanoramaTheme(theme) {
+    if (wallpaperEngine) wallpaperEngine._savedPanoramaTheme = theme;
     if (wallpaperEngine && wallpaperEngine.renderer instanceof PanoramaRenderer) {
         wallpaperEngine.renderer.setTheme(theme);
     }

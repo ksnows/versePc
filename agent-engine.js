@@ -23,6 +23,9 @@
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { getPluginManager } = require('./plugin-manager');
 
 // =============================================================================
@@ -399,6 +402,68 @@ const MODELS = {
     'gemini-2.0-flash': { provider: 'google', name: 'Gemini 2.0 Flash', free: true }
 };
 
+const MODEL_PRICES = {
+    'deepseek-chat': { input: 1, output: 2 },
+    'deepseek-reasoner': { input: 4, output: 16 },
+    'deepseek-v4-pro': { input: 2, output: 8 },
+    'deepseek-v4-flash': { input: 0, output: 0 },
+    'gpt-4o': { input: 2.5, output: 10 },
+    'gpt-4o-mini': { input: 0.15, output: 0.6 },
+    'gpt-4.1': { input: 2, output: 8 },
+    'gpt-4.1-mini': { input: 0.4, output: 1.6 },
+    'gpt-4.1-nano': { input: 0.1, output: 0.4 },
+    'o3-mini': { input: 1.1, output: 4.4 },
+    'o3': { input: 10, output: 40 },
+    'claude-sonnet-4-6-20250217': { input: 3, output: 15 },
+    'claude-opus-4-7-20260416': { input: 15, output: 75 },
+    'claude-sonnet-4-5-20250929': { input: 3, output: 15 },
+    'claude-opus-4-5-20251124': { input: 15, output: 75 },
+    'claude-haiku-4-5-20251001': { input: 0.8, output: 4 },
+    'gemini-2.5-pro': { input: 1.25, output: 10 },
+    'gemini-2.5-flash': { input: 0.15, output: 0.6 },
+    'gemini-2.5-flash-lite': { input: 0.075, output: 0.3 },
+    'gemini-2.0-flash': { input: 0.1, output: 0.4 },
+    'gemini-3.5-flash': { input: 0.15, output: 0.6 },
+    'glm-5.1': { input: 5, output: 10 },
+    'glm-5': { input: 2, output: 5 },
+    'glm-5-plus': { input: 5, output: 10 },
+    'glm-5-air': { input: 1, output: 2 },
+    'glm-5-flash': { input: 0, output: 0 },
+    'glm-4.7': { input: 1, output: 2 },
+    'qwen3.6-max-preview': { input: 2, output: 6 },
+    'qwen3.6-plus': { input: 0.8, output: 2 },
+    'qwen3.6-flash': { input: 0, output: 0 },
+    'qwen3-235b-a22b': { input: 0.5, output: 2 },
+    'qwen3-30b-a3b': { input: 0, output: 0 },
+    'qwq-plus': { input: 1, output: 4 },
+    'kimi-k2.6': { input: 3, output: 12 },
+    'kimi-k2.5': { input: 2, output: 8 },
+    'moonshot-v1-128k': { input: 8, output: 8 },
+    'moonshot-v1-32k': { input: 8, output: 8 },
+    'yi-lightning': { input: 0, output: 0 },
+    'yi-large': { input: 2, output: 2 },
+    'yi-large-turbo': { input: 1, output: 1 },
+    'yi-medium': { input: 0.6, output: 0.6 },
+    'Baichuan4-Turbo': { input: 2, output: 6 },
+    'Baichuan4-Air': { input: 0.5, output: 1 },
+    'Baichuan4': { input: 2, output: 6 },
+    'Baichuan3-Turbo': { input: 1, output: 2 },
+    'MiniMax-M2.7': { input: 1, output: 4 },
+    'MiniMax-M2.5': { input: 0.5, output: 2 },
+    'MiniMax-M2.1': { input: 0.2, output: 0.8 },
+    'step-2-16k': { input: 3, output: 12 },
+    'step-1-8k': { input: 0, output: 0 },
+    'llama-3.3-70b-versatile': { input: 0, output: 0 },
+    'qwen/qwen3-32b': { input: 0, output: 0 },
+    'deepseek-r1-distill-llama-70b': { input: 0, output: 0 },
+};
+
+function estimateCost(modelId, promptTokens, completionTokens) {
+    const pricing = MODEL_PRICES[modelId];
+    if (!pricing) return 0;
+    return (promptTokens / 1000000) * pricing.input + (completionTokens / 1000000) * pricing.output;
+}
+
 function getProviderInfo(modelId) {
     const modelInfo = MODELS[modelId];
     if (!modelInfo) return { platform: PLATFORMS.zhipu, modelInfo: { name: modelId } };
@@ -572,13 +637,13 @@ const AI_TOOLS = [
         type: 'function',
         function: {
             name: 'sub_agent_dispatch',
-            description: '派遣子代理执行特定任务。file_search: 在代码库中搜索文件和目录, code_analysis: 分析代码结构和调用链, resource_download: 搜索Minecraft资源, crash_analysis: 分析崩溃日志, code_completion: 代码补全和优化, auto: 自动选择最合适的子代理类型',
+            description: '派遣子代理执行特定任务。file_search: 搜索文件和目录, code_analysis: 分析代码结构, resource_download: 搜索Minecraft资源, crash_analysis: 分析崩溃日志, code_completion: 代码补全和优化, explore: 快速探索代码库结构(只读), review: 代码审查(只读), verifier: 验证测试结果, auto: 自动选择',
             parameters: {
                 type: 'object',
                 properties: {
                     agent_type: {
                         type: 'string',
-                        enum: ['file_search', 'code_analysis', 'resource_download', 'crash_analysis', 'code_completion', 'auto'],
+                        enum: ['file_search', 'code_analysis', 'resource_download', 'crash_analysis', 'code_completion', 'explore', 'review', 'verifier', 'auto'],
                         description: '子代理类型。使用 auto 可自动根据任务描述选择最合适的子代理'
                     },
                     task: {
@@ -670,6 +735,15 @@ const TOOL_RISK = {
     mcp_tool: 'safe'
 };
 
+const PLAN_BLOCKED_TOOLS = new Set([
+    'write_file', 'edit_file', 'bash', 'execute_command',
+    'install_mod', 'toggle_mod', 'install_version', 'install_loader',
+    'launch_game', 'stop_game', 'manage_settings', 'translate_mod',
+    'install_modpack', 'agent', 'str_replace_based_edit_tool',
+    'json_edit_tool', 'download_cfpa_pack', 'start_preview',
+    'manage_processes', 'undo_edit', 'add_download_task'
+]);
+
 const TOOL_DISPLAY_NAMES = {
     bash: '执行命令', str_replace_based_edit_tool: '编辑文件',
     json_edit_tool: '编辑JSON', sequential_thinking: '分步思考',
@@ -686,6 +760,45 @@ const TOOL_DISPLAY_NAMES = {
     semantic_search: '语义搜索',
     index_stats: '索引统计'
 };
+
+const DANGEROUS_CMD_PATTERNS = [
+    { pattern: /\brm\s+(-[a-zA-Z]*[rf]|-[a-zA-Z]*f[a-zA-Z]*r)\s+[\/~*]/i, label: '递归删除根目录/主目录/通配符' },
+    { pattern: /\brm\s+(-[a-zA-Z]*[rf]|-[a-zA-Z]*f[a-zA-Z]*r)\s+\/(?:\s|$)/, label: '递归删除根目录' },
+    { pattern: /\brm\s+(-[a-zA-Z]*[rf]|-[a-zA-Z]*f[a-zA-Z]*r)\s+~(?:\s|$)/, label: '递归删除用户主目录' },
+    { pattern: /\brm\s+(-[a-zA-Z]*[rf]|-[a-zA-Z]*f[a-zA-Z]*r)\s+\*(?:\s|$)/, label: '递归删除所有文件' },
+    { pattern: /\bsudo\s+rm\b/i, label: 'sudo 提权删除' },
+    { pattern: /\bsudo\s+mv\s+\//i, label: 'sudo 移动根目录文件' },
+    { pattern: /\bchmod\s+777\s+\//i, label: '开放根目录权限' },
+    { pattern: /\bformat\s+[a-zA-Z]:/i, label: '格式化磁盘' },
+    { pattern: /\bdel\s+\/[sS]\b/, label: '递归删除文件' },
+    { pattern: /\brd\s+\/[sS]\b/, label: '递归删除目录' },
+    { pattern: /\brmdir\s+\/[sS]\b/i, label: '递归删除目录' },
+    { pattern: /\bmkfs\b/i, label: '创建文件系统（格式化）' },
+    { pattern: /\bdd\s+.*of=\/dev\//i, label: 'dd 写入设备' },
+    { pattern: />\s*\/dev\/sd[a-z]/i, label: '重定向到磁盘设备' },
+    { pattern: /\bshutdown\b|\breboot\b|\binit\s+0\b/i, label: '关机/重启系统' },
+    { pattern: /\bkill\s+-9\s+1\b|\bkillall\b/i, label: '强制终止进程' },
+    { pattern: /\breg\s+delete\b/i, label: '删除注册表项' },
+    { pattern: /\bnet\s+user\s+.*\/delete\b/i, label: '删除系统用户' },
+    { pattern: /\bTakeown\b|\bicacls\b.*\/grant\b/i, label: '修改系统文件权限' },
+];
+
+const SYSTEM_DIR_PATTERNS = [
+    /(?:^|\s)(?:rm|del|rd|rmdir|mv|move|copy|xcopy)\s+[^\s]*(?:C:\\Windows|C:\\Program\s*Files|\/etc|\/usr|\/bin|\/sbin|\/var|\/boot|\/lib|\/sys|\/proc)/i,
+    /(?:^|\s)(?:chmod|chown|chgrp)\s+[^\s]*(?:\/etc|\/usr|\/bin|\/sbin|\/var|\/boot|\/lib)/i,
+];
+
+function _isDangerousCommand(command) {
+    if (!command || typeof command !== 'string') return null;
+    const trimmed = command.trim();
+    for (const { pattern, label } of DANGEROUS_CMD_PATTERNS) {
+        if (pattern.test(trimmed)) return { dangerous: true, reason: label, pattern: pattern.source };
+    }
+    for (const pattern of SYSTEM_DIR_PATTERNS) {
+        if (pattern.test(trimmed)) return { dangerous: true, reason: '修改系统目录', pattern: pattern.source };
+    }
+    return null;
+}
 
 const AGENT_META = {
     file_search: {
@@ -836,6 +949,76 @@ const AGENT_META = {
 - 保持与项目现有代码风格一致
 - 不要引入项目中未使用的新依赖
 - 代码片段保留原始缩进格式`
+    },
+    explore: {
+        name: 'Explorer Agent', role: 'Exploration', avatar: 'robot', color: '#ff9800',
+        systemPrompt: `你是 VersePC 项目的代码探索代理。你的任务是快速扫描和映射代码库结构。
+
+## 工作流程
+1. 确认项目根目录，读取 README/配置文件了解项目结构
+2. 使用只读工具快速定位关键文件和函数
+3. 映射模块间的依赖关系
+4. 返回结构化的发现
+
+## 输出格式
+SUMMARY: 一段话总结探索结果
+CHANGES: 无（只读代理）
+EVIDENCE: 关键发现列表，每个包含 path:line-range 和描述
+RISKS: 可能遗漏的区域或需要注意的地方
+BLOCKERS: 无（如果完成）或阻碍探索的因素
+
+## 注意事项
+- 只使用只读工具（read_file, grep_search, glob_search, browse_directory, bash 中的 ls/cat/find/grep）
+- 不要修改任何文件
+- 优先搜索核心文件和入口点
+- 用中文输出结果`
+    },
+    review: {
+        name: 'Review Agent', role: 'Code Review', avatar: 'robot', color: '#e91e63',
+        systemPrompt: `你是 VersePC 项目的代码审查代理。你的任务是审查代码变更，找出问题并给出修复建议。
+
+## 工作流程
+1. 阅读目标代码文件
+2. 分析代码质量、潜在问题、安全风险
+3. 对每个发现的问题给出严重性评分（1-10）
+4. 提供具体的修复建议
+
+## 输出格式
+SUMMARY: 审查结论概要
+CHANGES: 无（只读代理）
+EVIDENCE: 问题列表，每个包含：严重性评分（1-10）、文件路径:行号、问题描述、修复建议
+RISKS: 审查中发现的潜在风险
+BLOCKERS: 无法审查的部分或缺失的信息
+
+## 注意事项
+- 只使用只读工具
+- 不要修改任何文件
+- 严重性评分标准：1-3 低、4-6 中、7-9 高、10 严重
+- 关注：代码异味、潜在 bug、安全漏洞、性能问题、可维护性
+- 用中文输出结果`
+    },
+    verifier: {
+        name: 'Verifier Agent', role: 'Verification', avatar: 'robot', color: '#009688',
+        systemPrompt: `你是 VersePC 项目的验证代理。你的任务是运行测试和检查，验证操作结果是否正确。
+
+## 工作流程
+1. 确定验证目标和验证方法
+2. 使用 bash 执行检查命令
+3. 使用 read_file 检查文件内容和格式
+4. 报告明确的 pass/fail 结果
+
+## 输出格式
+SUMMARY: 验证结果概要（通过/失败）
+CHANGES: 无（验证代理）
+EVIDENCE: 测试结果列表，每个包含：检查名称、pass/fail、输出摘要
+RISKS: 验证未覆盖的区域
+BLOCKERS: 无法执行的检查或缺失的依赖
+
+## 注意事项
+- 不要修改代码，只做验证
+- 每个检查项必须有明确的 pass 或 fail 结果
+- 失败的检查要提供详细的错误信息
+- 用中文输出结果`
     }
 };
 
@@ -954,10 +1137,217 @@ class AgentEngine {
         this._apiUrl = options.apiUrl || null;
         this._apiHeaders = options.apiHeaders || null;
         this._model = options.model || null;
+
+        this._sessionId = null;
+        this._turnId = null;
+        this._snapshots = [];
+        this._toolAuditLog = [];
+        this._sessionUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, estimatedCost: 0 };
+        this._lastRequestContext = null;
+        this._currentMode = options.currentMode || 'agent';
+        this._approvalMode = options.approvalMode || 'suggest';
+        this._subAgentModels = options.subAgentModels || {};
     }
 
     abort() {
         this._aborted = true;
+    }
+
+    _createSnapshot(filePath, toolName) {
+        try {
+            if (!filePath || typeof filePath !== 'string') return null;
+            if (!fs.existsSync(filePath)) return null;
+            const stat = fs.statSync(filePath);
+            if (stat.isDirectory()) return null;
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const snapshotDir = path.join(os.homedir(), '.versepc', 'snapshots');
+            const sessionId = this._sessionId || 'default';
+            const turnId = this._turnId || Date.now().toString(36);
+            const turnDir = path.join(snapshotDir, sessionId, turnId);
+            fs.mkdirSync(turnDir, { recursive: true });
+            const safeName = filePath.replace(/[\\\/:]/g, '_').replace(/^_+/, '');
+            const ts = Date.now();
+            const backupFileName = `${safeName}_${ts}.bak`;
+            const backupPath = path.join(turnDir, backupFileName);
+            fs.writeFileSync(backupPath, content, 'utf-8');
+            const meta = {
+                id: `${sessionId}_${turnId}_${ts}`,
+                sessionId,
+                turnId,
+                originalPath: filePath,
+                backupPath,
+                toolName,
+                timestamp: ts,
+                size: stat.size,
+                lines: content.split('\n').length,
+                restored: false
+            };
+            fs.writeFileSync(backupPath + '.json', JSON.stringify(meta, null, 2), 'utf-8');
+            this._snapshots.push(meta);
+            return meta;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _shouldSnapshot(toolName, argsStr) {
+        if (toolName === 'str_replace_based_edit_tool') {
+            try {
+                const args = typeof argsStr === 'string' ? JSON.parse(argsStr) : argsStr;
+                return ['str_replace', 'insert', 'create'].includes(args.command);
+            } catch (e) { return false; }
+        }
+        if (toolName === 'bash' || toolName === 'execute_command') {
+            try {
+                const args = typeof argsStr === 'string' ? JSON.parse(argsStr) : argsStr;
+                const cmd = args.command || '';
+                return this._detectBashFileOps(cmd).length > 0;
+            } catch (e) { return false; }
+        }
+        if (['write_file', 'edit_file', 'json_edit_tool'].includes(toolName)) return true;
+        return false;
+    }
+
+    _detectBashFileOps(command) {
+        const files = [];
+        const trimmed = command.trim();
+        const patterns = [
+            />\s*"?([^"&|;\s]+)"?/,
+            />>\s*"?([^"&|;\s]+)"?/,
+            /\b(?:copy|cp)\s+(?:"[^"]+"|\S+)\s+(?:"([^"]+)"|(\S+))/i,
+            /\b(?:move|mv)\s+(?:"[^"]+"|\S+)\s+(?:"([^"]+)"|(\S+))/i,
+            /\btee\s+(?:"([^"]+)"|(\S+))/,
+            /\bsed\s+-i[^\s]*\s+\S+\s+(?:"([^"]+)"|(\S+))/,
+        ];
+        for (const p of patterns) {
+            const m = trimmed.match(p);
+            if (m) {
+                const f = m[1] || m[2];
+                if (f && !f.startsWith('-')) files.push(f);
+            }
+        }
+        return [...new Set(files)];
+    }
+
+    _getSnapshotMeta(toolName, argsStr) {
+        if (!this._shouldSnapshot(toolName, argsStr)) return null;
+        const snapshots = [];
+        try {
+            const args = typeof argsStr === 'string' ? JSON.parse(argsStr) : argsStr;
+            if (toolName === 'str_replace_based_edit_tool') {
+                const fp = args.path;
+                if (fp) {
+                    const meta = this._createSnapshot(fp, toolName);
+                    if (meta) snapshots.push(meta);
+                }
+            } else if (toolName === 'bash' || toolName === 'execute_command') {
+                const cmd = args.command || '';
+                const files = this._detectBashFileOps(cmd);
+                for (const f of files) {
+                    const meta = this._createSnapshot(f, toolName);
+                    if (meta) snapshots.push(meta);
+                }
+            } else if (['write_file', 'edit_file', 'json_edit_tool'].includes(toolName)) {
+                const fp = args.path || args.file_path;
+                if (fp) {
+                    const meta = this._createSnapshot(fp, toolName);
+                    if (meta) snapshots.push(meta);
+                }
+            }
+        } catch (e) {}
+        return snapshots.length > 0 ? snapshots : null;
+    }
+
+    restoreSnapshot(snapshotId) {
+        try {
+            let meta = this._snapshots.find(s => s.id === snapshotId);
+            if (!meta) {
+                const snapshotDir = path.join(os.homedir(), '.versepc', 'snapshots');
+                if (fs.existsSync(snapshotDir)) {
+                    const sessionDirs = fs.readdirSync(snapshotDir);
+                    for (const sd of sessionDirs) {
+                        const sdPath = path.join(snapshotDir, sd);
+                        if (!fs.statSync(sdPath).isDirectory()) continue;
+                        const turnDirs = fs.readdirSync(sdPath);
+                        for (const td of turnDirs) {
+                            const tdPath = path.join(sdPath, td);
+                            if (!fs.statSync(tdPath).isDirectory()) continue;
+                            const jsonFiles = fs.readdirSync(tdPath).filter(f => f.endsWith('.json'));
+                            for (const jf of jsonFiles) {
+                                try {
+                                    const m = JSON.parse(fs.readFileSync(path.join(tdPath, jf), 'utf-8'));
+                                    if (m.id === snapshotId) { meta = m; break; }
+                                } catch (e) {}
+                            }
+                            if (meta) break;
+                        }
+                        if (meta) break;
+                    }
+                }
+            }
+            if (!meta) return { error: '快照不存在' };
+            if (!fs.existsSync(meta.backupPath)) return { error: '快照文件已被删除' };
+            const backupContent = fs.readFileSync(meta.backupPath, 'utf-8');
+            const dir = path.dirname(meta.originalPath);
+            try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
+            fs.writeFileSync(meta.originalPath, backupContent, 'utf-8');
+            meta.restored = true;
+            try { fs.writeFileSync(meta.backupPath + '.json', JSON.stringify(meta, null, 2), 'utf-8'); } catch (e) {}
+            const idx = this._snapshots.findIndex(s => s.id === snapshotId);
+            if (idx >= 0) this._snapshots[idx].restored = true;
+            return { success: true, restoredPath: meta.originalPath, size: backupContent.length };
+        } catch (e) {
+            return { error: `恢复失败: ${e.message}` };
+        }
+    }
+
+    listSnapshots(filePath) {
+        try {
+            const snapshotDir = path.join(os.homedir(), '.versepc', 'snapshots');
+            if (!fs.existsSync(snapshotDir)) return [];
+            const results = [];
+            const sessionDirs = fs.readdirSync(snapshotDir);
+            for (const sd of sessionDirs) {
+                const sdPath = path.join(snapshotDir, sd);
+                if (!fs.statSync(sdPath).isDirectory()) continue;
+                const turnDirs = fs.readdirSync(sdPath);
+                for (const td of turnDirs) {
+                    const tdPath = path.join(sdPath, td);
+                    if (!fs.statSync(tdPath).isDirectory()) continue;
+                    const jsonFiles = fs.readdirSync(tdPath).filter(f => f.endsWith('.json'));
+                    for (const jf of jsonFiles) {
+                        try {
+                            const meta = JSON.parse(fs.readFileSync(path.join(tdPath, jf), 'utf-8'));
+                            if (filePath && meta.originalPath !== filePath) continue;
+                            results.push(meta);
+                        } catch (e) {}
+                    }
+                }
+            }
+            results.sort((a, b) => b.timestamp - a.timestamp);
+            return results.slice(0, 50);
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _loadProjectInstructions(projectDir) {
+        if (!projectDir) return '';
+        const candidates = [
+            path.join(projectDir, '.versepc', 'AGENTS.md'),
+            path.join(projectDir, 'AGENTS.md'),
+            path.join(projectDir, '.versepc', 'VERSEPC.md'),
+            path.join(projectDir, 'VERSEPC.md')
+        ];
+        for (const p of candidates) {
+            try {
+                if (fs.existsSync(p)) {
+                    const content = fs.readFileSync(p, 'utf-8').trim();
+                    if (content) return content;
+                }
+            } catch (_) {}
+        }
+        return '';
     }
 
     _send(msg) {
@@ -971,6 +1361,30 @@ class AgentEngine {
         if (processed) {
             this.onChunk(processed);
         }
+    }
+
+    _stripSensitiveInfo(msg) {
+        if (!msg) return msg;
+        let s = String(msg);
+        s = s.replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]');
+        s = s.replace(/sk-[A-Za-z0-9]{20,}/g, 'sk-[REDACTED]');
+        s = s.replace(/sk-ant-[A-Za-z0-9\-]{20,}/g, 'sk-ant-[REDACTED]');
+        s = s.replace(/AIzaSy[A-Za-z0-9\-_]{30,}/g, 'AIzaSy[REDACTED]');
+        s = s.replace(/x-api-key[:\s]+[A-Za-z0-9\-._~+/]+=*/gi, 'x-api-key: [REDACTED]');
+        s = s.replace(/x-goog-api-key[:\s]+[A-Za-z0-9\-._~+/]+=*/gi, 'x-goog-api-key: [REDACTED]');
+        if (this._apiKey) {
+            try {
+                const escaped = this._apiKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                s = s.replace(new RegExp(escaped, 'g'), '[REDACTED]');
+            } catch (e) {}
+        }
+        return s;
+    }
+
+    _buildErrorWithContext(errorMsg) {
+        const ctx = this._lastRequestContext || {};
+        const cleanMsg = this._stripSensitiveInfo(errorMsg);
+        return `API 调用失败\nProvider: ${ctx.provider || '未知'}\nModel: ${ctx.model || '未知'}\nEndpoint: ${ctx.endpoint || '未知'}\n错误: ${cleanMsg}`;
     }
 
     _initReasoningThrottle() {
@@ -1024,7 +1438,7 @@ class AgentEngine {
     /**
      * 主入口：处理聊天
      */
-    async processChat({ apiKey, model, messages, temperature, enableTools, apiFormat: customApiFormat, baseUrl: customBaseUrl, language, maxRounds }) {
+    async processChat({ apiKey, model, messages, temperature, enableTools, apiFormat: customApiFormat, baseUrl: customBaseUrl, language, maxRounds, projectDir }) {
         this._aborted = false;
         this.output.clear();
         this._actionHistory = [];
@@ -1037,8 +1451,12 @@ class AgentEngine {
         this._planStepResults = {};
         this._thinkingSteps = [];
         this._noToolsNextRound = false;
+        this._toolAuditLog = [];
         this._apiKey = apiKey;
+        this._projectDir = projectDir || null;
         this._model = model || 'glm-5-flash';
+        this._sessionId = Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 6);
+        this._snapshots = [];
 
         if (!apiKey) {
             this._send({ type: 'say', say: SayType.ERROR, text: '未配置 API Key，请在设置中填写' });
@@ -1081,6 +1499,11 @@ class AgentEngine {
         const pluginPrompts = _getPluginPromptExtensions();
         if (pluginPrompts.length > 0) {
             conversation.push({ role: 'system', content: '## Plugin Capabilities\n\n' + pluginPrompts.join('\n\n') });
+        }
+
+        const projectInstructions = this._loadProjectInstructions(this._projectDir);
+        if (projectInstructions) {
+            conversation.push({ role: 'system', content: '## 项目指令文件\n以下是项目目录下的指令文件内容，请遵循其中的规则：\n\n' + projectInstructions });
         }
 
         conversation.push({
@@ -1220,6 +1643,7 @@ class AgentEngine {
         let toolResults = [];
 
         for (let round = 0; round < this.maxRounds; round++) {
+            this._turnId = `r${round}_${Date.now().toString(36)}`;
             if (this._aborted) break;
             await new Promise(resolve => setImmediate(resolve));
 
@@ -1310,6 +1734,12 @@ class AgentEngine {
             let res;
             const MAX_RETRIES = 2;
             let lastError = null;
+            this._lastRequestContext = {
+                provider: this._provider?.name || '未知',
+                model: this._requestModel || this._model || '未知',
+                endpoint: this._apiUrl ? this._apiUrl.origin + this._apiUrl.pathname : '未知',
+                apiFormat: apiFormat || '未知'
+            };
             for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
                 try {
                     this._send({ type: 'say', say: SayType.API_STARTED, text: '' });
@@ -1324,13 +1754,13 @@ class AgentEngine {
                         await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
                         continue;
                     }
-                    this._send({ type: 'say', say: SayType.ERROR, text: e.message });
+                    this._send({ type: 'say', say: SayType.ERROR, text: this._buildErrorWithContext(e.message) });
                     this._send({ type: 'say', say: SayType.API_FINISHED, text: '' });
                     return;
                 }
             }
             if (lastError) {
-                this._send({ type: 'say', say: SayType.ERROR, text: lastError.message });
+                this._send({ type: 'say', say: SayType.ERROR, text: this._buildErrorWithContext(lastError.message) });
                 this._send({ type: 'say', say: SayType.API_FINISHED, text: '' });
                 return;
             }
@@ -1342,6 +1772,11 @@ class AgentEngine {
                 totalUsage.prompt_tokens += roundData.usage.prompt_tokens || 0;
                 totalUsage.completion_tokens += roundData.usage.completion_tokens || 0;
                 totalUsage.total_tokens += roundData.usage.total_tokens || 0;
+                this._sessionUsage.promptTokens = totalUsage.prompt_tokens;
+                this._sessionUsage.completionTokens = totalUsage.completion_tokens;
+                this._sessionUsage.totalTokens = totalUsage.total_tokens;
+                this._sessionUsage.estimatedCost = estimateCost(this._requestModel || this._model, totalUsage.prompt_tokens, totalUsage.completion_tokens);
+                this._send({ type: 'usage', usage: { ...this._sessionUsage } });
             }
             totalUsage.rounds++;
 
@@ -1390,11 +1825,15 @@ class AgentEngine {
                 if (this._aborted) break;
 
                 for (const tr of toolResults) {
+                    let content = tr.result;
+                    if (typeof content === 'string' && content.length > 2000) {
+                        content = this._autoSummarizeToolResult(tr.name, content);
+                    }
                     conversation.push({
                         role: 'tool',
                         tool_call_id: tr.id,
                         name: tr.name,
-                        content: tr.result
+                        content
                     });
                 }
 
@@ -1457,8 +1896,10 @@ Take action now. Do not explain your limitations.`
             }
             this._send({ type: 'say', say: SayType.COMPLETION, text: finalText });
             if (totalUsage.total_tokens > 0) {
-                this._send({ type: 'usage', usage: totalUsage });
+                this._sessionUsage.estimatedCost = estimateCost(this._requestModel || this._model, this._sessionUsage.promptTokens, this._sessionUsage.completionTokens);
+                this._send({ type: 'usage', usage: { ...this._sessionUsage } });
             }
+            this._saveToolAuditLog();
             this._send({ type: 'say', say: SayType.API_FINISHED, text: '' });
             return;
         }
@@ -1466,8 +1907,10 @@ Take action now. Do not explain your limitations.`
         const finalCompletion = toolResults.find(r => r.isCompletion);
         this._send({ type: 'say', say: SayType.COMPLETION, text: finalCompletion ? finalCompletion.completionText : '' });
         if (totalUsage.total_tokens > 0) {
-            this._send({ type: 'usage', usage: totalUsage });
+            this._sessionUsage.estimatedCost = estimateCost(this._requestModel || this._model, this._sessionUsage.promptTokens, this._sessionUsage.completionTokens);
+            this._send({ type: 'usage', usage: { ...this._sessionUsage } });
         }
+        this._saveToolAuditLog();
         this._send({ type: 'say', say: SayType.API_FINISHED, text: '' });
     }
     // Context Builder
@@ -1673,6 +2116,15 @@ Take action now. Do not explain your limitations.`
                             const event = JSON.parse(data);
 
                             switch (event.type) {
+                                case 'message_start': {
+                                    if (event.message?.usage) {
+                                        const mu = event.message.usage;
+                                        if (!usage) usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+                                        usage.prompt_tokens = mu.input_tokens || 0;
+                                        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+                                    }
+                                    break;
+                                }
                                 case 'content_block_start': {
                                     const block = event.content_block;
                                     if (block.type === 'tool_use') {
@@ -1720,7 +2172,9 @@ Take action now. Do not explain your limitations.`
                                     if (event.delta?.stop_reason === 'end_turn') finishReason = 'stop';
                                     if (event.delta?.stop_reason === 'tool_use') finishReason = 'tool_calls';
                                     if (event.usage) {
-                                        usage = { prompt_tokens: event.usage.input_tokens || 0, completion_tokens: event.usage.output_tokens || 0, total_tokens: (event.usage.input_tokens || 0) + (event.usage.output_tokens || 0) };
+                                        if (!usage) usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+                                        usage.completion_tokens = event.usage.output_tokens || 0;
+                                        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
                                     }
                                     break;
                                 }
@@ -1871,12 +2325,17 @@ Take action now. Do not explain your limitations.`
             return toolCalls.map(tc => ({ id: tc.id, name: tc.name, result: JSON.stringify({ error: '工具执行未配置' }) }));
         }
 
+        const _snapshotMap = new Map();
         for (const tc of toolCalls) {
             let args = {};
             try { args = JSON.parse(tc.argsStr); } catch (e) {
                 args = { _parseError: true, _raw: tc.argsStr, _error: e.message };
             }
             this._actionHistory.push({ name: tc.name, args });
+            try {
+                const snapMeta = this._getSnapshotMeta(tc.name, tc.argsStr);
+                if (snapMeta) _snapshotMap.set(tc.id, snapMeta);
+            } catch (e) {}
         }
 
         this._send({
@@ -1884,7 +2343,8 @@ Take action now. Do not explain your limitations.`
             text: JSON.stringify(toolCalls.map(tc => ({
                 id: tc.id, name: tc.name,
                 displayName: TOOL_DISPLAY_NAMES[tc.name] || _getPluginDisplayNames()[tc.name] || tc.name,
-                args: tc.argsStr
+                args: tc.argsStr,
+                snapshot: _snapshotMap.has(tc.id)
             })))
         });
 
@@ -1936,10 +2396,38 @@ Take action now. Do not explain your limitations.`
                 return { id: tc.id, name: tc.name, result: JSON.stringify({ status: 'aborted' }) };
             }
 
-            const toolRisk = TOOL_RISK[tc.name] || 'moderate';
+            let toolRisk = TOOL_RISK[tc.name] || 'moderate';
+            if (this._currentMode === 'plan' && PLAN_BLOCKED_TOOLS.has(tc.name)) {
+                const blockResult = JSON.stringify({ status: 'blocked', reason: '当前处于 Plan 模式，此工具不可用。请切换到 Agent 或 Developer 模式以使用此工具。' });
+                this._send({
+                    type: 'say', say: SayType.TOOL_RESULT,
+                    text: JSON.stringify({ id: tc.id, name: tc.name, displayName: TOOL_DISPLAY_NAMES[tc.name] || tc.name, result: 'Plan 模式下不可用', elapsed: 0 })
+                });
+                return { id: tc.id, name: tc.name, result: blockResult };
+            }
+            if (this._approvalMode === 'auto') {
+                toolRisk = 'safe';
+            } else if (this._approvalMode === 'never' && toolRisk !== 'safe') {
+                const blockResult = JSON.stringify({ status: 'blocked', reason: '当前审批模式为 never，非只读工具被阻止' });
+                this._send({
+                    type: 'say', say: SayType.TOOL_RESULT,
+                    text: JSON.stringify({ id: tc.id, name: tc.name, displayName: TOOL_DISPLAY_NAMES[tc.name] || tc.name, result: '审批模式阻止', elapsed: 0 })
+                });
+                return { id: tc.id, name: tc.name, result: blockResult };
+            }
+            let dangerousInfo = null;
+            if (tc.name === 'bash') {
+                try {
+                    let parsed = {};
+                    try { parsed = JSON.parse(tc.argsStr); } catch (e) {}
+                    const cmd = parsed.command || '';
+                    dangerousInfo = _isDangerousCommand(cmd);
+                    if (dangerousInfo) toolRisk = 'dangerous';
+                } catch (e) {}
+            }
             if (toolRisk !== 'safe' && this.onRequestApproval) {
                 try {
-                    const approval = await this.onRequestApproval(tc.name, tc.argsStr);
+                    const approval = await this.onRequestApproval(tc.name, tc.argsStr, toolRisk, dangerousInfo);
                     if (approval && approval.approved === false) {
                         const denyResult = JSON.stringify({ status: 'denied', reason: '用户拒绝了此操作' });
                         this._send({
@@ -2126,7 +2614,8 @@ Take action now. Do not explain your limitations.`
                     text: JSON.stringify({
                         id: tc.id, name: tc.name,
                         displayName: TOOL_DISPLAY_NAMES[tc.name] || _getPluginDisplayNames()[tc.name] || tc.name,
-                        result: displayResult, elapsed
+                        result: displayResult, elapsed,
+                        snapshot: _snapshotMap.has(tc.id)
                     })
                 });
 
@@ -2203,8 +2692,35 @@ Take action now. Do not explain your limitations.`
             }
         }
 
+        const tcArgsMap = new Map(toolCalls.map(tc => [tc.id, tc.argsStr]));
+        const batchStart = Date.now();
+        for (const r of allResults) {
+            const resultStr = typeof r.result === 'string' ? r.result : JSON.stringify(r.result || '');
+            const hasError = resultStr.includes('"error"') || resultStr.includes('"status":"error"');
+            this._toolAuditLog.push({
+                timestamp: new Date().toISOString(),
+                tool: r.name,
+                input_summary: (tcArgsMap.get(r.id) || '').slice(0, 200),
+                output_summary: resultStr.slice(0, 200),
+                risk: TOOL_RISK[r.name] || 'moderate',
+                duration: 0,
+                success: !hasError && !r.denied
+            });
+        }
+
         this._send({ type: 'say', say: SayType.TOOL_END, text: '' });
         return allResults;
+    }
+
+    _saveToolAuditLog() {
+        if (this._toolAuditLog.length === 0) return;
+        try {
+            const logPath = path.join(os.homedir(), '.versepc', 'ai-tool-log.json');
+            const existing = [];
+            try { existing.push(...JSON.parse(fs.readFileSync(logPath, 'utf-8'))); } catch (_) {}
+            const merged = [...existing, ...this._toolAuditLog].slice(-1000);
+            fs.writeFileSync(logPath, JSON.stringify(merged, null, 2));
+        } catch (e) {}
     }
 
     // =========================================================================
@@ -2242,6 +2758,40 @@ Take action now. Do not explain your limitations.`
             return JSON.stringify(summary);
         } catch (e) {
             return this._compressText(result, 1500);
+        }
+    }
+
+    _autoSummarizeToolResult(toolName, result) {
+        if (!result || typeof result !== 'string' || result.length <= 2000) return result;
+
+        try {
+            const parsed = JSON.parse(result);
+            if (parsed.error) {
+                const errStr = typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error);
+                const kept = { error: errStr.slice(0, 500) };
+                if (parsed.success !== undefined) kept.success = parsed.success;
+                if (parsed.output) kept.output = typeof parsed.output === 'string' ? parsed.output.slice(0, 500) : '[output truncated]';
+                kept._note = `结果已截断，原长 ${result.length} 字符。如需查看完整结果，请使用 view_history 工具`;
+                return JSON.stringify(kept);
+            }
+            if (parsed.output && typeof parsed.output === 'string' && parsed.output.length > 1000) {
+                parsed.output = parsed.output.slice(0, 500) + '\n... [已截断，原长 ' + parsed.output.length + ' 字符]';
+                parsed._note = `结果已截断。如需查看完整结果，请使用 view_history 工具`;
+                return JSON.stringify(parsed);
+            }
+            const keys = Object.keys(parsed);
+            const summary = {};
+            for (const k of keys) {
+                const v = parsed[k];
+                if (typeof v === 'string' && v.length > 300) summary[k] = v.slice(0, 300) + '...[truncated]';
+                else if (Array.isArray(v) && v.length > 5) { summary[k] = v.slice(0, 5); summary[k + '_total'] = v.length; }
+                else summary[k] = v;
+            }
+            summary._note = `结果已截断，原长 ${result.length} 字符。如需查看完整结果，请使用 view_history 工具`;
+            return JSON.stringify(summary);
+        } catch (e) {
+            const head = result.slice(0, 500);
+            return head + '\n\n[... 结果已截断，共 ' + result.length + ' 字符。如需查看完整结果，请使用 view_history 工具]';
         }
     }
 
@@ -2576,6 +3126,18 @@ Take action now. Do not explain your limitations.`
     _selectSubAgentType(task) {
         const taskLower = task.toLowerCase();
 
+        if (/验证|verify|检查|check|测试|test|校验|validate/i.test(task)) {
+            return 'verifier';
+        }
+
+        if (/审查|review|审计|audit|代码质量|code.?quality/i.test(task)) {
+            return 'review';
+        }
+
+        if (/探索|explore|映射|map|扫描|scan|项目结构|structure/i.test(task)) {
+            return 'explore';
+        }
+
         // Code completion patterns
         if (/补全|completion|fim|ghost.?text|inline.?suggest|代码重写|rewrite|optimize.*code/i.test(task)) {
             return 'code_completion';
@@ -2614,11 +3176,16 @@ Take action now. Do not explain your limitations.`
         const meta = AGENT_META[agentType];
         if (!meta) return JSON.stringify({ status: 'error', error: `未知子代理类型: ${agentType}` });
 
+        let subModel = this._model;
+        if (this._subAgentModels && this._subAgentModels[agentType]) {
+            subModel = this._subAgentModels[agentType];
+        }
+
         this._send({ type: 'subagent_start', agentType, name: meta.name, role: meta.role, avatar: meta.avatar, color: meta.color, task });
 
         const subEngine = new AgentEngine({
             apiKey: this._apiKey,
-            model: this._model,
+            model: subModel,
             platform: this._platform,
             provider: this._provider,
             apiUrl: this._apiUrl,
@@ -2630,7 +3197,8 @@ Take action now. Do not explain your limitations.`
                 this._send({ type: 'subagent_chunk', agentType, chunk });
             },
             onRequestApproval: this.onRequestApproval,
-            executeTool: this.executeTool
+            executeTool: this.executeTool,
+            currentMode: this._currentMode
         });
 
         try {
@@ -2802,8 +3370,23 @@ Take action now. Do not explain your limitations.`
         if (availableBudget < 2000) return;
 
         const dialogMsgs = conversation.slice(systemEnd);
-        const keepCount = Math.max(6, Math.min(20, Math.floor(dialogMsgs.length * 0.3)));
-        const recentMsgs = dialogMsgs.slice(-keepCount);
+
+        const userMsgIndices = [];
+        for (let i = 0; i < dialogMsgs.length; i++) {
+            if (dialogMsgs[i].role === 'user') userMsgIndices.push(i);
+        }
+
+        const TURNS_TO_KEEP = 3;
+        const recentUserCount = Math.min(TURNS_TO_KEEP * 2, userMsgIndices.length);
+        const cutUserIdx = userMsgIndices.length > recentUserCount
+            ? userMsgIndices[userMsgIndices.length - recentUserCount]
+            : 0;
+
+        if (cutUserIdx === 0) return;
+
+        const oldMsgs = dialogMsgs.slice(0, cutUserIdx);
+        const recentMsgs = dialogMsgs.slice(cutUserIdx);
+
         let recentTokens = 0;
         for (const msg of recentMsgs) recentTokens += this._estimateMessageTokens(msg);
         while (recentTokens > availableBudget * 0.7 && recentMsgs.length > 4) {
@@ -2811,44 +3394,147 @@ Take action now. Do not explain your limitations.`
             recentTokens -= this._estimateMessageTokens(removed);
         }
 
-        const recentStartIdx = dialogMsgs.length - recentMsgs.length;
-        const middleMsgs = dialogMsgs.slice(0, recentStartIdx);
-        if (middleMsgs.length === 0) return;
+        if (oldMsgs.length === 0) return;
+
+        const turns = this._extractTurnSummaries(oldMsgs);
+
+        let summary = '[上下文压缩 - 保留最近 ' + TURNS_TO_KEEP + ' 轮对话]\n';
+        if (turns.length > 0) {
+            summary += '历史对话摘要:\n';
+            for (const t of turns) {
+                summary += '- ' + t + '\n';
+            }
+        }
 
         const usedTools = new Set();
         const errors = [];
-        const userIntents = [];
-        const keyFindings = [];
-        for (const m of middleMsgs) {
+        for (const m of oldMsgs) {
             if (m.tool_calls) m.tool_calls.forEach(tc => usedTools.add(tc.function.name));
-            if (m.role === 'user' && typeof m.content === 'string' && m.content.length < 300) {
-                userIntents.push(m.content.slice(0, 100));
-            }
             if (m.role === 'tool' && typeof m.content === 'string') {
                 try {
                     const p = JSON.parse(m.content);
                     if (p.error) errors.push(p.error.slice(0, 80));
-                    if (p.success && p.message) keyFindings.push(p.message.slice(0, 80));
                 } catch (e) {}
             }
-            if (m.role === 'assistant' && typeof m.content === 'string' && m.content.length > 50) {
-                const lines = m.content.split('\n').filter(l => l.trim() && !l.startsWith('```'));
-                if (lines.length > 0) keyFindings.push(lines[0].slice(0, 80));
+        }
+        if (usedTools.size > 0) summary += `已使用工具: ${[...usedTools].join(', ')}\n`;
+        if (errors.length > 0) summary += `历史错误: ${errors.slice(-3).join('; ')}\n`;
+        summary += `共 ${oldMsgs.length} 条消息已压缩`;
+
+        for (let i = 0; i < oldMsgs.length; i++) {
+            const msg = oldMsgs[i];
+            if (msg.role === 'tool' && typeof msg.content === 'string' && msg.content.length > 500) {
+                msg.content = msg.content.slice(0, 200) + '\n... [已压缩，原长 ' + msg.content.length + ' 字符]';
             }
         }
 
-        let summary = '[上下文压缩]\n';
-        if (userIntents.length) summary += `用户意图: ${userIntents.slice(-2).join(' | ')}\n`;
-        if (usedTools.size) summary += `已使用工具: ${[...usedTools].join(', ')}\n`;
-        if (keyFindings.length) summary += `关键发现: ${keyFindings.slice(-3).join('; ')}\n`;
-        if (errors.length) summary += `遇到错误: ${errors.slice(-2).join('; ')}\n`;
-        summary += `共 ${middleMsgs.length} 条消息已压缩`;
+        const CONTEXT_SYSTEM_PATTERN = /上下文|工作区|当前版本|游戏目录|内存|用户偏好|preference|memory|记忆|Plugin Capabilities|全栈开发能力/;
+        const preservedSystemMsgs = oldMsgs.filter(m =>
+            m.role === 'system' && typeof m.content === 'string' && CONTEXT_SYSTEM_PATTERN.test(m.content)
+        );
 
+        const firstUserMsg = oldMsgs.find(m => m.role === 'user');
         const lastUser = dialogMsgs.filter(m => m.role === 'user').pop();
-        const compressed = [...systemMsgs, { role: 'system', content: summary }];
-        if (lastUser && !recentMsgs.includes(lastUser)) compressed.push(lastUser);
+
+        const lastAssistantIdx = recentMsgs.length > 0 ? (() => {
+            for (let i = recentMsgs.length - 1; i >= 0; i--) {
+                if (recentMsgs[i].role === 'assistant') return i;
+            }
+            return -1;
+        })() : -1;
+
+        const compressed = [...systemMsgs];
+
+        for (const pm of preservedSystemMsgs) {
+            if (!compressed.some(cm => cm.role === pm.role && cm.content === pm.content)) {
+                compressed.push(pm);
+            }
+        }
+
+        compressed.push({ role: 'system', content: summary });
+
+        if (firstUserMsg && !recentMsgs.includes(firstUserMsg)) {
+            compressed.push(firstUserMsg);
+        }
+        if (lastUser && !recentMsgs.includes(lastUser) && lastUser !== firstUserMsg) {
+            compressed.push(lastUser);
+        }
+
         compressed.push(...recentMsgs);
+
+        if (lastAssistantIdx >= 0) {
+            const lastAssistant = recentMsgs[lastAssistantIdx];
+            if (lastAssistant && typeof lastAssistant.content === 'string' && lastAssistant.content.length > 0) {
+                const alreadyHasSummary = compressed.some(m =>
+                    m.role === 'system' && typeof m.content === 'string' && m.content.includes('最新回复摘要')
+                );
+                if (!alreadyHasSummary) {
+                    const assistantSummary = lastAssistant.content.slice(0, 200);
+                    compressed.splice(compressed.length - 1, 0, {
+                        role: 'system',
+                        content: `[最新回复摘要] ${assistantSummary}${lastAssistant.content.length > 200 ? '...' : ''}`
+                    });
+                }
+            }
+        }
+
         conversation.splice(0, conversation.length, ...compressed);
+    }
+
+    _extractTurnSummaries(msgs) {
+        const turns = [];
+        let currentUser = null;
+        let currentTools = [];
+        let currentResult = '';
+        let assistantText = '';
+
+        const flushTurn = () => {
+            if (!currentUser && currentTools.length === 0 && !assistantText) return;
+            const userPart = currentUser ? `用户询问了${currentUser.slice(0, 60)}` : '';
+            const toolPart = currentTools.length > 0 ? `AI执行了${currentTools.join('、')}操作` : '';
+            const resultPart = currentResult ? `结果是${currentResult.slice(0, 80)}` : '';
+            const textPart = assistantText && !toolPart ? `AI回复了${assistantText.slice(0, 60)}` : '';
+            const parts = [userPart, toolPart || textPart, resultPart].filter(Boolean);
+            if (parts.length > 0) turns.push(parts.join('，'));
+            currentUser = null;
+            currentTools = [];
+            currentResult = '';
+            assistantText = '';
+        };
+
+        for (const msg of msgs) {
+            if (msg.role === 'user') {
+                flushTurn();
+                if (typeof msg.content === 'string') {
+                    currentUser = msg.content.trim();
+                }
+            } else if (msg.role === 'assistant') {
+                if (msg.tool_calls && msg.tool_calls.length > 0) {
+                    for (const tc of msg.tool_calls) {
+                        const name = tc.function?.name || tc.name || 'unknown';
+                        if (!currentTools.includes(name)) currentTools.push(name);
+                    }
+                }
+                if (typeof msg.content === 'string' && msg.content.length > 20) {
+                    assistantText = msg.content.split('\n').filter(l => l.trim()).slice(0, 2).join(' ');
+                }
+            } else if (msg.role === 'tool') {
+                if (typeof msg.content === 'string') {
+                    try {
+                        const p = JSON.parse(msg.content);
+                        if (p.error) currentResult = `错误: ${String(p.error).slice(0, 60)}`;
+                        else if (p.success && p.message) currentResult = p.message.slice(0, 80);
+                        else if (p.status) currentResult = `状态: ${p.status}`;
+                        else if (p.output) currentResult = String(p.output).slice(0, 80);
+                    } catch (e) {
+                        if (msg.content.length > 20) currentResult = msg.content.slice(0, 80);
+                    }
+                }
+            }
+        }
+        flushTurn();
+
+        return turns.slice(-8);
     }
 }
 
