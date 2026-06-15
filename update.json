@@ -1,13 +1,13 @@
 {
   "version": "1.1.18",
-  "releaseDate": "2026-06-13T00:00:00Z",
+  "releaseDate": "2026-06-15T00:00:00Z",
   "releaseName": "VersePC v1.1.18",
-  "releaseNotes": "## 更新内容\n\n### 修复\n\n**模组下载**\n- 修复模组下载时网络连接失败的问题\n- 下载请求改为异步非阻塞，立即返回下载会话标识\n- 前端通过轮询获取下载进度，不再因等待响应而超时\n- 修复收藏夹批量下载未使用下载进度追踪的问题\n\n**资源下载**\n- 修复资源/模组按项目 ID 下载时阻塞 API 响应的问题\n- 统一所有模组下载路由为 session + 轮询模式",
+  "releaseNotes": "## 更新内容\n\n- 修复了 80 余个 bug\n- 新增了许多神秘东西\n\n## ⚠️ 重要提示\n\n- 当前版本请勿下载安装 Forge 或 NeoForge 版本的任何内容，否则将无法启动游戏\n- 如需使用 Forge，可通过"添加已有文件夹"导入外部 Forge 版本",
   "files": {
     "win-x64": {
       "url": "https://github.com/doujie081231/versePc/releases/download/v1.1.18/VersePC-Setup-1.1.18.exe",
-      "size": 162809767,
-      "sha256": "1e226d00cd2ecf903ff2e0f78c7bd7e761bb720901e60e22dd30300f430995f5"
+      "size": 162863545,
+      "sha256": "6638eea7b0734cd1c499844819bcf0464a33146061763ece617cac7091720971"
     }
   }
 }
