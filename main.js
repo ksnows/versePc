@@ -347,14 +347,16 @@ function createWindow() {
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
 
-    let bgColor = '#0a0a0a';
+    let bgColor = '#ffffff';
     try {
-        const storeData = JSON.parse(fs.readFileSync(STORE_PATH, 'utf-8'));
-        if (storeData.versepc_theme === 'light') bgColor = '#ffffff';
-        console.log('[Window] Theme:', storeData.versepc_theme, '-> bgColor:', bgColor);
+        const storeRaw = fs.readFileSync(STORE_PATH, 'utf-8');
+        const storeData = JSON.parse(storeRaw);
+        console.log('[Window] store.json theme:', storeData.versepc_theme);
+        if (storeData.versepc_theme === 'dark') bgColor = '#0a0a0a';
     } catch (e) {
-        console.log('[Window] Failed to read theme:', e.message);
+        console.log('[Window] Theme read failed:', e.message, 'STORE_PATH:', STORE_PATH);
     }
+    console.log('[Window] Final bgColor:', bgColor);
 
     const windowWidth = config.windowWidth || 1200;
     const windowHeight = config.windowHeight || 800;
