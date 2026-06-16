@@ -78,6 +78,10 @@ dev-tools-manager.js
 integrity.json
 agent-engine.js.bak
 sse-server.js.bak
+check-forge.js
+check-installer.js
+fix-logs.js
+libs.txt
 META-INF/
 forge-installer-wrapper/
 .github/*
