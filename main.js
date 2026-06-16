@@ -355,7 +355,7 @@ function createWindow() {
         minWidth: 800,
         minHeight: 450,
         frame: false,
-        show: true,
+        show: false,
         backgroundColor: '#0a0a0a',
         title: 'VersePC - Minecraft Launcher',
         icon: path.join(__dirname, 'img', 'icon.ico'),
@@ -366,6 +366,9 @@ function createWindow() {
             webviewTag: true,
             preload: path.join(__dirname, 'preload.cjs'),
         },
+    });
+    mainWindow.once('ready-to-show', () => {
+        mainWindow.show();
     });
 
     // 根据保存的配置恢复窗口状态
