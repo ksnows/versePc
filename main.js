@@ -351,7 +351,10 @@ function createWindow() {
     try {
         const storeData = JSON.parse(fs.readFileSync(STORE_PATH, 'utf-8'));
         if (storeData.versepc_theme === 'light') bgColor = '#ffffff';
-    } catch (e) {}
+        console.log('[Window] Theme:', storeData.versepc_theme, '-> bgColor:', bgColor);
+    } catch (e) {
+        console.log('[Window] Failed to read theme:', e.message);
+    }
 
     const windowWidth = config.windowWidth || 1200;
     const windowHeight = config.windowHeight || 800;
