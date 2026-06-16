@@ -3863,7 +3863,6 @@ function scanExternalFolder(folderPath) {
                     error = true;
                     errorReason = `无法识别：初始化版本 JSON 时失败 (${dir})`;
                 }
-                console.log(`[ExtCheck] ${dir}: inheritsFrom=${inheritsFrom || '无'}, error=${error}${error ? '(' + errorReason + ')' : ''}`);
                 const hasModsDir = fs.existsSync(path.join(versionDir, 'mods'));
                 const hasSavesDir = fs.existsSync(path.join(versionDir, 'saves'));
                 const hasResourcepacksDir = fs.existsSync(path.join(versionDir, 'resourcepacks'));
@@ -3912,8 +3911,6 @@ function scanExternalFolder(folderPath) {
             }
         }
     } catch (e) {}
-    const errCount = versions.filter(v => v.error).length;
-    console.log(`[ExtScan] ${folderPath}: found ${versions.length} versions, ${errCount} errors${errCount > 0 ? ': ' + versions.filter(v => v.error).map(v => `${v.id}(${v.errorReason})`).join(', ') : ''}`);
     return versions;
 }
 
@@ -7144,7 +7141,6 @@ function getInstalledVersions(forceRefresh) {
                             if (!foundInExternal) {
                                 error = true;
                                 errorReason = `需要安装 ${inheritsFrom} 作为前置版本`;
-                                console.log(`[LocalErr] ${dir}: inheritsFrom=${inheritsFrom}, localParent=${fs.existsSync(parentDir)}`);
                             }
                         }
                     }
