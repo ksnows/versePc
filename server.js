@@ -1247,6 +1247,38 @@ let terracottaStatus = { running: false, mode: null, roomCode: '', virtualIP: ''
 let terracottaPublicNodes = null;
 let terracottaPublicNodesExpiry = 0;
 
+const TERRACOTTA_LOG_FILE = path.join(DATA_DIR, 'terracotta.log');
+const _terracottaOrigConsole = { log: console.log.bind(console), warn: console.warn.bind(console), error: console.error.bind(console) };
+function _terracottaWriteLog(level, args) {
+    try {
+        const ts = new Date().toLocaleString('zh-CN', { hour12: false });
+        const msg = args.map(a => (typeof a === 'string') ? a : JSON.stringify(a)).join(' ');
+        const line = `[${ts}] [${level}] ${msg}\n`;
+        if (fs.existsSync(TERRACOTTA_LOG_FILE)) {
+            const stat = fs.statSync(TERRACOTTA_LOG_FILE);
+            if (stat.size > 512000) {
+                const content = fs.readFileSync(TERRACOTTA_LOG_FILE, 'utf8');
+                const lines = content.split('\n');
+                const keep = lines.slice(Math.floor(lines.length / 2));
+                fs.writeFileSync(TERRACOTTA_LOG_FILE, keep.join('\n'), 'utf8');
+            }
+        }
+        fs.appendFileSync(TERRACOTTA_LOG_FILE, line, 'utf8');
+    } catch (_) {}
+}
+function _terracottaIntercept(level, origFn) {
+    return function (...args) {
+        origFn.apply(console, args);
+        if (args.length > 0 && typeof args[0] === 'string' && args[0].includes('[Terracotta]')) {
+            _terracottaWriteLog(level, args);
+        }
+    };
+}
+console.log = _terracottaIntercept('INFO', _terracottaOrigConsole.log);
+console.warn = _terracottaIntercept('WARN', _terracottaOrigConsole.warn);
+console.error = _terracottaIntercept('ERROR', _terracottaOrigConsole.error);
+_terracottaWriteLog('INFO', [`[Terracotta] 日志系统初始化 | 平台: ${process.platform} | 架构: ${process.arch} | 版本: ${TERRACOTTA_VERSION} | 日志文件: ${TERRACOTTA_LOG_FILE}`]);
+
 function generateInvitationCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let segments = [];
@@ -1800,6 +1832,7 @@ async function getTerracottaState() {
         }
         return state;
     } catch (e) {
+        console.error(`[Terracotta] 获取状态失败: ${e.message}`);
         return null;
     }
 }
@@ -22868,6 +22901,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             }
 
             case '/api/easytier/status': {
+                console.log('[Terracotta] API: 查询状态');
                 const terracottaState = await getTerracottaState();
                 sendJSON({
                     success: true,
@@ -22889,11 +22923,13 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             case '/api/easytier/host': {
                 const etHostData = await readBody();
                 const etGamePort = etHostData.gamePort || 25565;
+                console.log(`[Terracotta] API: 创建主机 | 端口: ${etGamePort} | 玩家: ${etHostData.playerName || '未知'}`);
                 
                 try {
                     const result = await terracottaStartHost(etGamePort, etHostData.playerName);
                     sendJSON({ success: true, ...result });
                 } catch (e) {
+                    console.error(`[Terracotta] API: 创建主机失败: ${e.message}`);
                     sendError('创建联机失败: ' + e.message);
                 }
                 break;
@@ -22902,6 +22938,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             case '/api/easytier/guest': {
                 const etGuestData = await readBody();
                 const etGuestRoomCode = etGuestData.roomCode || etGuestData.invitationCode;
+                console.log(`[Terracotta] API: 加入房间 | 房间码: ${etGuestRoomCode || '空'} | 玩家: ${etGuestData.playerName || '未知'}`);
                 
                 if (!etGuestRoomCode) {
                     sendError('缺少房间码', 400);
@@ -22912,6 +22949,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     const result = await terracottaStartGuest(etGuestRoomCode, etGuestData.playerName);
                     sendJSON({ success: true, ...result });
                 } catch (e) {
+                    console.error(`[Terracotta] API: 加入房间失败: ${e.message}`);
                     sendError('加入联机失败: ' + e.message);
                 }
                 break;
@@ -22936,6 +22974,20 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     sendJSON({ log: typeof logData === 'string' ? logData : JSON.stringify(logData) });
                 } catch (e) {
                     sendJSON({ log: '', error: e.message });
+                }
+                break;
+            }
+
+            case '/api/easytier/filelog': {
+                try {
+                    if (fs.existsSync(TERRACOTTA_LOG_FILE)) {
+                        const logContent = fs.readFileSync(TERRACOTTA_LOG_FILE, 'utf8');
+                        sendJSON({ success: true, log: logContent });
+                    } else {
+                        sendJSON({ success: true, log: '' });
+                    }
+                } catch (e) {
+                    sendJSON({ success: false, error: e.message });
                 }
                 break;
             }
