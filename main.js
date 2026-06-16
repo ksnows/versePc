@@ -347,6 +347,12 @@ function createWindow() {
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
 
+    let bgColor = '#0a0a0a';
+    try {
+        const storeData = JSON.parse(fs.readFileSync(STORE_PATH, 'utf-8'));
+        if (storeData.versepc_theme === 'light') bgColor = '#ffffff';
+    } catch (e) {}
+
     const windowWidth = config.windowWidth || 1200;
     const windowHeight = config.windowHeight || 800;
     
@@ -362,7 +368,7 @@ function createWindow() {
         minHeight: 450,
         frame: false,
         show: false,
-        backgroundColor: '#0a0a0a',
+        backgroundColor: bgColor,
         title: 'VersePC - Minecraft Launcher',
         icon: path.join(__dirname, 'img', 'icon.ico'),
         webPreferences: {
@@ -373,9 +379,7 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.cjs'),
         },
     });
-    mainWindow.once('ready-to-show', () => {
-        mainWindow.show();
-    });
+    mainWindow.show();
 
     // 根据保存的配置恢复窗口状态
     if (config.fullscreen && !config.windowMode) {
@@ -394,12 +398,11 @@ function createWindow() {
             mainWindow.webContents.executeJavaScript('document.body.children.length').then(len => {
                 if (len === 0) {
                     console.log('[GPU] Page not rendered in 8s, flagging GPU disable for next launch');
-                    require('fs').writeFileSync(disableGpuFile, '1');
-                    mainWindow.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
-                        '<html><body style="background:#0a0a0a;color:#e5e5e5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>VersePC 启动异常</h2><p>页面加载失败，可能是显卡驱动问题</p><p style="color:#888;font-size:13px">已自动标记禁用GPU加速，请重启应用</p><p style="margin-top:20px"><button onclick="location.href=\'https://github.com/doujie081231/versePc/issues\'" style="padding:8px 16px;border:1px solid #555;border-radius:6px;background:transparent;color:#e5e5e5;cursor:pointer">报告问题</button></p></div></body></html>'
-                    ));
-                }
-            }).catch(() => {});
+                    require('fs').writeFileSync(disableGpuFile, '1')
+                    const _gpuFg = bgColor === '#ffffff' ? '#1a1a1a' : '#e5e5e5';
+                    const _gpuSub = bgColor === '#ffffff' ? '#666' : '#888';
+                    const _gpuBtn = bgColor === '#ffffff' ? '#ccc' : '#555';
+                    mainWindow.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<html><body style="background:${bgColor};color:${_gpuFg};font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h2>VersePC 启动异常</h2><p>页面加载失败，可能是显卡驱动问题</p><p style="color:${_gpuSub};font-size:13px">已自动标记禁用GPU加速，请重启应用</p><p style="margin-top:20px"><button onclick="location.href='https://github.com/doujie081231/versePc/issues'" style="padding:8px 16px;border:1px solid ${_gpuBtn};border-radius:6px;background:transparent;color:${_gpuFg};cursor:pointer">报告问题</button></div></div></body></html>`));{});
         } catch (e) {}
     }, 8000);
     mainWindow.webContents.once('did-finish-load', () => clearTimeout(_gpuWatchdog));
