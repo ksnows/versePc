@@ -4812,6 +4812,27 @@ function downloadFileSync(urlStr, destPath) {
     }
 }
 
+function downloadFileSyncAsync(urlStr, destPath) {
+    const dir = path.dirname(destPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return new Promise((resolve, reject) => {
+        const { exec } = require('child_process');
+        exec(`curl --silent --location --retry 2 --connect-timeout 10 --max-time 120 --output "${destPath}" "${urlStr}"`,
+            { timeout: 150000, windowsHide: true },
+            (error) => {
+                if (!error) return resolve();
+                if (process.platform === 'win32') {
+                    exec(`powershell -NoProfile -NonInteractive -Command "try { Invoke-WebRequest -Uri '${urlStr.replace(/'/g, "''")}' -OutFile '${destPath.replace(/'/g, "''")}' -UseBasicParsing -TimeoutSec 120 } catch { exit 1 }"`,
+                        { timeout: 150000, windowsHide: true },
+                        (err2) => err2 ? reject(err2) : resolve());
+                } else {
+                    reject(error);
+                }
+            }
+        );
+    });
+}
+
 function downloadFileToBuffer(urlStr, onProgress, timeoutMs = 15000) {
     return new Promise((resolve, reject) => {
         const protocol = urlStr.startsWith('https') ? require('https') : require('http');
@@ -12548,7 +12569,7 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
             if (!fs.existsSync(clientJarPath) || (clientInfo.sha1 && !(await verifyFileSha1(clientJarPath, clientInfo.sha1)))) {
                 report('正在下载客户端...', 25);
                 console.log(`[BaseVersion] Downloading client JAR for ${gameVersion}...`);
-                await downloadFileSync(clientInfo.url, clientJarPath, { sha1: clientInfo.sha1 });
+                await downloadFileSyncAsync(clientInfo.url, clientJarPath);
                 if (clientInfo.sha1 && !(await verifyFileSha1(clientJarPath, clientInfo.sha1))) {
                     console.warn(`[BaseVersion] Client JAR SHA1 mismatch after download!`);
                 }
