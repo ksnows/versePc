@@ -245,8 +245,10 @@ const API = {
     setVersionCategory: (versionId, category) => apiPost('/api/version/category', { versionId, category }),
 
     // === 版本安装 ===
-    installVersion: (url, versionId, loaderInfo = null, downloadSource = 'mojang') =>
-        apiPost('/api/install-start', { url, versionId, loaderInfo, downloadSource }),
+    installVersion: (url, versionId, loaderInfo = null, downloadSource = 'mojang', customName = '') =>
+        apiPost('/api/install-start', { url, versionId, loaderInfo, downloadSource, customName }),
+    checkVersionName: (name) =>
+        apiPost('/api/check-version-name', { name }),
     getInstallProgress: (sessionId, sse = false) =>
         apiGet('/api/install-progress', { sessionId, sse: sse ? 'true' : '' }),
     cancelInstall: (sessionId) => apiGet('/api/install-cancel', { sessionId }),

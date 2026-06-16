@@ -50,7 +50,11 @@ log(`Processors: ${processorsInfo.length}`);
 const versionDir = VER_DIR;
 if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true });
 
-const vjPath = path.join(versionDir, `${vj.id}.json`);
+const vjId = path.basename(versionDir);
+vj.id = vjId;
+if (!vj.inheritsFrom) vj.inheritsFrom = FORGE_VER;
+
+const vjPath = path.join(versionDir, `${vjId}.json`);
 fs.writeFileSync(vjPath, JSON.stringify(vj, null, 2));
 log(`Written version.json: ${vjPath}`);
 

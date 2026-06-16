@@ -1044,6 +1044,104 @@ body {
     background: transparent;
 }
 
+.error-versions-section {
+    margin-top: 8px;
+}
+
+.error-versions-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: var(--bg-card-glass);
+    backdrop-filter: blur(4px) saturate(1.2);
+    -webkit-backdrop-filter: blur(4px) saturate(1.2);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all var(--transition);
+    user-select: none;
+}
+
+.error-versions-header:hover {
+    border-color: #ef4444;
+    background: rgba(239, 68, 68, 0.08);
+}
+
+.error-versions-header .error-count {
+    color: #ef4444;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.error-versions-header .error-chevron {
+    margin-left: auto;
+    transition: transform 0.2s;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.error-versions-header.expanded .error-chevron {
+    transform: rotate(180deg);
+}
+
+.error-versions-list {
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+}
+
+.error-versions-list.show {
+    display: flex;
+}
+
+.error-version-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: rgba(239, 68, 68, 0.05);
+    border-radius: var(--radius);
+    border: 1px solid rgba(239, 68, 68, 0.15);
+    transition: all var(--transition);
+}
+
+.error-version-item:hover {
+    border-color: rgba(239, 68, 68, 0.3);
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.error-version-icon {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+}
+
+.error-version-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.error-version-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.error-version-reason {
+    font-size: 12px;
+    color: #ef4444;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .version-item-info {
     display: flex;
     flex-direction: column;

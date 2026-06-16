@@ -284,7 +284,7 @@ function loadFavorites() {
 
 function saveFavorites(favorites) {
     try {
-        fs.writeFileSync(FAVORITES_FILE, JSON.stringify(favorites, null, 2));
+        safeWriteFileSync(FAVORITES_FILE, JSON.stringify(favorites, null, 2));
     } catch (e) {}
 }
 
@@ -1359,7 +1359,17 @@ async function fetchTerracottaPublicNodes(forceRefresh = false) {
         clearTimeout(timeout);
         const data = await resp.json();
         if (Array.isArray(data)) {
-            terracottaPublicNodes = data.filter(n => n && n.url).map(n => n.url);
+            const isChina = Intl.DateTimeFormat().resolvedOptions().timeZone?.includes('Shanghai') ||
+                            Intl.DateTimeFormat().resolvedOptions().timeZone?.includes('Chongqing') ||
+                            Intl.DateTimeFormat().resolvedOptions().locale?.startsWith('zh');
+            terracottaPublicNodes = data
+                .filter(n => {
+                    if (!n || !n.url) return false;
+                    if (!n.region) return true;
+                    if (isChina) return n.region === 'CN';
+                    return true;
+                })
+                .map(n => n.url);
             terracottaPublicNodesExpiry = Date.now() + 3600000;
         }
     } catch (e) {
@@ -1377,7 +1387,7 @@ async function fetchTerracottaPublicNodes(forceRefresh = false) {
     return terracottaPublicNodes;
 }
 
-async function terracottaHttpGet(endpoint, params = {}) {
+async function terracottaHttpGet(endpoint, params = {}, retries = 5) {
     if (!terracottaHttpPort) throw new Error('Terracotta未启动');
     const urlObj = new URL(`http://127.0.0.1:${terracottaHttpPort}${endpoint}`);
     Object.entries(params).forEach(([key, value]) => {
@@ -1387,26 +1397,33 @@ async function terracottaHttpGet(endpoint, params = {}) {
             urlObj.searchParams.set(key, value);
         }
     });
-    return new Promise((resolve, reject) => {
-        const req = http.get(urlObj.toString(), { timeout: 30000 }, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                if (res.statusCode < 200 || res.statusCode >= 300) {
-                    reject(new Error(`Terracotta API HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
-                    return;
-                }
-                try {
-                    const parsed = JSON.parse(data);
-                    resolve(parsed);
-                } catch (e) {
-                    reject(new Error(`Terracotta API parse error: ${data.slice(0, 200)}`));
-                }
+    let lastErr;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const result = await new Promise((resolve, reject) => {
+                const req = http.get(urlObj.toString(), { timeout: 10000 }, (res) => {
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => {
+                        if (res.statusCode < 200 || res.statusCode >= 300) {
+                            reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 100)}`));
+                            return;
+                        }
+                        try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('JSON parse error')); }
+                    });
+                });
+                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+                req.on('error', reject);
             });
-        });
-        req.on('timeout', () => { req.destroy(); reject(new Error('Terracotta API timeout')); });
-        req.on('error', reject);
-    });
+            return result;
+        } catch (e) {
+            lastErr = e;
+            if (attempt < retries) {
+                await new Promise(r => setTimeout(r, Math.min(200 * Math.pow(1.5, attempt), 2000)));
+            }
+        }
+    }
+    throw new Error(`Terracotta API请求失败 (${retries + 1}次尝试): ${lastErr ? lastErr.message : 'unknown'}`);
 }
 
 function waitForTerracottaPort(filePath, timeout, processRef) {
@@ -1452,12 +1469,15 @@ function waitForTerracottaPort(filePath, timeout, processRef) {
 
 async function startTerracotta() {
     if (terracottaProcess && terracottaHttpPort) {
-        try {
-            await terracottaHttpGet('/state');
-            return terracottaHttpPort;
-        } catch (e) {
-            stopTerracotta();
+        for (let i = 0; i < 3; i++) {
+            try {
+                await terracottaHttpGet('/state');
+                return terracottaHttpPort;
+            } catch (e) {
+                if (i < 2) await new Promise(r => setTimeout(r, 1000));
+            }
         }
+        stopTerracotta();
     }
 
     const installed = await ensureTerracottaInstalled();
@@ -2485,13 +2505,8 @@ function loadSettings() {
         enableCds: true
     };
 
-    try {
-        if (fs.existsSync(SETTINGS_FILE)) {
-            const saved = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
-            return { ...defaults, ...saved };
-        }
-    } catch (e) {}
-    return defaults;
+    const saved = safeReadJsonFile(SETTINGS_FILE, null);
+    return saved ? { ...defaults, ...saved } : defaults;
 }
 
 let _settingsCache = null;
@@ -2513,11 +2528,51 @@ function invalidateSettingsCache() {
     _settingsCacheTime = 0;
 }
 
+function safeWriteFileSync(filePath, content) {
+    const bakPath = filePath + '.bak';
+    try {
+        if (fs.existsSync(filePath)) {
+            fs.copyFileSync(filePath, bakPath);
+        }
+    } catch (e) {}
+    const tmpPath = filePath + '.tmp';
+    try {
+        fs.writeFileSync(tmpPath, content, 'utf8');
+        fs.renameSync(tmpPath, filePath);
+    } catch (e) {
+        try { fs.writeFileSync(filePath, content, 'utf8'); } catch (e2) {}
+        try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (e3) {}
+    }
+}
+
+function safeReadJsonFile(filePath, defaults) {
+    try {
+        if (fs.existsSync(filePath)) {
+            const raw = fs.readFileSync(filePath, 'utf8');
+            return JSON.parse(raw);
+        }
+    } catch (e) {
+        console.error(`[Storage] File corrupted: ${filePath}`, e.message);
+        const bakPath = filePath + '.bak';
+        try {
+            if (fs.existsSync(bakPath)) {
+                const bakRaw = fs.readFileSync(bakPath, 'utf8');
+                const restored = JSON.parse(bakRaw);
+                console.log(`[Storage] Recovered from backup: ${bakPath}`);
+                safeWriteFileSync(filePath, JSON.stringify(restored, null, 2));
+                return restored;
+            }
+        } catch (e2) {}
+        console.warn(`[Storage] No valid backup, using defaults for: ${filePath}`);
+    }
+    return defaults;
+}
+
 function saveSettings(settings) {
     invalidateSettingsCache();
     _settingsCache = settings;
     _settingsCacheTime = Date.now();
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+    safeWriteFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
 function resolveSavesDir(versionId) {
@@ -2597,22 +2652,19 @@ function loadAccounts() {
     if (_accountsCache && Date.now() - _accountsCacheTime < ACCOUNTS_CACHE_TTL) {
         return _accountsCache;
     }
-    let result;
-    try {
-        if (fs.existsSync(ACCOUNTS_FILE)) {
-            const raw = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf-8'));
-            result = raw.map(acc => {
-                if (acc.accessToken && acc.accessToken.startsWith('enc:')) {
-                    try { acc.accessToken = decryptToken(acc.accessToken.slice(4)); } catch (e) {}
-                }
-                if (acc.refreshToken && acc.refreshToken.startsWith('enc:')) {
-                    try { acc.refreshToken = decryptToken(acc.refreshToken.slice(4)); } catch (e) {}
-                }
-                return acc;
-            });
-        }
-    } catch (e) {}
-    if (!result) result = [];
+    let result = [];
+    const raw = safeReadJsonFile(ACCOUNTS_FILE, []);
+    if (Array.isArray(raw)) {
+        result = raw.map(acc => {
+            if (acc.accessToken && acc.accessToken.startsWith('enc:')) {
+                try { acc.accessToken = decryptToken(acc.accessToken.slice(4)); } catch (e) {}
+            }
+            if (acc.refreshToken && acc.refreshToken.startsWith('enc:')) {
+                try { acc.refreshToken = decryptToken(acc.refreshToken.slice(4)); } catch (e) {}
+            }
+            return acc;
+        });
+    }
     _accountsCache = result;
     _accountsCacheTime = Date.now();
     return result;
@@ -2652,14 +2704,7 @@ function saveAccounts(accounts) {
         return copy;
     });
     const json = JSON.stringify(toSave, null, 2);
-    const tmpFile = ACCOUNTS_FILE + '.tmp';
-    try {
-        fs.writeFileSync(tmpFile, json);
-        fs.renameSync(tmpFile, ACCOUNTS_FILE);
-    } catch (e) {
-        try { fs.writeFileSync(ACCOUNTS_FILE, json); } catch (e2) {}
-        try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch (e3) {}
-    }
+    safeWriteFileSync(ACCOUNTS_FILE, json);
 }
 
 const VERSIONS_DATA_FILE = path.join(DATA_DIR, 'versions-data.json');
@@ -2884,7 +2929,7 @@ function validateInstalledVersions() {
     console.log('[Startup] 验证已安装版本完整性...');
     if (!fs.existsSync(VERSIONS_DIR)) return;
 
-    const cleaned = [];
+    const issues = [];
     try {
         const dirs = fs.readdirSync(VERSIONS_DIR);
         for (const dir of dirs) {
@@ -2894,29 +2939,23 @@ function validateInstalledVersions() {
             } catch (e) { continue; }
 
             const jsonFile = findVersionJson(versionDir);
-            if (!jsonFile) continue;
+            if (!jsonFile) {
+                issues.push({ dir, reason: '版本 JSON 文件缺失' });
+                continue;
+            }
 
             try {
-                const data = JSON.parse(fs.readFileSync(jsonFile, 'utf-8'));
-                const verId = data.id || dir;
-
-                if (!isVersionComplete(verId)) {
-                    console.log(`[Startup] 检测到不完整版本: ${verId}`);
-                    cleanupVersionChain(verId);
-                    cleaned.push(verId);
-                }
+                JSON.parse(fs.readFileSync(jsonFile, 'utf-8'));
             } catch (e) {
-                console.log(`[Startup] 版本JSON损坏: ${dir} - ${e.message}`);
-                cleanupIncompleteVersion(versionDir);
-                cleaned.push(dir);
+                issues.push({ dir, reason: `版本 JSON 损坏: ${e.message}` });
             }
         }
     } catch (e) {
         console.error(`[Startup] 版本扫描失败: ${e.message}`);
     }
 
-    if (cleaned.length > 0) {
-        console.log(`[Startup] 已清理 ${cleaned.length} 个不完整版本: ${cleaned.join(', ')}`);
+    if (issues.length > 0) {
+        console.log(`[Startup] 发现 ${issues.length} 个问题版本: ${issues.map(i => i.dir).join(', ')}`);
     }
 }
 
@@ -3788,17 +3827,53 @@ function scanExternalFolder(folderPath) {
                 if (!hasAnyFile) continue;
             } catch (e) { continue; }
             const jsonFile = findVersionJson(versionDir);
-            if (!jsonFile) continue;
+            if (!jsonFile) {
+                versions.push({
+                    id: dir, type: 'release', installed: true,
+                    externalPath: folderPath, externalVersionDir: versionDir, isExternal: true,
+                    error: true, errorReason: '版本 JSON 文件缺失',
+                    inheritsFrom: null, isFabric: false, isForge: false, isNeoForge: false,
+                    isOptiFine: false, isLiteLoader: false, isModpack: false, modpackLoader: '',
+                    baseVersion: '', isAprilFools: false, hasMods: false, hasSaves: false, hasResourcepacks: false,
+                    customName: '', description: ''
+                });
+                continue;
+            }
             try {
                 const data = JSON.parse(fs.readFileSync(jsonFile, 'utf-8'));
                 const info = detectVersionInfo(data, dir);
+                let inheritsFrom = data.inheritsFrom || null;
+                if (!inheritsFrom && (info.isNeoForge || info.isForge)) {
+                    const m = (data.id || dir).match(/^(\d+\.\d+(?:\.\d+)?(?:-rc\d+|-pre\d+|-snapshot.*)?)/i);
+                    if (m) inheritsFrom = m[1];
+                }
+                if (inheritsFrom && !data.inheritsFrom) data.inheritsFrom = inheritsFrom;
+                let error = false;
+                let errorReason = '';
+                if (inheritsFrom) {
+                    const parentDir = path.join(path.dirname(versionDir), inheritsFrom);
+                    const parentStandardJson = path.join(parentDir, `${inheritsFrom}.json`);
+                    const parentJson = fs.existsSync(parentStandardJson) ? parentStandardJson : null;
+                    if (!parentJson) {
+                        error = true;
+                        errorReason = `需要安装 ${inheritsFrom} 作为前置版本`;
+                    }
+                }
+                if (!error && !data.mainClass && (!data.libraries || !Array.isArray(data.libraries) || data.libraries.length === 0)) {
+                    error = true;
+                    errorReason = `无法识别：初始化版本 JSON 时失败 (${dir})`;
+                }
+                console.log(`[ExtCheck] ${dir}: inheritsFrom=${inheritsFrom || '无'}, error=${error}${error ? '(' + errorReason + ')' : ''}`);
+                const hasModsDir = fs.existsSync(path.join(versionDir, 'mods'));
+                const hasSavesDir = fs.existsSync(path.join(versionDir, 'saves'));
+                const hasResourcepacksDir = fs.existsSync(path.join(versionDir, 'resourcepacks'));
                 versions.push({
                     id: data.id || dir,
                     type: info.isAprilFools ? 'special' : (data.type || 'release'),
                     releaseTime: data.releaseTime || '',
                     mainClass: data.mainClass || '',
                     installed: true,
-                    inheritsFrom: data.inheritsFrom || null,
+                    inheritsFrom: inheritsFrom,
                     isFabric: info.isFabric,
                     isForge: info.isForge,
                     isNeoForge: info.isNeoForge,
@@ -3811,6 +3886,12 @@ function scanExternalFolder(folderPath) {
                     externalPath: folderPath,
                     externalVersionDir: versionDir,
                     isExternal: true,
+                    isolation: true,
+                    hasMods: hasModsDir,
+                    hasSaves: hasSavesDir,
+                    hasResourcepacks: hasResourcepacksDir,
+                    error: error,
+                    errorReason: errorReason,
                     ...(function() {
                         try {
                             const vs = loadVersionSettings(data.id || dir);
@@ -3819,10 +3900,20 @@ function scanExternalFolder(folderPath) {
                     })()
                 });
             } catch (e) {
-                versions.push({ id: dir, type: 'release', installed: true, externalPath: folderPath, externalVersionDir: versionDir, isExternal: true });
+                versions.push({
+                    id: dir, type: 'release', installed: true,
+                    externalPath: folderPath, externalVersionDir: versionDir, isExternal: true,
+                    error: true, errorReason: `版本 JSON 损坏: ${e.message}`,
+                    inheritsFrom: null, isFabric: false, isForge: false, isNeoForge: false,
+                    isOptiFine: false, isLiteLoader: false, isModpack: false, modpackLoader: '',
+                    baseVersion: '', isAprilFools: false, hasMods: false, hasSaves: false, hasResourcepacks: false,
+                    customName: '', description: ''
+                });
             }
         }
     } catch (e) {}
+    const errCount = versions.filter(v => v.error).length;
+    console.log(`[ExtScan] ${folderPath}: found ${versions.length} versions, ${errCount} errors${errCount > 0 ? ': ' + versions.filter(v => v.error).map(v => `${v.id}(${v.errorReason})`).join(', ') : ''}`);
     return versions;
 }
 
@@ -4612,6 +4703,13 @@ async function _dlSingle(urlStr, destPath, options = {}) {
                         try { if (onProgress) onProgress({ bytesDownloaded: dl, totalBytes: tSz, speed: DownloadManager.getSpeed(), progress: tSz > 0 ? (dl / tSz * 100) : 0, downloaded: dl }); } catch (_) {}
                     });
                     res.pipe(ws);
+                    res.on('error', (e) => {
+                        try { ws.destroy(); } catch (_) {}
+                        clean();
+                        if (settled) return;
+                        if (rc > 0) { setTimeout(() => attempt(rc - 1), 1000 + Math.random() * 500); }
+                        else { doReject(e); }
+                    });
                     ws.on('finish', async () => {
                         try {
                             if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
@@ -7024,13 +7122,39 @@ function getInstalledVersions(forceRefresh) {
                     const hasModsDir = fs.existsSync(path.join(versionDir, 'mods'));
                     const hasSavesDir = fs.existsSync(path.join(versionDir, 'saves'));
                     const hasResourcepacksDir = fs.existsSync(path.join(versionDir, 'resourcepacks'));
+                    let inheritsFrom = data.inheritsFrom || null;
+                    if (!inheritsFrom && (info.isNeoForge || info.isForge)) {
+                        const m = (data.id || dir).match(/^(\d+\.\d+(?:\.\d+)?(?:-rc\d+|-pre\d+|-snapshot.*)?)/i);
+                        if (m) inheritsFrom = m[1];
+                    }
+                    if (inheritsFrom && !data.inheritsFrom) data.inheritsFrom = inheritsFrom;
+                    let error = false;
+                    let errorReason = '';
+                    if (inheritsFrom) {
+                        const parentDir = path.join(VERSIONS_DIR, inheritsFrom);
+                        const parentJson = findVersionJson(parentDir);
+                        if (!parentJson) {
+                            let foundInExternal = false;
+                            const extFolders = loadExternalFolders();
+                            for (const ef of extFolders) {
+                                if (!fs.existsSync(ef.path)) continue;
+                                const extParentDir = path.join(ef.path, 'versions', inheritsFrom);
+                                if (findVersionJson(extParentDir)) { foundInExternal = true; break; }
+                            }
+                            if (!foundInExternal) {
+                                error = true;
+                                errorReason = `需要安装 ${inheritsFrom} 作为前置版本`;
+                                console.log(`[LocalErr] ${dir}: inheritsFrom=${inheritsFrom}, localParent=${fs.existsSync(parentDir)}`);
+                            }
+                        }
+                    }
                     installed.push({
                         id: data.id || dir,
                         type: info.isAprilFools ? 'special' : (data.type || 'release'),
                         releaseTime: data.releaseTime || '',
                         mainClass: data.mainClass || '',
                         installed: true,
-                        inheritsFrom: data.inheritsFrom || null,
+                        inheritsFrom: inheritsFrom,
                         isFabric: info.isFabric,
                         isForge: info.isForge,
                         isNeoForge: info.isNeoForge,
@@ -7045,6 +7169,8 @@ function getInstalledVersions(forceRefresh) {
                         hasMods: hasModsDir,
                         hasSaves: hasSavesDir,
                         hasResourcepacks: hasResourcepacksDir,
+                        error: error,
+                        errorReason: errorReason,
                         ...(function() {
                             try {
                                 const vs = loadVersionSettings(data.id || dir);
@@ -7055,6 +7181,8 @@ function getInstalledVersions(forceRefresh) {
                 } catch (e) {
                     console.log(`[Versions] 跳过无效版本目录 ${dir}: ${e.message}`);
                 }
+            } else {
+                console.log(`[Versions] 跳过无JSON的目录 ${dir}`);
             }
         }
     } catch (e) {}
@@ -7115,7 +7243,7 @@ function getInstalledVersions(forceRefresh) {
         if (externalId) inheritsFromIds.add(externalId);
     }
 
-    const result = installed.filter(v => !inheritsFromIds.has(v.id));
+    const result = installed.filter(v => !inheritsFromIds.has(v.id) || v.error);
 
     _versionsCache = result;
     _versionsCacheTime = Date.now();
@@ -7154,13 +7282,17 @@ function resolveVersionIsolation(versionId) {
 }
 
 function resolveExternalVersionDir(versionId) {
-    if (!versionId || !versionId.includes(' [外部')) return null;
+    if (!versionId) return null;
     const installed = getInstalledVersions();
-    const ext = installed.find(v => v.id === versionId && v.isExternal);
-    if (ext && ext.externalVersionDir) return ext.externalVersionDir;
-    const cleanId = versionId.replace(/\s*\[外部\]/, '');
-    const ext2 = installed.find(v => v.id === cleanId && v.isExternal);
-    if (ext2 && ext2.externalVersionDir) return ext2.externalVersionDir;
+    if (versionId.includes('[外部')) {
+        const ext = installed.find(v => v.id === versionId && v.isExternal);
+        if (ext && ext.externalVersionDir) return ext.externalVersionDir;
+        const cleanId = versionId.replace(/\s*\[外部\d*\]/, '');
+        const ext2 = installed.find(v => v.id === cleanId && v.isExternal);
+        if (ext2 && ext2.externalVersionDir) return ext2.externalVersionDir;
+    }
+    const ext3 = installed.find(v => v.id === versionId && v.isExternal && v.externalVersionDir);
+    if (ext3) return ext3.externalVersionDir;
     return null;
 }
 
@@ -8670,7 +8802,8 @@ function findMainJar(versionJson, versionId, externalVersionDir = null, _visited
         }
     }
 
-    console.warn(`[FindMainJar] 未找到主JAR: versionId=${actualVersionId}, jar=${versionJson.jar || '无'}, inheritsFrom=${versionJson.inheritsFrom || '无'}`);
+    console.warn(`[FindMainJar] 未找到主JAR: versionId=${actualVersionId}, jar=${versionJson.jar || '无'}, inheritsFrom=${versionJson.inheritsFrom || '无'}, extDir=${externalVersionDir || '无'}`);
+    console.warn(`[FindMainJar] 搜索路径:`, searchPaths.map(p => `${p}(${fs.existsSync(p)})`).join(', '));
     return null;
 }
 
@@ -8699,114 +8832,15 @@ function findExternalRoot(versionDir) {
 function detectModLoaderParent(data, externalVersionDir) {
     try {
     const versionId = data.id || '';
-    if (versionId.toLowerCase().includes('forge') || versionId.toLowerCase().includes('neoforged') ||
-        versionId.toLowerCase().includes('fabric') || versionId.toLowerCase().includes('quilt')) {
-        return null;
+
+    if (versionId.toLowerCase().includes('neoforge') || versionId.toLowerCase().includes('neoforged')) {
+        const m = versionId.match(/^(\d+\.\d+(?:\.\d+)?)/);
+        if (m) return m[1];
     }
 
-    const gameArgs = data.arguments?.game || [];
-    const forgeVersionArg = gameArgs.find(a => typeof a === 'string' && a.startsWith('--fml.forgeVersion'));
-    const mcVersionArg = gameArgs.find(a => typeof a === 'string' && a.startsWith('--fml.mcVersion'));
-    const launchTarget = gameArgs.find(a => typeof a === 'string' && a === 'forgeclient') ||
-                          gameArgs.find(a => typeof a === 'string' && a === 'forge_server');
-    const mainClass = data.mainClass || '';
-
-    const isForge = forgeVersionArg || launchTarget || mainClass.includes('bootstraplauncher') || mainClass.includes('BootstrapLauncher');
-
-    if (!isForge) return null;
-
-    let forgeVersion = '';
-    let mcVersion = '';
-
-    if (forgeVersionArg) {
-        const idx = gameArgs.indexOf(forgeVersionArg);
-        if (idx >= 0 && idx + 1 < gameArgs.length) {
-            forgeVersion = gameArgs[idx + 1];
-        }
-    }
-
-    if (mcVersionArg) {
-        const idx = gameArgs.indexOf(mcVersionArg);
-        if (idx >= 0 && idx + 1 < gameArgs.length) {
-            mcVersion = gameArgs[idx + 1];
-        }
-    }
-
-    if (!mcVersion && data.clientVersion) {
-        mcVersion = data.clientVersion;
-    }
-
-    if (!forgeVersion || !mcVersion) {
-        const forgeLib = (data.libraries || []).find(l =>
-            l.name && l.name.startsWith('net.minecraftforge:forge:') ||
-            l.name && l.name.startsWith('net.minecraftforge:fmlloader:')
-        );
-        if (forgeLib) {
-            const parts = forgeLib.name.split(':');
-            if (parts.length >= 3) {
-                const verPart = parts[2];
-                const dashIdx = verPart.lastIndexOf('-');
-                if (dashIdx > 0) {
-                    mcVersion = verPart.substring(0, dashIdx);
-                    forgeVersion = verPart.substring(dashIdx + 1);
-                }
-            }
-        }
-    }
-
-    if (!forgeVersion || !mcVersion) return null;
-
-    const candidateIds = [];
-    candidateIds.push(`${mcVersion}-forge-${forgeVersion}`);
-    candidateIds.push(`${mcVersion}-Forge_${forgeVersion}`);
-    candidateIds.push(`forge-${forgeVersion}`);
-
-    const searchDirs = [];
-    if (externalVersionDir) {
-        const externalRoot = findExternalRoot(externalVersionDir);
-        if (externalRoot) {
-            searchDirs.push(path.join(externalRoot, 'versions'));
-        }
-        searchDirs.push(path.dirname(externalVersionDir));
-        const externalFolders = loadExternalFolders();
-        for (const folder of externalFolders) {
-            if (!fs.existsSync(folder.path)) continue;
-            searchDirs.push(path.join(folder.path, 'versions'));
-        }
-    }
-    searchDirs.push(VERSIONS_DIR);
-
-    for (const candidateId of candidateIds) {
-        for (const searchDir of searchDirs) {
-            const candidateDir = path.join(searchDir, candidateId);
-            if (findVersionJson(candidateDir)) {
-                console.log(`[DetectParent] 自动检测到Forge父版本: ${candidateId} (在 ${searchDir})`);
-                return candidateId;
-            }
-        }
-    }
-
-    for (const searchDir of searchDirs) {
-        if (!fs.existsSync(searchDir)) continue;
-        try {
-            const entries = fs.readdirSync(searchDir, { withFileTypes: true });
-            for (const entry of entries) {
-                if (!entry.isDirectory()) continue;
-                const versionDir = path.join(searchDir, entry.name);
-                const jsonFile = findVersionJson(versionDir);
-                if (!jsonFile) continue;
-                try {
-                    const jsonData = JSON.parse(fs.readFileSync(jsonFile, 'utf-8'));
-                    const hasForgeLibs = (jsonData.libraries || []).some(l =>
-                        l.name && l.name === `net.minecraftforge:forge:${mcVersion}-${forgeVersion}`
-                    );
-                    if (hasForgeLibs) {
-                        console.log(`[DetectParent] 在版本 ${entry.name} 中发现Forge库`);
-                        return entry.name;
-                    }
-                } catch (e) {}
-            }
-        } catch (e) {}
+    if (versionId.toLowerCase().includes('forge') && !versionId.toLowerCase().includes('neoforge')) {
+        const m = versionId.match(/^(\d+\.\d+(?:\.\d+)?)/);
+        if (m) return m[1];
     }
 
     return null;
@@ -8851,6 +8885,14 @@ function resolveVersionJson(versionId, externalVersionDir = null, visited = null
         const detectedParent = detectModLoaderParent(data, externalVersionDir);
         if (detectedParent) {
             data.inheritsFrom = detectedParent;
+            try {
+                const originalJson = JSON.parse(fs.readFileSync(jsonFile, 'utf-8'));
+                originalJson.inheritsFrom = detectedParent;
+                fs.writeFileSync(jsonFile, JSON.stringify(originalJson, null, 2));
+                console.log(`[ResolveJson] 已修正 ${jsonFile} 的 inheritsFrom: ${detectedParent}`);
+            } catch (e) {
+                console.warn(`[ResolveJson] 写回 inheritsFrom 失败: ${e.message}`);
+            }
         }
     }
     if (data.inheritsFrom) {
@@ -9887,6 +9929,24 @@ function buildClasspath(versionJson, versionId, externalVersionDir = null) {
 
     const actualVersionId = versionId || versionJson.id || '';
     const jarPath = findMainJar(versionJson, actualVersionId, externalVersionDir);
+
+    const hasNeoforgeLib = dedupedClasspath.some(cp => cp.includes('neoforge') && cp.includes('universal'));
+    if (!hasNeoforgeLib) {
+        const isNeoForge = (versionJson.mainClass || '').includes('neoforge') || (versionJson.mainClass || '').includes('bootstraplauncher');
+        if (isNeoForge || (versionJson.libraries || []).some(l => (l.name || '').includes('neoforged'))) {
+            const neoforgeVersion = (versionJson.id || '').match(/NeoForge[_-]?([\d.]+)/i)?.[1] || '';
+            if (neoforgeVersion) {
+                for (const base of searchBases) {
+                    const uniJar = path.join(base, 'net', 'neoforged', 'neoforge', neoforgeVersion, `neoforge-${neoforgeVersion}-universal.jar`);
+                    if (fs.existsSync(uniJar)) {
+                        dedupedClasspath.push(uniJar);
+                        console.log(`[Classpath] 自动添加 NeoForge universal jar: ${uniJar}`);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     if (jarPath && fs.existsSync(jarPath)) {
         dedupedClasspath.push(jarPath);
@@ -11079,6 +11139,27 @@ async function launchGame(versionId, settings, account, checkOnly = false) {
     const versionJson = resolveVersionJson(cleanVersionId, externalVersionDir);
     if (!versionJson) {
         return { success: false, error: `找不到版本 ${versionId} 的JSON文件`, details: { versionId, externalVersionDir } };
+    }
+
+    if (externalVersionDir && !versionJson.inheritsFrom) {
+        const m = cleanVersionId.match(/^(\d+\.\d+(?:\.\d+)?)/);
+        if (m) {
+            const parentVer = m[1];
+            versionJson.inheritsFrom = parentVer;
+            try {
+                const jp = findVersionJson(externalVersionDir);
+                if (jp) {
+                    const raw = JSON.parse(fs.readFileSync(jp, 'utf-8'));
+                    if (!raw.inheritsFrom) {
+                        raw.inheritsFrom = parentVer;
+                        fs.writeFileSync(jp, JSON.stringify(raw, null, 2));
+                        console.log(`[LaunchGame] 已修正 inheritsFrom: ${parentVer}`);
+                    }
+                }
+            } catch (e) {
+                console.warn(`[LaunchGame] 写回 inheritsFrom 失败: ${e.message}`);
+            }
+        }
     }
 
     console.log(`[LaunchGame] JSON已解析, mainClass: ${versionJson.mainClass}, inheritsFrom: ${versionJson.inheritsFrom}`);
@@ -12471,8 +12552,7 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
             if (!fs.existsSync(clientJarPath) || (clientInfo.sha1 && !(await verifyFileSha1(clientJarPath, clientInfo.sha1)))) {
                 report('正在下载客户端...', 25);
                 console.log(`[BaseVersion] Downloading client JAR for ${gameVersion}...`);
-                if (fs.existsSync(clientJarPath)) fs.unlinkSync(clientJarPath);
-                await downloadFileWithMirror(clientInfo.url, clientJarPath);
+                await downloadFileSync(clientInfo.url, clientJarPath, { sha1: clientInfo.sha1 });
                 if (clientInfo.sha1 && !(await verifyFileSha1(clientJarPath, clientInfo.sha1))) {
                     console.warn(`[BaseVersion] Client JAR SHA1 mismatch after download!`);
                 }
@@ -12509,7 +12589,7 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
                     }
                     try {
                         if (fs.existsSync(libPath)) fs.unlinkSync(libPath);
-                        await downloadFileWithMirror(lib.downloads.artifact.url, libPath);
+                        await downloadFileWithMirror(lib.downloads.artifact.url, libPath, null, 3, null, 60000);
                     } catch (e) {
                         console.log(`[BaseVersion] Failed to download library ${lib.name}: ${e.message}`);
                     }
@@ -12748,8 +12828,30 @@ async function installFabric(gameVersion, loaderVersion, onProgress = null) {
                     const item = fabLibsToDownload[completed + failed + active];
                     active++;
                     (async () => {
-                        if (fs.existsSync(item.libPath)) fs.unlinkSync(item.libPath);
+                        const expectedSha1 = item.lib.downloads?.artifact?.sha1 || '';
+                        const expectedSize = item.lib.downloads?.artifact?.size || 0;
+                        if (fs.existsSync(item.libPath)) {
+                            const stat = fs.statSync(item.libPath);
+                            if (stat.size > 0 && (!expectedSize || stat.size === expectedSize)) {
+                                if (!expectedSha1) {
+                                    completed++;
+                                    return;
+                                }
+                                try {
+                                    const actual = await calculateSHA1(item.libPath);
+                                    if (actual === expectedSha1) { completed++; return; }
+                                } catch (_) {}
+                            }
+                            try { fs.unlinkSync(item.libPath); } catch (_) {}
+                        }
                         await downloadFileWithMirror(item.url, item.libPath);
+                        if (expectedSha1) {
+                            const actual = await calculateSHA1(item.libPath);
+                            if (actual !== expectedSha1) {
+                                try { fs.unlinkSync(item.libPath); } catch (_) {}
+                                throw new Error(`SHA1 mismatch: ${path.basename(item.libPath)}`);
+                            }
+                        }
                     })().then(() => {
                         completed++;
                     }).catch((e) => {
@@ -13825,6 +13927,7 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
                         let success = false;
                         for (let retry = 0; retry < 3; retry++) {
                             try {
+                                if (isLibValid(item.libPath, -1, item.expectedSha1)) { success = true; break; }
                                 if (fs.existsSync(item.libPath)) fs.unlinkSync(item.libPath);
                                 const dlUrl = retry === 0 ? item.url : item.fallbackUrl;
                                 await downloadFileWithMirror(dlUrl, item.libPath);
@@ -14196,6 +14299,8 @@ async function mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, 
     const jsonPath = path.join(versionDir, `${versionId}.json`);
     const versionJson = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
 
+    versionJson.inheritsFrom = gameVersion;
+
     let profileLibs = [];
     let profileData = null;
     let installerMainClass = null;
@@ -14226,7 +14331,10 @@ async function mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, 
         let downloaded = false;
         for (const url of installerUrls) {
             try {
-                await downloadFileWithMirror(url, installerPath);
+                if (onProgress) onProgress(0.15, `下载 NeoForge 安装器...`);
+                await downloadFileWithMirror(url, installerPath, (p) => {
+                    if (onProgress && p) onProgress(0.15 + (p.progress || 0) * 0.1, `下载 NeoForge 安装器: ${p.progress || 0}%`);
+                }, 3, null, 60000);
                 downloaded = true;
                 break;
             } catch (_) {}
@@ -14314,7 +14422,14 @@ async function mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, 
     const libsToDownload = (versionJson.libraries || []).filter(lib => {
         if (!lib.downloads?.artifact?.url) return false;
         const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
-        return !fs.existsSync(libPath);
+        if (!fs.existsSync(libPath)) return true;
+        const expectedSha1 = lib.downloads.artifact.sha1;
+        const expectedSize = lib.downloads.artifact.size;
+        if (expectedSize && fs.existsSync(libPath)) {
+            try { if (fs.statSync(libPath).size === expectedSize) return false; } catch (_) {}
+        }
+        if (!expectedSha1) return false;
+        return true;
     });
 
     if (libsToDownload.length > 0) {
@@ -14333,7 +14448,7 @@ async function mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, 
                     const libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
                     const dir = path.dirname(libPath);
                     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-                    await downloadFileWithMirror(lib.downloads.artifact.url, libPath);
+                    await downloadFileWithMirror(lib.downloads.artifact.url, libPath, null, 3, null, 60000);
                     if (libPath.endsWith('.jar') && !isJarIntact(libPath)) {
                         throw new Error(`下载后JAR损坏: ${path.basename(libPath)}`);
                     }
@@ -17827,9 +17942,19 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         if (jsonFile && fs.existsSync(jsonFile)) {
                             try {
                                 const data = JSON.parse(fs.readFileSync(jsonFile, 'utf-8'));
+                                let inf = data.inheritsFrom || null;
+                                if (!inf) {
+                                    const verId = data.id || dir;
+                                    const isN = (data.mainClass || '').includes('neoforge') || verId.toLowerCase().includes('neoforge');
+                                    const isF = !isN && ((data.mainClass || '').includes('forge') || verId.toLowerCase().includes('forge'));
+                                    if (isN || isF) {
+                                        const m = verId.match(/^(\d+\.\d+(?:\.\d+)?(?:-rc\d+|-pre\d+|-snapshot.*)?)/i);
+                                        if (m) inf = m[1];
+                                    }
+                                }
                                 entry.jsonData = {
                                     id: data.id,
-                                    inheritsFrom: data.inheritsFrom || null,
+                                    inheritsFrom: inf,
                                     mainClass: data.mainClass || null,
                                     type: data.type || null,
                                     libraryCount: (data.libraries || []).length
@@ -19066,25 +19191,8 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     } else {
                         const versionDir = path.join(VERSIONS_DIR, cleanId);
                         if (fs.existsSync(versionDir)) {
-                            const tryRecycle = !dvPermanent;
-                            let recycled = false;
-                            if (tryRecycle) {
-                                try {
-                                    const recycleBin = require('recycle-bin');
-                                    await recycleBin(versionDir);
-                                    recycled = true;
-                                    deleted = true;
-                                } catch (_) {
-                                    try {
-                                        const { execSync } = require('child_process');
-                                        const escapedDir = versionDir.replace(/'/g, "''");
-                                        execSync(`powershell -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('${escapedDir}', 'OnlyErrorDialogs', 'SendToRecycleBin')"`, { timeout: 30000, stdio: 'pipe' });
-                                        recycled = true;
-                                        deleted = true;
-                                    } catch (_) {}
-                                }
-                            }
-                            if (!recycled || dvPermanent) {
+                            deleted = false;
+                            if (dvPermanent) {
                                 try {
                                     fs.rmSync(versionDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
                                     deleted = true;
@@ -19097,6 +19205,29 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                         deleteError = e.message || '删除失败';
                                     }
                                 }
+                            } else {
+                                try {
+                                    const recycleBin = require('recycle-bin');
+                                    await recycleBin(versionDir);
+                                    deleted = true;
+                                } catch (_) {
+                                    try {
+                                        fs.rmSync(versionDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 });
+                                        deleted = true;
+                                    } catch (e) {
+                                        try {
+                                            const { execSync } = require('child_process');
+                                            execSync(`rmdir /s /q "${versionDir}"`, { timeout: 10000, windowsHide: true });
+                                            deleted = true;
+                                        } catch (_) {
+                                            deleteError = e.message || '删除失败';
+                                        }
+                                    }
+                                }
+                            }
+                            if (!deleted) {
+                                sendJSON({ success: false, error: deleteError || '删除失败' });
+                                break;
                             }
                         } else {
                             deleted = true;
@@ -19119,6 +19250,27 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                         } catch (_) {}
                                     } else {
                                         if (!allDeletedIds.includes(cid)) allDeletedIds.push(cid);
+                                    }
+                                }
+                                for (const vid of chainInfo || []) {
+                                    if (vanillaPattern.test(vid) && vid !== cleanId) {
+                                        const vDir = path.join(VERSIONS_DIR, vid);
+                                        if (!fs.existsSync(vDir)) continue;
+                                        const remaining = fs.readdirSync(VERSIONS_DIR).filter(d => {
+                                            if (d === vid) return false;
+                                            const dDir = path.join(VERSIONS_DIR, d);
+                                            try { if (!fs.statSync(dDir).isDirectory()) return false; } catch (_) { return false; }
+                                            const jp = findVersionJson(dDir);
+                                            if (!jp) return false;
+                                            try {
+                                                const dData = JSON.parse(fs.readFileSync(jp, 'utf-8'));
+                                                return dData.inheritsFrom === vid;
+                                            } catch (_) { return false; }
+                                        });
+                                        if (remaining.length === 0) {
+                                            try { fs.rmSync(vDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }); } catch (_) {}
+                                            if (!allDeletedIds.includes(vid)) allDeletedIds.push(vid);
+                                        }
                                     }
                                 }
                             } catch (chainErr) {
@@ -21569,12 +21721,23 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 break;
             }
 
+            case '/api/check-version-name': {
+                const checkData = await readBody();
+                const checkName = checkData.name || '';
+                if (!checkName) { sendJSON({ exists: false }); break; }
+                const existing = getInstalledVersions();
+                const nameExists = existing.some(v => v.id === checkName) || fs.existsSync(path.join(VERSIONS_DIR, checkName));
+                sendJSON({ exists: nameExists });
+                break;
+            }
+
             case '/api/install-start': {
                 const data = await readBody();
                 const versionUrl = data.url;
                 let versionId = data.versionId;
                 const loaderInfo = data.loaderInfo;
                 const downloadSource = data.downloadSource || 'mojang';
+                const customName = data.customName || '';
                 if (!versionUrl) { sendError('Missing version URL', 400); break; }
 
                 const sessionId = crypto.randomUUID();
@@ -21583,34 +21746,18 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (loaderInfo && loaderInfo.type && loaderInfo.version) {
                     const loaderSuffix = loaderInfo.type === 'neoforge' ? 'NeoForge' : 
                                         loaderInfo.type.charAt(0).toUpperCase() + loaderInfo.type.slice(1);
-                    const newVersionId = `${details.id}-${loaderSuffix}-${loaderInfo.version}`;
-                    
-                    const existingVersions = getInstalledVersions();
-                    let finalVersionId = newVersionId;
-                    let counter = 2;
-                    while (existingVersions.some(v => v.id === finalVersionId) || 
-                           fs.existsSync(path.join(VERSIONS_DIR, finalVersionId))) {
-                        finalVersionId = `${newVersionId}-${counter}`;
-                        counter++;
-                    }
+                    const defaultName = `${details.id}-${loaderSuffix}-${loaderInfo.version}`;
+                    const finalVersionId = customName || defaultName;
                     
                     details = JSON.parse(JSON.stringify(details));
                     details.id = finalVersionId;
                     details.inheritsFrom = data.versionId;
                     versionId = finalVersionId;
                 } else {
-                    const existingVersions = getInstalledVersions();
-                    let finalVersionId = details.id;
-                    let counter = 2;
-                    while (existingVersions.some(v => v.id === finalVersionId) || 
-                           fs.existsSync(path.join(VERSIONS_DIR, finalVersionId))) {
-                        finalVersionId = `${details.id}-${counter}`;
-                        counter++;
-                    }
-                    if (finalVersionId !== details.id) {
+                    if (customName) {
                         details = JSON.parse(JSON.stringify(details));
-                        details.id = finalVersionId;
-                        versionId = finalVersionId;
+                        details.id = customName;
+                        versionId = customName;
                     }
                 }
                 

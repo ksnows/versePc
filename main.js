@@ -170,6 +170,18 @@ function autoRepairJsonFile(filePath, backupSuffix) {
         } catch (backupErr) {
             console.error(`[AutoRepair] Backup failed:`, backupErr.message);
         }
+        const bakPath = filePath + '.bak';
+        try {
+            if (fs.existsSync(bakPath)) {
+                const bakContent = fs.readFileSync(bakPath, 'utf8');
+                JSON.parse(bakContent);
+                fs.writeFileSync(filePath, bakContent);
+                console.log(`[AutoRepair] Recovered from .bak: ${bakPath}`);
+                return true;
+            }
+        } catch (bakErr) {
+            console.error(`[AutoRepair] .bak recovery failed:`, bakErr.message);
+        }
         try {
             const dir = path.dirname(filePath);
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -190,6 +202,14 @@ function repairVersePCData() {
     if (!fs.existsSync(dataDir)) return;
     autoRepairJsonFile(CONFIG_PATH, '.corrupted.json');
     autoRepairJsonFile(STORE_PATH, '.corrupted.json');
+    try {
+        const settingsFile = path.join(dataDir, 'settings.json');
+        if (fs.existsSync(settingsFile)) autoRepairJsonFile(settingsFile, '.corrupted.json');
+    } catch (e) {}
+    try {
+        const accountsFile = path.join(dataDir, 'accounts.json');
+        if (fs.existsSync(accountsFile)) autoRepairJsonFile(accountsFile, '.corrupted.json');
+    } catch (e) {}
     try {
         const versionsDir = path.join(dataDir, 'versions');
         if (fs.existsSync(versionsDir)) {
@@ -287,19 +307,15 @@ protocol.registerSchemesAsPrivileged([
  * @returns {Object} 配置对象 { fullscreen, windowMode, windowWidth, windowHeight, windowX, windowY }
  */
 function loadWindowConfig() {
-    try {
-        const now = Date.now();
-        if (windowConfigCache && (now - windowConfigCacheTime) < CONFIG_CACHE_DURATION) {
-            return { ...windowConfigCache };
-        }
-        if (fs.existsSync(CONFIG_PATH)) {
-            const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-            windowConfigCache = { ...config };
-            windowConfigCacheTime = now;
-            return config;
-        }
-    } catch (e) { console.error('Failed to load window config:', e); }
-    return { fullscreen: false, windowMode: true, windowWidth: 1200, windowHeight: 800 };
+    const defaults = { fullscreen: false, windowMode: true, windowWidth: 1200, windowHeight: 800 };
+    const now = Date.now();
+    if (windowConfigCache && (now - windowConfigCacheTime) < CONFIG_CACHE_DURATION) {
+        return { ...windowConfigCache };
+    }
+    const config = safeReadJsonFile(CONFIG_PATH, defaults);
+    windowConfigCache = { ...config };
+    windowConfigCacheTime = now;
+    return config;
 }
 
 /**
@@ -310,7 +326,7 @@ function saveWindowConfig(config) {
     try {
         const dir = path.dirname(CONFIG_PATH);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+        safeWriteFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
         windowConfigCache = { ...config };
         windowConfigCacheTime = Date.now();
     } catch (e) { console.error('Failed to save window config:', e); }
@@ -694,6 +710,46 @@ ipcMain.handle('clipboard-read-text', async () => {
  * 加载存储数据
  * @returns {Object} 存储的键值对对象
  */
+function safeWriteFileSync(filePath, content) {
+    const bakPath = filePath + '.bak';
+    try {
+        if (fs.existsSync(filePath)) {
+            fs.copyFileSync(filePath, bakPath);
+        }
+    } catch (e) {}
+    const tmpPath = filePath + '.tmp';
+    try {
+        fs.writeFileSync(tmpPath, content, 'utf8');
+        fs.renameSync(tmpPath, filePath);
+    } catch (e) {
+        try { fs.writeFileSync(filePath, content, 'utf8'); } catch (e2) {}
+        try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (e3) {}
+    }
+}
+
+function safeReadJsonFile(filePath, defaults) {
+    try {
+        if (fs.existsSync(filePath)) {
+            const raw = fs.readFileSync(filePath, 'utf8');
+            return JSON.parse(raw);
+        }
+    } catch (e) {
+        console.error(`[Storage] File corrupted: ${filePath}`, e.message);
+        const bakPath = filePath + '.bak';
+        try {
+            if (fs.existsSync(bakPath)) {
+                const bakRaw = fs.readFileSync(bakPath, 'utf8');
+                const restored = JSON.parse(bakRaw);
+                console.log(`[Storage] Recovered from backup: ${bakPath}`);
+                safeWriteFileSync(filePath, JSON.stringify(restored, null, 2));
+                return restored;
+            }
+        } catch (e2) {}
+        console.warn(`[Storage] No valid backup, using defaults for: ${filePath}`);
+    }
+    return defaults;
+}
+
 let _storeCache = null;
 let _storeCacheTime = 0;
 const STORE_CACHE_TTL = 3000;
@@ -703,13 +759,7 @@ function loadStore() {
     if (_storeCache && (now - _storeCacheTime) < STORE_CACHE_TTL) {
         return _storeCache;
     }
-    try {
-        if (fs.existsSync(STORE_PATH)) {
-            _storeCache = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
-        } else {
-            _storeCache = {};
-        }
-    } catch (e) { console.error('Failed to load store:', e); _storeCache = {}; }
+    _storeCache = safeReadJsonFile(STORE_PATH, {});
     _storeCacheTime = now;
     return _storeCache;
 }
@@ -720,10 +770,7 @@ function saveStore(data) {
     try {
         const dir = path.dirname(STORE_PATH);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        const json = JSON.stringify(data, null, 2);
-        fs.writeFile(STORE_PATH, json, (err) => {
-            if (err) console.error('Failed to save store:', err);
-        });
+        safeWriteFileSync(STORE_PATH, JSON.stringify(data, null, 2));
     } catch (e) { console.error('Failed to save store:', e); }
 }
 
@@ -744,14 +791,9 @@ ipcMain.handle('store-get-multiple', async (event, keys) => {
 ipcMain.handle('store-set', async (event, key, value) => {
     if (!global._storeWriteQueue) global._storeWriteQueue = Promise.resolve();
     global._storeWriteQueue = global._storeWriteQueue.then(() => {
-        return new Promise((resolve) => {
-            const store = loadStore();
-            store[key] = value;
-            fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), (err) => {
-                if (err) console.error('Failed to save store:', err);
-                resolve(true);
-            });
-        });
+        const store = loadStore();
+        store[key] = value;
+        saveStore(store);
     });
     return true;
 });
