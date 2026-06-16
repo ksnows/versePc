@@ -19221,6 +19221,20 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                     }
                                 }
                             }
+                            if (deleted && fs.existsSync(versionDir)) {
+                                console.error(`[version-delete] 删除操作后文件夹仍存在: ${versionDir}`);
+                                try { fs.rmSync(versionDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }); } catch (_) {}
+                                if (fs.existsSync(versionDir)) {
+                                    try {
+                                        const { execSync } = require('child_process');
+                                        execSync(`rmdir /s /q "${versionDir}"`, { timeout: 10000, windowsHide: true });
+                                    } catch (_) {}
+                                }
+                                if (fs.existsSync(versionDir)) {
+                                    deleted = false;
+                                    deleteError = '文件可能被占用，请关闭游戏后重试';
+                                }
+                            }
                             if (!deleted) {
                                 sendJSON({ success: false, error: deleteError || '删除失败' });
                                 break;
@@ -21897,6 +21911,14 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                 ok = true;
                             } catch (_) {}
                         }
+                    }
+                    if (ok && fs.existsSync(versionDir)) {
+                        console.error(`[delete-version] 删除操作后文件夹仍存在: ${versionDir}`);
+                        try { fs.rmSync(versionDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 500 }); } catch (_) {}
+                        if (fs.existsSync(versionDir)) {
+                            try { execSync(`rmdir /s /q "${versionDir}"`, { timeout: 10000, windowsHide: true }); } catch (_) {}
+                        }
+                        if (fs.existsSync(versionDir)) { ok = false; }
                     }
                     _versionsCache = null;
                     _versionsCacheTime = 0;
