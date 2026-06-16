@@ -1153,7 +1153,7 @@ var ANNOUNCEMENT_CONTENT = {
         <div class="announcement-section">
             <h4>⚠️ 重要提示</h4>
             <ul>
-                <li style="color:#e74c3c;font-weight:bold;">当前版本请勿下载安装 Forge 或 NeoForge 版本的任何内容，否则将无法启动游戏</li>
+                <li style="color:#e74c3c;font-weight:bold;">不要使用整合包下载功能</li>
                 <li>如需使用 Forge，可通过"添加已有文件夹"导入外部 Forge 版本</li>
             </ul>
         </div>
