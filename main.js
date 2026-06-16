@@ -1383,28 +1383,7 @@ app.whenReady().then(async () => {
             });
         }
 
-        session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-            const responseHeaders = { ...details.responseHeaders };
-            if (details.url.startsWith('versepc://') || details.url.startsWith('devtools://')) {
-                responseHeaders['Content-Security-Policy'] = [
-                    "default-src 'self' versepc:; " +
-                    "script-src 'self' versepc: 'unsafe-inline' 'unsafe-eval'; " +
-                    "style-src 'self' versepc: 'unsafe-inline' https://fonts.googleapis.com; " +
-                    "img-src 'self' versepc: wpfile: data: blob: https:; " +
-                    "font-src 'self' versepc: data: https://fonts.gstatic.com; " +
-                    "connect-src 'self' versepc: ws: wss: http://localhost:* https:; " +
-                    "media-src 'self' versepc: wpfile: blob:; " +
-                    "child-src 'self' blob:; " +
-                    "worker-src 'self' blob:; " +
-                    "object-src 'none'; " +
-                    "base-uri 'self';"
-                ];
-            }
-            callback({ responseHeaders });
-        });
-
-        // 先注册协议处理器（静态文件服务不需要 server.js）
-        // server.js 延迟到窗口显示后加载，避免阻塞界面
+        // 只注册核心协议处理器，其余全部延迟
         let _serverReady = false;
         protocol.handle('versepc', async (request) => {
             if (!_serverReady) {
@@ -1418,76 +1397,71 @@ app.whenReady().then(async () => {
             return handleVersePCProtocol(request);
         });
 
-        protocol.handle('wpfile', (request) => {
-            try {
-                const url = new URL(request.url);
-                let filePath = decodeURIComponent(url.pathname);
-                if (filePath.startsWith('/')) filePath = filePath.substring(1);
-                const resolved = path.resolve(filePath);
-                if (!isPathAllowed(resolved)) {
-                    return new Response('Forbidden', { status: 403 });
-                }
-                if (!fs.existsSync(resolved)) {
-                    return new Response('Not Found', { status: 404 });
-                }
-                const ext = path.extname(resolved).toLowerCase();
-                const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.mp4', '.webm', '.mkv', '.avi'];
-                if (!allowedExts.includes(ext)) {
-                    return new Response('Forbidden', { status: 403 });
-                }
-                const mimeMap = {
-                    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-                    '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp',
-                    '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska',
-                    '.avi': 'video/x-msvideo',
-                };
-                const mime = mimeMap[ext] || 'application/octet-stream';
-                const stat = fs.statSync(resolved);
-                const fileSize = stat.size;
-
-                const rangeHeader = request.headers.get('range');
-                if (rangeHeader) {
-                    const parts = rangeHeader.replace(/bytes=/, '').split('-');
-                    const start = parseInt(parts[0], 10);
-                    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-                    const chunkSize = end - start + 1;
-                    const stream = fs.createReadStream(resolved, { start, end });
-                    return new Response(stream, {
-                        status: 206,
-                        headers: {
-                            'Content-Type': mime,
-                            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                            'Accept-Ranges': 'bytes',
-                            'Content-Length': String(chunkSize),
-                        }
-                    });
-                }
-
-                const stream = fs.createReadStream(resolved);
-                return new Response(stream, {
-                    status: 200,
-                    headers: {
-                        'Content-Type': mime,
-                        'Content-Length': String(fileSize),
-                        'Accept-Ranges': 'bytes',
-                    }
-                });
-            } catch (e) {
-                return new Response('Error: ' + e.message, { status: 500 });
-            }
-        });
-
-        // 注册 IPC 处理器
-        registerModsIPC();
-        registerUpdaterIPC();
-        registerAIChatIPC();
-        initAutoUpdater();
-
-        // 创建窗口（优先显示界面）
+        // 创建窗口（最优先）
         createWindow();
 
-        // 窗口显示后：加载 server.js、启动 SSE、完整性检查等（全部异步）
+        // 窗口显示后再做一切非关键初始化
         setImmediate(() => {
+            // CSP 安全头
+            session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+                const responseHeaders = { ...details.responseHeaders };
+                if (details.url.startsWith('versepc://') || details.url.startsWith('devtools://')) {
+                    responseHeaders['Content-Security-Policy'] = [
+                        "default-src 'self' versepc:; " +
+                        "script-src 'self' versepc: 'unsafe-inline' 'unsafe-eval'; " +
+                        "style-src 'self' versepc: 'unsafe-inline' https://fonts.googleapis.com; " +
+                        "img-src 'self' versepc: wpfile: data: blob: https:; " +
+                        "font-src 'self' versepc: data: https://fonts.gstatic.com; " +
+                        "connect-src 'self' versepc: ws: wss: http://localhost:* https:; " +
+                        "media-src 'self' versepc: wpfile: blob:; " +
+                        "child-src 'self' blob:; " +
+                        "worker-src 'self' blob:; " +
+                        "object-src 'none'; " +
+                        "base-uri 'self';"
+                    ];
+                }
+                callback({ responseHeaders });
+            });
+
+            // wpfile 协议
+            protocol.handle('wpfile', (request) => {
+                try {
+                    const url = new URL(request.url);
+                    let filePath = decodeURIComponent(url.pathname);
+                    if (filePath.startsWith('/')) filePath = filePath.substring(1);
+                    const resolved = path.resolve(filePath);
+                    if (!isPathAllowed(resolved)) return new Response('Forbidden', { status: 403 });
+                    if (!fs.existsSync(resolved)) return new Response('Not Found', { status: 404 });
+                    const ext = path.extname(resolved).toLowerCase();
+                    const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.mp4', '.webm', '.mkv', '.avi'];
+                    if (!allowedExts.includes(ext)) return new Response('Forbidden', { status: 403 });
+                    const mimeMap = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo' };
+                    const mime = mimeMap[ext] || 'application/octet-stream';
+                    const stat = fs.statSync(resolved);
+                    const fileSize = stat.size;
+                    const rangeHeader = request.headers.get('range');
+                    if (rangeHeader) {
+                        const parts = rangeHeader.replace(/bytes=/, '').split('-');
+                        const start = parseInt(parts[0], 10);
+                        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+                        const chunkSize = end - start + 1;
+                        const stream = fs.createReadStream(resolved, { start, end });
+                        return new Response(stream, { status: 206, headers: { 'Content-Type': mime, 'Content-Range': `bytes ${start}-${end}/${fileSize}`, 'Accept-Ranges': 'bytes', 'Content-Length': String(chunkSize) } });
+                    }
+                    const stream = fs.createReadStream(resolved);
+                    return new Response(stream, { status: 200, headers: { 'Content-Type': mime, 'Content-Length': String(fileSize), 'Accept-Ranges': 'bytes' } });
+                } catch (e) {
+                    return new Response('Error: ' + e.message, { status: 500 });
+                }
+            });
+
+            // IPC 和其他初始化
+            registerModsIPC();
+            registerUpdaterIPC();
+            registerAIChatIPC();
+            initAutoUpdater();
+
+            // 加载 server.js、启动 SSE、完整性检查等
             try { loadServerModule(); } catch (e) { console.error('[Server] Load failed:', e.message); }
             _serverReady = true;
             if (serverModuleCache && serverModuleCache.setMainWindow) {
