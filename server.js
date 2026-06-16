@@ -1456,7 +1456,11 @@ async function terracottaHttpGet(endpoint, params = {}, retries = 5) {
                             reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 100)}`));
                             return;
                         }
-                        try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('JSON parse error')); }
+                        if (!data || data.trim() === '') { resolve({ ok: true, empty: true }); return; }
+                        try { resolve(JSON.parse(data)); } catch (e) {
+                            console.warn(`[Terracotta] JSON解析失败 ${endpoint}: ${data.slice(0, 200)}`);
+                            reject(new Error(`JSON parse error: ${data.slice(0, 100)}`));
+                        }
                     });
                 });
                 req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
