@@ -28,6 +28,17 @@
  */
 
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+try {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const storeFile = path.join(os.homedir(), '.versepc', 'app-store.json');
+    const storeData = JSON.parse(fs.readFileSync(storeFile, 'utf-8'));
+    const theme = storeData.versepc_theme;
+    if (theme === 'light' || theme === 'dark') {
+        document.documentElement.setAttribute('data-theme', theme);
+    }
+} catch (e) {}
 
 let progressCallbackWrapper = null;
 let updaterStatusCallbackWrapper = null;
