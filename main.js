@@ -70,31 +70,33 @@ try {
 } catch (e) {}
 
 // ============================================================================
-// 运行时完整性自检 - 检测源文件是否被篡改
+// 运行时完整性自检 - 延迟到窗口显示后执行，避免阻塞启动
 // ============================================================================
 let _integrityViolated = false;
-try {
-    const _crypto = require('crypto');
-    const _integrityPath = require('path').join(__dirname, 'integrity.json');
-    if (require('fs').existsSync(_integrityPath)) {
-        const _manifest = JSON.parse(require('fs').readFileSync(_integrityPath, 'utf-8'));
-        for (const [_file, _expectedHash] of Object.entries(_manifest)) {
-            try {
-                const _filePath = require('path').join(__dirname, _file);
-                if (!require('fs').existsSync(_filePath)) continue;
-                const _content = require('fs').readFileSync(_filePath);
-                const _actualHash = _crypto.createHash('sha256').update(_content).digest('hex');
-                if (_actualHash !== _expectedHash) {
-                    _integrityViolated = true;
-                    console.warn(`[Integrity] File tampered: ${_file}`);
-                }
-            } catch (e) {}
+function _runIntegrityCheck() {
+    try {
+        const _crypto = require('crypto');
+        const _integrityPath = require('path').join(__dirname, 'integrity.json');
+        if (require('fs').existsSync(_integrityPath)) {
+            const _manifest = JSON.parse(require('fs').readFileSync(_integrityPath, 'utf-8'));
+            for (const [_file, _expectedHash] of Object.entries(_manifest)) {
+                try {
+                    const _filePath = require('path').join(__dirname, _file);
+                    if (!require('fs').existsSync(_filePath)) continue;
+                    const _content = require('fs').readFileSync(_filePath);
+                    const _actualHash = _crypto.createHash('sha256').update(_content).digest('hex');
+                    if (_actualHash !== _expectedHash) {
+                        _integrityViolated = true;
+                        console.warn(`[Integrity] File tampered: ${_file}`);
+                    }
+                } catch (e) {}
+            }
+            if (_integrityViolated) {
+                console.warn('[Integrity] Source file modification detected. This may indicate tampering.');
+            }
         }
-        if (_integrityViolated) {
-            console.warn('[Integrity] Source file modification detected. This may indicate tampering.');
-        }
-    }
-} catch (e) {}
+    } catch (e) {}
+}
 
 // ============================================================================
 // 模块导入
@@ -229,7 +231,11 @@ function repairVersePCData() {
     console.log('[AutoRepair] Data integrity check completed');
 }
 
-repairVersePCData();
+function _deferredRepairData() {
+    setImmediate(() => {
+        try { repairVersePCData(); } catch (e) {}
+    });
+}
 
 // ============================================================================
 // 全局错误处理
@@ -1342,46 +1348,40 @@ app.whenReady().then(async () => {
     try {
         console.log('VersePC starting...');
 
-        // 启动时清理可能残留的旧进程（崩溃后重启的情况）
-        // 由于单实例锁已上移到文件最早期，这里只会作为第一个实例执行
-        // 进一步加强保护：检查进程的父进程，只有真正孤立的 zombie 才杀
+        // 启动时异步清理残留旧进程和端口（不阻塞窗口创建）
         if (process.platform === 'win32') {
-            try {
-                const { execSync } = require('child_process');
-                const myPid = process.pid;
-                const allVersePcPids = execSync(
-                    `wmic process where "name='VersePC.exe'" get ProcessId,ParentProcessId,CommandLine /format:csv 2>nul`,
-                    { encoding: 'utf8', timeout: 5000 }
-                );
-                const lines = allVersePcPids.split('\n').filter(l => l.trim() && !l.startsWith('Node'));
-                for (const line of lines) {
-                    const parts = line.split(',');
-                    if (parts.length < 4) continue;
-                    const pid = parseInt(parts[parts.length - 2]);
-                    const ppid = parseInt(parts[parts.length - 1]);
-                    if (!pid || pid === myPid) continue;
-                    if (ppid && ppid !== 0) continue;
-                    try { process.kill(pid); console.log('[App] Killed zombie process:', pid); } catch (e) {}
-                }
-            } catch (e) {}
-        }
-
-        // 清理可能残留的 SSE 端口
-        try {
-            const { execSync } = require('child_process');
-            for (let port = 3001; port <= 3010; port++) {
+            const { exec } = require('child_process');
+            exec('wmic process where "name=\'VersePC.exe\'" get ProcessId,ParentProcessId,CommandLine /format:csv 2>nul', { encoding: 'utf8', timeout: 5000 }, (err, stdout) => {
+                if (err || !stdout) return;
                 try {
-                    const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: 'utf8', timeout: 3000 });
-                    const pidMatch = out.match(/(\d+)\s*$/m);
-                    if (pidMatch) {
-                        const pid = parseInt(pidMatch[1]);
-                        if (pid && pid !== process.pid) {
-                            try { process.kill(pid); console.log('[App] Killed process on port', port, 'pid:', pid); } catch (e) {}
+                    const lines = stdout.split('\n').filter(l => l.trim() && !l.startsWith('Node'));
+                    for (const line of lines) {
+                        const parts = line.split(',');
+                        if (parts.length < 4) continue;
+                        const pid = parseInt(parts[parts.length - 2]);
+                        const ppid = parseInt(parts[parts.length - 1]);
+                        if (!pid || pid === process.pid) continue;
+                        if (ppid && ppid !== 0) continue;
+                        try { process.kill(pid); console.log('[App] Killed zombie process:', pid); } catch (e) {}
+                    }
+                } catch (e) {}
+            });
+            exec('netstat -ano | findstr LISTENING', { encoding: 'utf8', timeout: 5000 }, (err, stdout) => {
+                if (err || !stdout) return;
+                try {
+                    for (let port = 3001; port <= 3010; port++) {
+                        const regex = new RegExp(`:${port}\\s.*LISTENING\\s+(\\d+)`, 'g');
+                        let match;
+                        while ((match = regex.exec(stdout)) !== null) {
+                            const pid = parseInt(match[1]);
+                            if (pid && pid !== process.pid) {
+                                try { process.kill(pid); console.log('[App] Killed process on port', port, 'pid:', pid); } catch (e) {}
+                            }
                         }
                     }
                 } catch (e) {}
-            }
-        } catch (e) {}
+            });
+        }
 
         session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
             const responseHeaders = { ...details.responseHeaders };
@@ -1473,29 +1473,29 @@ app.whenReady().then(async () => {
         registerAIChatIPC();
         initAutoUpdater();
 
-        const sseLog = (msg) => {
-            console.log(msg);
-            try { fs.promises.appendFile(path.join(__dirname, 'sse-debug.log'), `[${new Date().toISOString()}] ${msg}\n`).catch(() => {}); } catch (_) {}
-        };
-        try {
-            sseLog('[DEBUG SSE] require sse-server...');
-            const { createSSEServer } = require('./sse-server');
-            const sseResult = createSSEServer({ executeTool: sseExecuteTool });
-            global._sseServer = sseResult ? sseResult.server : null;
-            ssePort = sseResult ? sseResult.PORT : 3001;
-            sseLog('[DEBUG SSE] SSE server created: port=' + ssePort);
-        } catch (e) {
-            sseLog('[DEBUG SSE] SSE server failed: ' + e.message);
-        }
-
-        // 创建窗口
+        // 创建窗口（优先显示界面）
         createWindow();
         if (serverModuleCache && serverModuleCache.setMainWindow) {
             serverModuleCache.setMainWindow(mainWindow);
         }
-        if (serverModuleCache) {
-            setImmediate(() => serverModuleCache.logStartupInfo());
-        }
+
+        // 窗口显示后：启动 SSE 服务器、完整性检查、数据修复（全部异步，不阻塞界面）
+        setImmediate(() => {
+            try {
+                const { createSSEServer } = require('./sse-server');
+                const sseResult = createSSEServer({ executeTool: sseExecuteTool });
+                global._sseServer = sseResult ? sseResult.server : null;
+                ssePort = sseResult ? sseResult.PORT : 3001;
+                console.log('[SSE] Server created: port=' + ssePort);
+            } catch (e) {
+                console.log('[SSE] Server failed: ' + e.message);
+            }
+            try { _runIntegrityCheck(); } catch (e) {}
+            try { _deferredRepairData(); } catch (e) {}
+            if (serverModuleCache) {
+                try { serverModuleCache.logStartupInfo(); } catch (e) {}
+            }
+        });
 
     } catch (e) {
         console.error('Failed to start:', e);
