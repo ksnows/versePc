@@ -7352,9 +7352,20 @@ function getInstalledVersions(forceRefresh) {
 
     const result = installed.filter(v => !inheritsFromIds.has(v.id) || v.error);
 
-    _versionsCache = result;
+    const bareMcPattern = /^\d+\.\d+(\.\d+)?(-\d+)?(-rc\d+|-pre\d+|-snapshot.*)?$/i;
+    const finalResult = result.filter(v => {
+        if (v.error || v.isExternal) return true;
+        const isVanilla = !v.isFabric && !v.isForge && !v.isNeoForge && !v.isOptiFine && !v.isLiteLoader && !v.isModpack;
+        if (!isVanilla) return true;
+        if (v.hasMods || v.hasSaves || v.hasResourcepacks) return true;
+        if (inheritsFromIds.has(v.id)) return true;
+        if (!bareMcPattern.test(v.id)) return true;
+        return false;
+    });
+
+    _versionsCache = finalResult;
     _versionsCacheTime = Date.now();
-    return result;
+    return finalResult;
 }
 
 function resolveVersionIsolation(versionId) {
