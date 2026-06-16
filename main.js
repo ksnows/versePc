@@ -1233,29 +1233,30 @@ function reloadServerModule() {
 }
 
 // ============================================================================
-// GPU 硬件加速回退 - 解决 Windows 11 家庭版黑屏问题
+// GPU 硬件加速 + 高帧率支持 - 默认启用以获得流畅界面
 // ============================================================================
 const disableGpuFile = path.join(app.getPath('userData'), '.disable-gpu');
-const enableGpuFile = path.join(app.getPath('userData'), '.enable-gpu');
 const safeMode = process.argv.includes('--safe-mode') || process.argv.includes('--disable-gpu');
-const forceGpu = process.argv.includes('--enable-gpu') || process.argv.includes('--force-gpu');
+const forceDisableGpu = process.argv.includes('--disable-gpu');
 
 app.commandLine.appendSwitch('high-dpi-support', '1');
 app.commandLine.appendSwitch('enable-use-zoom-for-dsf', 'true');
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
+app.commandLine.appendSwitch('disable-frame-rate-limit');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
-// 启动器默认禁用 GPU 硬件加速以确保兼容性，只有用户主动启用时才开启
-const shouldDisableGpu = forceGpu
-    ? false
-    : (safeMode || !require('fs').existsSync(enableGpuFile));
+const shouldDisableGpu = forceDisableGpu || safeMode || require('fs').existsSync(disableGpuFile);
 
 if (shouldDisableGpu) {
     app.disableHardwareAcceleration();
     app.commandLine.appendSwitch('disable-gpu');
     app.commandLine.appendSwitch('use-gl', 'swiftshader');
     if (safeMode) console.log('[GPU] Hardware acceleration disabled (safe mode)');
+    else if (require('fs').existsSync(disableGpuFile)) console.log('[GPU] Hardware acceleration disabled (previous GPU failure)');
 } else {
-    console.log('[GPU] Hardware acceleration enabled');
+    console.log('[GPU] Hardware acceleration enabled (high frame rate mode)');
 }
 
 app.on('gpu-info-update', () => {

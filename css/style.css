@@ -1562,6 +1562,7 @@ body {
     border-radius: 9999px;
     transition: width 0.4s ease-out;
     width: 0%;
+    will-change: width;
 }
 
 .install-info {
@@ -7011,6 +7012,7 @@ body {
     background-size: 200% 100%;
     transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
     animation: launch-progress-shimmer 2s linear infinite;
+    will-change: width, background-position;
 }
 .launch-splash-progress::after {
     content: '';
@@ -11829,8 +11831,8 @@ body {
 .rc-file-card-chevron { color:var(--ai-text-muted); transition:transform 0.2s ease; flex-shrink:0; }
 .rc-file-card.expanded .rc-file-card-chevron { transform:rotate(180deg); }
 .rc-file-card-body { display:none; max-height:400px; overflow:auto; }
-.rc-file-card.expanded .rc-file-card-body { display:block; animation:rcSlideDown 0.15s ease; }
-@keyframes rcSlideDown { from{opacity:0;max-height:0} to{opacity:1;max-height:400px} }
+.rc-file-card.expanded .rc-file-card-body { display:block; animation:rcSlideDown 0.15s ease; transform-origin:top; }
+@keyframes rcSlideDown { from{opacity:0;transform:scaleY(0)} to{opacity:1;transform:scaleY(1)} }
 .rc-file-card-pre { margin:0; padding:12px 16px; background:#0a0a0a; font-size:12px; line-height:1.65; overflow-x:auto; font-family:var(--ai-font-mono,'Cascadia Code',Consolas,monospace); color:#d4d4d4; }
 .rc-file-card-pre code { background:none !important; padding:0 !important; }
 .rc-file-card-truncated { padding:8px 12px; text-align:center; font-size:11px; color:var(--ai-text-muted); border-top:1px solid var(--ai-border); background:var(--ai-bg-secondary); }

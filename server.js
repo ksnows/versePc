@@ -6356,7 +6356,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                 if (mcpDirName) {
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcpDirName}:srg`, path: path.join(clientBaseDir, mcpDirName, `client-${mcpDirName}-srg.jar`), desc: 'Minecraft SRG映射客户端' });
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcpDirName}:extra`, path: path.join(clientBaseDir, mcpDirName, `client-${mcpDirName}-extra.jar`), desc: 'Minecraft额外客户端' });
-                } else {
+                } else if (!(versionJson.mainClass || '').includes('bootstraplauncher')) {
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:srg`, path: path.join(clientBaseDir, `${mcVer}-mcp`, `client-${mcVer}-mcp-srg.jar`), desc: 'Minecraft SRG映射客户端' });
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:extra`, path: path.join(clientBaseDir, `${mcVer}-mcp`, `client-${mcVer}-mcp-extra.jar`), desc: 'Minecraft额外客户端' });
                 }
@@ -12382,46 +12382,70 @@ async function verifyFileSha1(filePath, expectedSha1) {
 }
 
 async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
+    const baseLog = (msg) => console.log(`[BaseVersion-DEBUG] ${msg}`);
+    baseLog(`ensureBaseVersionInstalled: ${gameVersion}`);
     const baseJsonPath = path.join(VERSIONS_DIR, gameVersion, `${gameVersion}.json`);
     const baseJarPath = path.join(VERSIONS_DIR, gameVersion, `${gameVersion}.jar`);
+    baseLog(`baseJsonPath: ${baseJsonPath}, exists: ${fs.existsSync(baseJsonPath)}`);
+    baseLog(`baseJarPath: ${baseJarPath}, exists: ${fs.existsSync(baseJarPath)}`);
     const report = onProgress || (() => {});
     
     if (fs.existsSync(baseJsonPath) && fs.existsSync(baseJarPath)) {
+        baseLog(`Both files exist, verifying...`);
         try {
             const existingJson = JSON.parse(fs.readFileSync(baseJsonPath, 'utf-8'));
-            if (existingJson.downloads?.client?.sha1 && !(await verifyFileSha1(baseJarPath, existingJson.downloads.client.sha1))) {
-                console.warn(`[BaseVersion] ${gameVersion} JAR SHA1校验失败，重新下载`);
-                fs.unlinkSync(baseJarPath);
+            if (existingJson.downloads?.client?.sha1) {
+                baseLog(`Verifying JAR SHA1: ${existingJson.downloads.client.sha1}`);
+                const sha1Ok = await verifyFileSha1(baseJarPath, existingJson.downloads.client.sha1);
+                if (!sha1Ok) {
+                    baseLog(`JAR SHA1 verify failed, re-download`);
+                    fs.unlinkSync(baseJarPath);
+                } else {
+                    let libsOk = true;
+                    const libs = existingJson.libraries || [];
+                    let checkedCount = 0;
+                    for (const lib of libs) {
+                        if (checkedCount >= 5) break;
+                        if (lib.rules && !evaluateRules(lib.rules)) continue;
+                        const artifactPath = lib.downloads?.artifact?.path;
+                        if (artifactPath) {
+                            checkedCount++;
+                            const libFile = path.join(LIBRARIES_DIR, artifactPath);
+                            if (!fs.existsSync(libFile)) {
+                                baseLog(`Lib missing: ${artifactPath}`);
+                                libsOk = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (libsOk) {
+                        baseLog(`${gameVersion} already installed (verified)`);
+                        return { alreadyInstalled: true };
+                    }
+                    baseLog(`${gameVersion} libs incomplete, need re-download`);
+                }
             } else {
+                baseLog(`No sha1 to verify, checking libs...`);
                 let libsOk = true;
                 const libs = existingJson.libraries || [];
-                let checkedCount = 0;
-                for (const lib of libs) {
-                    if (checkedCount >= 5) break;
-                    if (lib.rules && !evaluateRules(lib.rules)) continue;
+                for (const lib of libs.slice(0, 5)) {
                     const artifactPath = lib.downloads?.artifact?.path;
-                    if (artifactPath) {
-                        checkedCount++;
-                        const libFile = path.join(LIBRARIES_DIR, artifactPath);
-                        if (!fs.existsSync(libFile)) {
-                            console.log(`[BaseVersion] 库文件缺失: ${artifactPath}，需要重新下载`);
-                            libsOk = false;
-                            break;
-                        }
+                    if (artifactPath && !fs.existsSync(path.join(LIBRARIES_DIR, artifactPath))) {
+                        libsOk = false;
+                        break;
                     }
                 }
                 if (libsOk) {
-                    console.log(`[BaseVersion] ${gameVersion} already installed (verified)`);
+                    baseLog(`${gameVersion} already installed (no sha1 check)`);
                     return { alreadyInstalled: true };
                 }
-                console.log(`[BaseVersion] ${gameVersion} 库文件不完整，重新下载...`);
             }
         } catch (e) {
-            console.warn(`[BaseVersion] ${gameVersion} 校验异常: ${e.message}`);
+            baseLog(`Verify error: ${e.message}`);
         }
     }
     
-    console.log(`[BaseVersion] ${gameVersion} not found or corrupted, installing...`);
+    baseLog(`${gameVersion} not found or corrupted, installing...`);
     
     try {
         report('正在获取版本信息...', 15);
@@ -13199,317 +13223,264 @@ async function runForgeInstallerJar(installerJarPath, mcDir, onProgress = null, 
 async function installForge(gameVersion, forgeVersion, onProgress = null, mirrorBaseUrl = null) {
     if (forgeVersion && forgeVersion.startsWith(gameVersion + '-')) {
         forgeVersion = forgeVersion.slice(gameVersion.length + 1);
-        console.log(`[Forge] version normalized, remove MC prefix -> ${forgeVersion}`);
+    }
+
+    const mcMajor = parseInt(gameVersion.split('.')[1]);
+    if (mcMajor >= 20 && forgeVersion.split('.').length >= 3) {
+        return await installNeoForge(gameVersion, forgeVersion, onProgress);
     }
 
     const versionId = `${gameVersion}-forge-${forgeVersion}`;
     const versionStr = `${gameVersion}-${forgeVersion}`;
 
-    try {
-        const baseResult = await ensureBaseVersionInstalled(gameVersion);
-        if (baseResult.error) {
-            return { success: false, error: baseResult.error };
-        }
+    const baseResult = await ensureBaseVersionInstalled(gameVersion);
+    if (baseResult.error) {
+        return { success: false, error: baseResult.error };
+    }
 
-        const forgeMavenBase = mirrorBaseUrl || 'https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge';
-        const forgeMavenOfficial = 'https://maven.minecraftforge.net/net/minecraftforge/forge';
-        const installerPath = path.join(DATA_DIR, 'temp', `forge-installer-${versionStr}.jar`);
-        fs.mkdirSync(path.dirname(installerPath), { recursive: true });
+    const forgeMavenBase = mirrorBaseUrl || 'https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge';
+    const forgeMavenOfficial = 'https://maven.minecraftforge.net/net/minecraftforge/forge';
+    const installerPath = path.join(DATA_DIR, 'temp', `forge-installer-${versionStr}.jar`);
+    fs.mkdirSync(path.dirname(installerPath), { recursive: true });
 
-        if (onProgress) onProgress(0, 'Downloading Forge installer...');
+    if (onProgress) onProgress(0, 'Downloading Forge installer...');
 
-        const installerUrls = [
-            `${forgeMavenBase}/${versionStr}/forge-${versionStr}-installer.jar`,
-            `${forgeMavenOfficial}/${versionStr}/forge-${versionStr}-installer.jar`
-        ];
-        console.log(`[Forge] Downloading installer from: ${installerUrls[0]}`);
-        let installerOk = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
-            const dlUrl = installerUrls[attempt % installerUrls.length];
-            try {
-                await downloadFileWithMirror(dlUrl, installerPath);
-                const dlStat = fs.statSync(installerPath);
-                if (dlStat.size < 64 * 1024) {
-                    console.error(`[Forge] installer too small (${dlStat.size} bytes), retry...`);
-                    try { fs.unlinkSync(installerPath); } catch (_) {}
-                    continue;
-                }
-                const fd = fs.openSync(installerPath, 'r');
-                const buf = Buffer.alloc(4);
-                fs.readSync(fd, buf, 0, 4, 0);
-                fs.closeSync(fd);
-                if (buf[0] !== 0x50 || buf[1] !== 0x4B || buf[2] !== 0x03 || buf[3] !== 0x04) {
-                    console.error(`[Forge] installer magic bytes invalid, retry...`);
-                    try { fs.unlinkSync(installerPath); } catch (_) {}
-                    continue;
-                }
-                installerOk = true;
-                break;
-            } catch (e) {
-                console.error(`[Forge] installer download failed: ${e.message}`);
+    const installerUrls = [
+        `${forgeMavenBase}/${versionStr}/forge-${versionStr}-installer.jar`,
+        `${forgeMavenOfficial}/${versionStr}/forge-${versionStr}-installer.jar`
+    ];
+    let installerOk = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const dlUrl = installerUrls[attempt % installerUrls.length];
+        try {
+            await downloadFileWithMirror(dlUrl, installerPath, null, 3, null, 60000);
+            const dlStat = fs.statSync(installerPath);
+            if (dlStat.size < 64 * 1024) {
                 try { fs.unlinkSync(installerPath); } catch (_) {}
+                continue;
+            }
+            const fd = fs.openSync(installerPath, 'r');
+            const buf = Buffer.alloc(4);
+            fs.readSync(fd, buf, 0, 4, 0);
+            fs.closeSync(fd);
+            if (buf[0] !== 0x50 || buf[1] !== 0x4B || buf[2] !== 0x03 || buf[3] !== 0x04) {
+                try { fs.unlinkSync(installerPath); } catch (_) {}
+                continue;
+            }
+            installerOk = true;
+            break;
+        } catch (e) {
+            try { fs.unlinkSync(installerPath); } catch (_) {}
+        }
+    }
+    if (!installerOk) {
+        return { success: false, error: 'Forge installer download/verify failed' };
+    }
+
+    if (onProgress) onProgress(0.1, 'Extracting Forge installer...');
+
+    const versionDir = path.join(VERSIONS_DIR, versionId);
+    fs.mkdirSync(versionDir, { recursive: true });
+
+    const AdmZip = require('adm-zip');
+    const zip = new AdmZip(installerPath);
+    const entries = zip.getEntries().map(e => e.entryName);
+
+    let ip = null;
+    const profileEntry = zip.getEntry('install_profile.json');
+    if (profileEntry) {
+        ip = JSON.parse(profileEntry.getData().toString('utf8'));
+    }
+    if (!ip) {
+        return { success: false, error: 'install_profile.json not found in installer' };
+    }
+
+    let vj = null;
+    const vjEntry = zip.getEntry('version.json');
+    if (vjEntry) {
+        vj = JSON.parse(vjEntry.getData().toString('utf8'));
+    } else if (ip.json) {
+        if (typeof ip.json === 'object') vj = ip.json;
+        else if (typeof ip.json === 'string') {
+            const entry = zip.getEntry(ip.json.replace(/^\//, ''));
+            if (entry) vj = JSON.parse(entry.getData().toString('utf8'));
+        }
+    }
+    if (!vj) {
+        return { success: false, error: 'version.json not found in installer' };
+    }
+
+    const mavenEntries = entries.filter(e => e.startsWith('maven/'));
+    let extractedCount = 0;
+    for (const entry of mavenEntries) {
+        const relativePath = entry.replace('maven/', '');
+        const destPath = path.join(LIBRARIES_DIR, relativePath);
+        const dir = path.dirname(destPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        if (fs.existsSync(destPath)) {
+            const stat = fs.statSync(destPath);
+            if (stat.isDirectory()) {
+                try { fs.rmSync(destPath, { recursive: true, force: true }); } catch (_) {}
             }
         }
-        if (!installerOk) {
-            throw new Error('Forge installer download/verify failed');
-        }
-
-        const versionDir = path.join(VERSIONS_DIR, versionId);
-        fs.mkdirSync(versionDir, { recursive: true });
-
-        if (onProgress) onProgress(0.1, 'Unpacking Forge installer...');
-
-        const AdmZip = require('adm-zip');
-        const zip = new AdmZip(installerPath);
-
-        let installProfile = null;
-        try {
-            const profileEntry = zip.getEntry('install_profile.json');
-            if (profileEntry) installProfile = JSON.parse(profileEntry.getData().toString('utf8'));
-        } catch (e) {}
-
-        let versionJsonData = null;
-        try {
-            const versionEntry = zip.getEntry('version.json') || zip.getEntry(`${versionId}.json`);
-            if (versionEntry) {
-                versionJsonData = JSON.parse(versionEntry.getData().toString('utf8'));
-            } else if (installProfile && typeof installProfile.json === 'object' && installProfile.json !== null) {
-                versionJsonData = installProfile.json;
-            } else if (installProfile && typeof installProfile.json === 'string' && installProfile.json) {
-                const jsonFileName = installProfile.json.replace(/^\//, '');
-                const jsonEntry = zip.getEntry(jsonFileName);
-                if (jsonEntry) {
-                    versionJsonData = JSON.parse(jsonEntry.getData().toString('utf8'));
-                }
-            }
-            if (!versionJsonData) {
-                for (const candidate of ['version.json', `${gameVersion}-forge-${forgeVersion}.json`, `${gameVersion}-forge.json`]) {
-                    const entry = zip.getEntry(candidate);
-                    if (entry) {
-                        try {
-                            versionJsonData = JSON.parse(entry.getData().toString('utf8'));
-                            break;
-                        } catch (_) {}
-                    }
-                }
-            }
-        } catch (e) { console.error('[Forge] read version JSON failed:', e.message); }
-
-        if (!versionJsonData) {
-            throw new Error('version.json not found in Forge installer, file may be corrupted');
-        }
-
-        // Extract client.lzma (BINPATCH data, needed by the processor)
-        try {
-            const clientLzma = zip.getEntry('data/client.lzma');
-            if (clientLzma) {
-                const binpatchDir = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', versionStr);
-                const binpatchPath = path.join(binpatchDir, `forge-${versionStr}-clientdata.lzma`);
-                if (!fs.existsSync(binpatchPath)) {
-                    fs.mkdirSync(binpatchDir, { recursive: true });
-                    fs.writeFileSync(binpatchPath, clientLzma.getData());
-                }
-            }
-        } catch (e) {}
-
-        // Save install_profile.json to version dir (needed by later processing)
-        if (installProfile) {
+        if (!fs.existsSync(destPath)) {
             try {
-                fs.writeFileSync(path.join(versionDir, 'install_profile.json'), JSON.stringify(installProfile, null, 2));
+                const entryObj = zip.getEntry(entry);
+                fs.writeFileSync(destPath, entryObj.getData());
+                extractedCount++;
             } catch (_) {}
         }
+    }
+    console.log(`[Forge] Extracted ${extractedCount} maven entries`);
 
-        // Extract all maven/ files to libraries (Forge core JARs are in here)
-        if (onProgress) onProgress(0.15, 'Extracting Forge core files...');
-        try {
-            const mavenEntries = zip.getEntries().filter(e => e.entryName.startsWith('maven/'));
-            for (const entry of mavenEntries) {
-                const relativePath = entry.entryName.replace('maven/', '');
-                const extractPath = path.join(LIBRARIES_DIR, relativePath);
-                if (!fs.existsSync(extractPath)) {
-                    try {
-                        const extractDir = path.dirname(extractPath);
-                        if (!fs.existsSync(extractDir)) fs.mkdirSync(extractDir, { recursive: true });
-                        fs.writeFileSync(extractPath, entry.getData());
-                    } catch (e) {}
-                } else if (extractPath.endsWith('.jar') && !isJarIntact(extractPath)) {
-                    try { fs.unlinkSync(extractPath); } catch (_) {}
-                    try { fs.writeFileSync(extractPath, entry.getData()); } catch (e) {}
-                }
-            }
-        } catch (e) {}
+    if (!ip.data) ip.data = {};
+    ip.data.BINPATCH = ip.data.BINPATCH || { client: '', server: '' };
 
-        // Pre-download MOJMAPS (processor depends on this)
-        if (installProfile && installProfile.data && installProfile.data.MOJMAPS) {
-            try {
-                const mojmapsRaw = installProfile.data.MOJMAPS.client;
-                const mojmapsRef = typeof mojmapsRaw === 'string' ? mojmapsRaw
-                    : (Array.isArray(mojmapsRaw) ? mojmapsRaw[0] : (mojmapsRaw?.value || ''));
-                const clean = mojmapsRef.replace(/[\[\]]/g, '');
-                const parts = clean.split(':');
-                if (parts.length >= 4) {
-                    const groupId = parts[0];
-                    const artifactId = parts[1];
-                    const libVersion = parts[2];
-                    const ext = parts.length > 4 ? parts[4] : (parts[3].includes('@') ? parts[3].split('@')[1] : 'txt');
-                    const groupPath = groupId.replace(/\./g, '/');
-                    const mappingsFileName = `${artifactId}-${libVersion}-mappings.${ext}`;
-                    const mappingsDir = path.join(LIBRARIES_DIR, groupPath, artifactId, libVersion);
-                    const mappingsPath = path.join(mappingsDir, mappingsFileName);
+    const forgeVersionPath = path.join(LIBRARIES_DIR, 'net', 'minecraftforge', 'forge', versionStr);
+    if (!fs.existsSync(forgeVersionPath)) fs.mkdirSync(forgeVersionPath, { recursive: true });
 
-                    if (!fs.existsSync(mappingsPath)) {
-                        if (onProgress) onProgress(0.18, 'Downloading MOJMAPS...');
-                        const mcVer = installProfile.version || gameVersion;
-                        const manifestBody = await httpGet('https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json');
-                        const manifest = JSON.parse(manifestBody);
-                        const verEntry = manifest.versions.find(v => v.id === mcVer);
-                        if (verEntry) {
-                            const verJsonUrl = verEntry.url.replace('https://piston-meta.mojang.com/', 'https://bmclapi2.bangbang93.com/');
-                            const mcVerJson = JSON.parse(await httpGet(verJsonUrl));
-                            const cm = mcVerJson.downloads?.client_mappings;
-                            if (cm) {
-                                let cmUrl = cm.url.replace('https://piston-data.mojang.com/', 'https://bmclapi2.bangbang93.com/');
-                                fs.mkdirSync(mappingsDir, { recursive: true });
-                                await downloadFileWithMirror(cmUrl, mappingsPath);
+    if (zip.getEntry('data/client.lzma')) {
+        const clientLzmaPath = path.join(forgeVersionPath, `forge-${versionStr}-clientdata.lzma`);
+        const entryObj = zip.getEntry('data/client.lzma');
+        fs.writeFileSync(clientLzmaPath, entryObj.getData());
+        ip.data.BINPATCH.client = `[net.minecraftforge:forge:${versionStr}:clientdata@lzma]`;
+    }
+    if (zip.getEntry('data/server.lzma')) {
+        const serverLzmaPath = path.join(forgeVersionPath, `forge-${versionStr}-serverdata.lzma`);
+        const entryObj = zip.getEntry('data/server.lzma');
+        fs.writeFileSync(serverLzmaPath, entryObj.getData());
+        ip.data.BINPATCH.server = `[net.minecraftforge:forge:${versionStr}:serverdata@lzma]`;
+    }
+    ip.data.INSTALLER = {
+        client: `[net.minecraftforge:forge:${versionStr}:installer]`,
+        server: `[net.minecraftforge:forge:${versionStr}:installer]`
+    };
+
+    if (onProgress) onProgress(0.2, 'Preparing processors...');
+
+    const processors = (ip.processors || [])
+        .filter(proc => !proc.sides || proc.sides.indexOf('client') !== -1);
+
+    const processorsInfo = [];
+    for (const proc of processors) {
+        let mainClass = '';
+        const procJarParts = proc.jar ? proc.jar.split(':') : [];
+        if (procJarParts.length >= 3) {
+            const groupPath = procJarParts[0].replace(/\./g, '/');
+            const classifier = procJarParts[3] || '';
+            const jarName = classifier
+                ? `${procJarParts[1]}-${procJarParts[2]}-${classifier}.jar`
+                : `${procJarParts[1]}-${procJarParts[2]}.jar`;
+            const jarPath = path.join(LIBRARIES_DIR, groupPath, procJarParts[1], procJarParts[2], jarName);
+            if (fs.existsSync(jarPath)) {
+                try {
+                    const jarZip = new AdmZip(jarPath);
+                    const manifestEntry = jarZip.getEntry('META-INF/MANIFEST.MF');
+                    if (manifestEntry) {
+                        const manifest = manifestEntry.getData().toString('utf8');
+                        for (const line of manifest.split(/\r?\n/)) {
+                            const trimmed = line.trim();
+                            if (trimmed.startsWith('Main-Class:')) {
+                                mainClass = trimmed.substring('Main-Class:'.length).trim();
+                                break;
                             }
                         }
                     }
-                }
-            } catch (e) {}
-        }
-
-        const versionJsonPath = path.join(versionDir, `${versionId}.json`);
-
-        if (installProfile) {
-            const profileLibs = installProfile.libraries || [];
-            const versionLibs = versionJsonData.libraries || [];
-            const existingNames = new Set(versionLibs.map(l => l.name).filter(Boolean));
-            for (const lib of profileLibs) {
-                if (lib.name && !existingNames.has(lib.name)) {
-                    versionLibs.push(lib);
-                    existingNames.add(lib.name);
-                }
-            }
-            versionJsonData.libraries = versionLibs;
-            if (installProfile.mainClass && !versionJsonData.mainClass) {
-                versionJsonData.mainClass = installProfile.mainClass;
+                } catch (_) {}
             }
         }
 
-        // Remove self-reference (the net.minecraftforge:forge:xxx in installer is for installer itself)
-        const forgeSelfPattern = new RegExp(`^net\\.minecraftforge:forge:${versionStr.replace(/[.*+?^${}()|[\]\\\\]/g, '\\$&')}$`);
-        versionJsonData.libraries = (versionJsonData.libraries || []).filter(lib => {
-            if (!lib.name) return true;
-            return !forgeSelfPattern.test(lib.name);
+        const classpath = (proc.classpath || []).filter(Boolean);
+        const resolvedArgs = (proc.args || []).map(a => a);
+        const outputs = proc.outputs || {};
+
+        processorsInfo.push({
+            jar: proc.jar,
+            mainClass,
+            classpath,
+            args: resolvedArgs,
+            outputs,
         });
-
-        const versionJson = {
-            id: versionId,
-            inheritsFrom: gameVersion,
-            mainClass: versionJsonData.mainClass || 'cpw.mods.bootstraplauncher.BootstrapLauncher',
-            type: 'release',
-            libraries: [...versionJsonData.libraries],
-            arguments: versionJsonData.arguments || { game: [], jvm: [] }
-        };
-
-        if (onProgress) onProgress(0.3, 'Downloading Forge libraries...');
-
-        const forgeLibsToDownload = [];
-        for (const lib of (versionJson.libraries || [])) {
-            const parts = lib.name ? lib.name.split(':') : [];
-            let libPath = null;
-            let expectedSha1 = null;
-
-            if (lib.downloads?.artifact?.path) {
-                libPath = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
-                expectedSha1 = lib.downloads.artifact.sha1 || null;
-            } else if (lib.name && parts.length >= 3) {
-                const groupDir = parts[0].replace(/\./g, path.sep);
-                const lname = parts[1];
-                const lver = parts[2];
-                const classifier = parts.length >= 4 ? parts[3] : '';
-                const jarName = classifier ? `${lname}-${lver}-${classifier}.jar` : `${lname}-${lver}.jar`;
-                libPath = path.join(LIBRARIES_DIR, groupDir, lname, lver, jarName);
-            }
-
-            if (!libPath || isLibValid(libPath, -1, expectedSha1)) continue;
-
-            if (lib.downloads?.artifact?.url) {
-                let url = lib.downloads.artifact.url;
-                url = url.replace('https://maven.minecraftforge.net/', 'https://bmclapi2.bangbang93.com/maven/');
-                forgeLibsToDownload.push({ lib, url, fallbackUrl: lib.downloads.artifact.url, libPath, expectedSha1 });
-            } else if (parts.length >= 3) {
-                const mavenGroup = parts[0].replace(/\./g, '/');
-                const lname = parts[1];
-                const lver = parts[2];
-                const classifier = parts.length >= 4 ? parts[3] : '';
-                const jarName = classifier ? `${lname}-${lver}-${classifier}.jar` : `${lname}-${lver}.jar`;
-                const officialUrl = lib.url || 'https://libraries.minecraft.net/';
-                const dlUrl = `${officialUrl}${mavenGroup}/${lname}/${lver}/${jarName}`;
-                const mirrorUrl = dlUrl.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/libraries/');
-                forgeLibsToDownload.push({ lib, url: mirrorUrl, fallbackUrl: dlUrl, libPath, expectedSha1: null });
-            }
-        }
-
-        let forgeLibFailures = 0;
-        if (forgeLibsToDownload.length > 0) {
-            const FORGE_PARALLEL = 8;
-            let completed = 0, failed = 0, active = 0, done = null;
-
-            const scheduleNext = () => {
-                while (active < FORGE_PARALLEL && completed + failed + active < forgeLibsToDownload.length) {
-                    const item = forgeLibsToDownload[completed + failed + active];
-                    active++;
-                    (async () => {
-                        let success = false;
-                        for (let retry = 0; retry < 3; retry++) {
-                            try {
-                                const dlUrl = retry === 0 ? item.url : item.fallbackUrl;
-                                await downloadFileWithMirror(dlUrl, item.libPath);
-                                if (isLibValid(item.libPath, -1, item.expectedSha1)) { success = true; break; }
-                                if (retry < 2) {
-                                    try { fs.unlinkSync(item.libPath); } catch (_) {}
-                                    await new Promise(r => setTimeout(r, 3000 + retry * 2000));
-                                }
-                            } catch (e) {
-                                if (retry >= 2) console.log(`[Forge] Failed to download ${item.lib.name}: ${e.message}`);
-                                else await new Promise(r => setTimeout(r, 3000 + retry * 2000));
-                            }
-                        }
-                        if (!success) forgeLibFailures++;
-                    })().then(() => { completed++; }).catch(() => { failed++; }).finally(() => {
-                        active--;
-                        if (active === 0 && completed + failed >= forgeLibsToDownload.length && done) done();
-                        else if (active < FORGE_PARALLEL && completed + failed + active < forgeLibsToDownload.length) scheduleNext();
-                    });
-                }
-            };
-            await new Promise(resolve => { done = resolve; scheduleNext(); });
-        }
-
-        fs.writeFileSync(versionJsonPath, JSON.stringify(versionJson, null, 2));
-        _invalidateResolvedJsonCache(versionId);
-        console.log(`[Forge] version JSON written: ${versionJsonPath}, libs=${(versionJson.libraries||[]).length}, dlFailed=${forgeLibFailures}`);
-
-        if (onProgress) onProgress(0.8, 'Finalizing Forge libraries...');
-        try { await mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion); } catch (mergeErr) {
-            console.warn(`[Forge] merge failed: ${mergeErr.message}`);
-        }
-
-        try { fs.unlinkSync(installerPath); } catch (_) {}
-
-        if (onProgress) onProgress(1, 'Forge install complete');
-        return { success: true, versionId: versionId, libsMissing: forgeLibFailures };
-    } catch (e) {
-        console.error(`[Forge] Installation failed: ${e.message}`);
-        try {
-            const vDir = path.join(VERSIONS_DIR, `${gameVersion}-forge-${forgeVersion}`);
-            if (fs.existsSync(vDir)) {
-                fs.rmSync(vDir, { recursive: true, force: true });
-            }
-        } catch (cleanupErr) {}
-        return { success: false, error: e.message };
     }
+
+    const configData = { installProfile: ip, versionJson: vj, processors: processorsInfo };
+    const configPath = path.join(DATA_DIR, 'temp', `forge-config-${versionStr}.json`);
+    fs.writeFileSync(configPath, JSON.stringify(configData, null, 2));
+
+    if (onProgress) onProgress(0.3, 'Running Forge processors...');
+
+    const installerScriptSrc = path.join(__dirname, 'forge-installer.js');
+    const installerScriptDst = path.join(DATA_DIR, 'temp', `forge-installer-${versionId}.js`);
+    try {
+        fs.mkdirSync(path.dirname(installerScriptDst), { recursive: true });
+        if (fs.existsSync(installerScriptDst)) { try { fs.unlinkSync(installerScriptDst); } catch(_) {} }
+        const _srcContent = fs.readFileSync(installerScriptSrc, 'utf8');
+        fs.writeFileSync(installerScriptDst, _srcContent, 'utf8');
+    } catch(_) {}
+
+    let nodeExe = 'node';
+    if (__dirname.includes('app.asar') && process.platform === 'win32') {
+        const possibleNode = path.join(path.dirname(process.execPath), 'node.exe');
+        if (fs.existsSync(possibleNode)) nodeExe = possibleNode;
+    }
+    const args = [installerScriptDst,
+        '--root', DATA_DIR,
+        '--libs', LIBRARIES_DIR,
+        '--verdir', versionDir,
+        '--forgever', versionStr,
+        '--config', configPath
+    ];
+
+    return new Promise((resolve) => {
+        const proc = spawn(nodeExe, args, {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            windowsHide: true,
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: '' }
+        });
+        let stdout = '', stderr = '', doneMsg = null;
+        const parse = (line) => {
+            if (!line || !line.startsWith('{')) return;
+            try {
+                const msg = JSON.parse(line);
+                if (msg.type === 'progress' && onProgress) onProgress(msg.percent, msg.message);
+                if (msg.type === 'done') {
+                    doneMsg = msg;
+                    if (msg.success) {
+                        _invalidateResolvedJsonCache(versionId);
+                    }
+                    resolve(msg);
+                }
+            } catch (_) {}
+        };
+        proc.stdout.on('data', (data) => {
+            stdout += data.toString();
+            const lines = stdout.split('\n');
+            stdout = lines.pop();
+            for (const line of lines) parse(line.trim());
+        });
+        proc.stderr.on('data', (data) => {
+            stderr += data.toString();
+            const lines = stderr.split('\n');
+            stderr = lines.pop();
+            for (const line of lines) parse(line.trim());
+        });
+        proc.on('close', (code) => {
+            if (stdout.trim()) parse(stdout.trim());
+            if (stderr.trim()) parse(stderr.trim());
+            if (!doneMsg) {
+                if (code === 0) {
+                    _invalidateResolvedJsonCache(versionId);
+                    resolve({ success: true, versionId });
+                } else {
+                    const errMsg = stderr.trim() || stdout.trim() || `Exit code ${code}`;
+                    resolve({ success: false, error: `forge-installer.js exited with code ${code}: ${errMsg.slice(-300)}` });
+                }
+            }
+        });
+        proc.on('error', (err) => {
+            resolve({ success: false, error: `Failed to start forge-installer.js: ${err.message}` });
+        });
+    });
 }
 
 function isLibValid(libPath, expectedSize, expectedSha1) {
@@ -13860,15 +13831,11 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
                                 if (isLibValid(item.libPath, -1, item.expectedSha1)) { success = true; break; }
                                 if (retry < 2) {
                                     try { fs.unlinkSync(item.libPath); } catch (_) {}
-                                    const delay = 3000 + retry * 2000;
-                                    const start = Date.now();
-                                    while (Date.now() - start < delay) {}
+                                    await new Promise(r => setTimeout(r, 3000 + retry * 2000));
                                 }
                             } catch (e) {
                                 if (retry < 2) {
-                                    const delay = 3000 + retry * 2000;
-                                    const start = Date.now();
-                                    while (Date.now() - start < delay) {}
+                                    await new Promise(r => setTimeout(r, 3000 + retry * 2000));
                                 } else {
                                     console.log(`[NeoForge] Failed to download ${item.lib.name}: ${e.message}`);
                                 }
@@ -14087,6 +14054,15 @@ async function mergeFabricLoaderToVersion(versionId, gameVersion, loaderVersion,
 }
 
 async function mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion) {
+    const mergeLogFile = path.join(DATA_DIR, 'temp', 'forge-merge.log');
+    const mergeLog = (msg) => {
+        const line = `[${new Date().toISOString()}] ${msg}\n`;
+        try { fs.appendFileSync(mergeLogFile, line); } catch(_) {}
+        console.log(`[Forge-MERGE] ${msg}`);
+    };
+    try { fs.mkdirSync(path.dirname(mergeLogFile), { recursive: true }); } catch(_) {}
+    try { fs.writeFileSync(mergeLogFile, ''); } catch(_) {}
+    mergeLog(`mergeForgeLoaderToVersion: versionId=${versionId}, gameVersion=${gameVersion}, forgeVersion=${forgeVersion}`);
     const versionDir = path.join(VERSIONS_DIR, versionId);
     const jsonPath = path.join(versionDir, `${versionId}.json`);
     const AdmZip = require('adm-zip');
@@ -14095,11 +14071,13 @@ async function mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion) {
     const installerPath = path.join(DATA_DIR, 'temp', `forge-installer-${gameVersion}-${forgeVersion}.jar`);
     if (!fs.existsSync(path.dirname(installerPath))) fs.mkdirSync(path.dirname(installerPath), { recursive: true });
 
-    console.log(`[Forge] Downloading installer: ${installerUrl}`);
+    forgeLog(`Downloading installer: ${installerUrl}`);
     await downloadFileWithMirror(installerUrl, installerPath);
+    forgeLog(`Installer downloaded: ${fs.statSync(installerPath).size} bytes`);
 
     const zip = new AdmZip(installerPath);
     const versionEntry = zip.getEntry('version.json') || zip.getEntry(`${gameVersion}-forge-${forgeVersion}.json`);
+    forgeLog(`version.json entry: ${versionEntry ? 'FOUND' : 'NOT FOUND'}`);
 
     if (versionEntry) {
         const forgeJson = JSON.parse(versionEntry.getData().toString('utf8'));
@@ -14151,6 +14129,7 @@ async function mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion) {
             }
         }
     } else {
+        forgeLog(`version.json NOT found, using fallback mainClass`);
         const versionJson = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
         versionJson.mainClass = 'cpw.mods.modlauncher.Launcher';
         versionJson.arguments = versionJson.arguments || {};
@@ -14164,33 +14143,47 @@ async function mergeForgeLoaderToVersion(versionId, gameVersion, forgeVersion) {
     try { fs.unlinkSync(installerPath); } catch (e) {}
 
     const ipPath = path.join(versionDir, 'install_profile.json');
+    forgeLog(`install_profile.json exists: ${fs.existsSync(ipPath)}`);
     if (fs.existsSync(ipPath)) {
         try {
             const ipData = JSON.parse(fs.readFileSync(ipPath, 'utf8'));
+            forgeLog(`install_profile.json: processors=${ipData.processors?.length || 0}, data keys=${ipData.data ? Object.keys(ipData.data).join(', ') : 'none'}`);
             if (ipData.processors && ipData.processors.length > 0) {
-                console.log(`[Forge] 检测到 ${ipData.processors.length} 个处理器，开始执行...`);
+                forgeLog(`Found ${ipData.processors.length} processors, executing...`);
                 try {
-                    const { execSync: _es } = require('child_process');
+                    const { exec } = require('child_process');
                     const _scriptSrc = path.join(__dirname, 'forge-processor.js');
                     const _scriptDst = path.join(DATA_DIR, 'temp', 'forge-processor.js');
                     fs.mkdirSync(path.dirname(_scriptDst), { recursive: true });
                     if (fs.existsSync(_scriptDst)) { try { fs.unlinkSync(_scriptDst); } catch(_) {} }
                     const _srcContent = fs.readFileSync(_scriptSrc, 'utf8');
                     fs.writeFileSync(_scriptDst, _srcContent, 'utf8');
+                    forgeLog(`Script written to: ${_scriptDst}`);
                     const _cmd = `node "${_scriptDst}" --root "${DATA_DIR}" --libs "${LIBRARIES_DIR}" --mcver "${gameVersion}" --forgever "${forgeVersion}"`;
-                    console.log(`[Forge] Running: ${_cmd}`);
-                    const _out = _es(_cmd, { timeout: 240000, encoding: 'utf8', maxBuffer: 10*1024*1024, windowsHide: true });
-                    console.log(`[Forge] Script output:\n${_out}`);
+                    forgeLog(`Running: ${_cmd}`);
+                    await new Promise((resolve, reject) => {
+                        exec(_cmd, { timeout: 240000, encoding: 'utf8', maxBuffer: 10*1024*1024, windowsHide: true }, (err, stdout, stderr) => {
+                            if (stdout) forgeLog(`Script output:\n${stdout}`);
+                            if (stderr) console.warn(`[Forge-DEBUG] Script stderr:\n${stderr}`);
+                            if (err) {
+                                forgeLog(`[ERROR] Script failed: ${err.message}`);
+                                resolve();
+                            } else {
+                                forgeLog(`Script completed successfully`);
+                                resolve();
+                            }
+                        });
+                    });
                 } catch (_procErr) {
-                    console.error(`[Forge] Script failed: ${_procErr.message}`);
+                    forgeLog(`[ERROR] Script error: ${_procErr.message}`);
                 }
             }
         } catch (e) {
-            console.warn(`[Forge] 读取 install_profile.json 失败: ${e.message}`);
+            forgeLog(`[ERROR] Failed to read install_profile.json: ${e.message}`);
         }
     }
 
-    console.log(`[Forge] Loader merged into version: ${versionId}`);
+    forgeLog(`Loader merged into version: ${versionId}`);
 }
 
 // ============================================================================
@@ -15139,10 +15132,9 @@ async function performInstallation(sessionId, versionDetails) {
                         const versionJsonPath = path.join(VERSIONS_DIR, versionId, `${versionId}.json`);
                         if (fs.existsSync(versionJsonPath)) {
                             const vj = JSON.parse(fs.readFileSync(versionJsonPath, 'utf-8'));
-                            vj.inheritsFrom = loaderResult.versionId;
+                            vj.inheritsFrom = gameVersion;
                             fs.writeFileSync(versionJsonPath, JSON.stringify(vj, null, 2));
                             _invalidateResolvedJsonCache(versionId);
-                            console.log(`[API-install] 设置 inheritsFrom: ${loaderResult.versionId}`);
                         }
                     }
                 } else if (loaderType === 'neoforge') {
