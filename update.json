@@ -1,13 +1,13 @@
 {
-  "version": "1.2.0",
-  "releaseDate": "2026-06-15T00:00:00Z",
-  "releaseName": "VersePC v1.2.0",
-  "releaseNotes": "## 更新内容\n\n- 修复了 80 余个 bug\n- 新增了许多神秘东西\n\n## ⚠️ 重要提示\n\n- 当前版本不要使用整合包下载功能\n- 如需使用 Forge，可通过"添加已有文件夹"导入外部 Forge 版本",
+  "version": "1.2.5",
+  "releaseDate": "2026-06-17T00:00:00Z",
+  "releaseName": "VersePC v1.2.5",
+  "releaseNotes": "## 更新内容\n\nBug 修复：\n- 修复陶瓦联机组件安装失败（文件名匹配规则不识别带版本号的可执行文件）\n- 修复陶瓦联机 API 请求失败（空响应体被误判为 JSON 解析错误）\n- 修复 Fabric 安装模组加载器时页面阻塞（同步下载改为异步）\n- 修复删除版本后文件夹残留（添加删除后验证和强制清理）\n- 修复启动黑屏（窗口等待页面加载完成后再显示）\n\n性能优化：\n- 启动速度大幅优化（server.js 加载、完整性检查、数据修复等全部延迟到窗口显示后）\n- 僵尸进程检测和端口清理改为异步，不再阻塞启动\n- 端口清理从 10 次串行查询合并为 1 次异步查询\n- 陶瓦联机新增 jsDelivr CDN 加速源，国内下载更快\n- Fabric 组件下载从同步改为异步，页面不再卡死\n\n其他：\n- 重要提示文案更新为\"不要使用整合包下载功能\"",
   "files": {
     "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.2.0/VersePC-Setup-1.2.0.exe",
-      "size": 162863480,
-      "sha256": "98a9b665f1cfd5ce70adaad4715d5208b5209efac38b0e2be2b25bedff6581bc"
+      "url": "https://github.com/doujie081231/versePc/releases/download/v1.2.5/VersePC-Setup-1.2.5.exe",
+      "size": 163514991,
+      "sha256": "dfa0aec215cf50631bdbc4cd7f311e88e6b951cb7c9fd181da9519f0f6440153"
     }
   }
 }
