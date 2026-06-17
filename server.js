@@ -13454,7 +13454,10 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
 
     const mcMajor = parseInt(gameVersion.split('.')[1]);
     if (mcMajor >= 20 && forgeVersion.split('.').length >= 3) {
-        return await installNeoForge(gameVersion, forgeVersion, onProgress);
+        const isNeoForgeInstall = forgeVersion.includes('neoforge') || forgeVersion.includes('neoforged');
+        if (isNeoForgeInstall) {
+            return await installNeoForge(gameVersion, forgeVersion, onProgress);
+        }
     }
 
     const versionId = `${gameVersion}-forge-${forgeVersion}`;
