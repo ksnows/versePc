@@ -516,6 +516,7 @@ const API = {
     easytierHost: (gamePort, playerName) => apiPost('/api/easytier/host', { gamePort, playerName }),
     easytierGuest: (roomCode, playerName) => apiPost('/api/easytier/guest', { roomCode, playerName }),
     easytierStop: () => apiPost('/api/easytier/stop', {}),
+    easytierDiagnose: () => apiGet('/api/easytier/diagnose'),
     easytierPeers: () => apiGet('/api/easytier/peers'),
     easytierLog: () => apiGet('/api/easytier/log'),
 

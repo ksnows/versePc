@@ -1422,13 +1422,17 @@ async function fetchTerracottaPublicNodes(forceRefresh = false) {
     }
     if (!terracottaPublicNodes || terracottaPublicNodes.length === 0) {
         terracottaPublicNodes = [
+            'https://etnode.zkitefly.eu.org/node1',
+            'https://etnode.zkitefly.eu.org/node2',
             'tcp://public.easytier.cn:11010',
             'udp://public.easytier.cn:11010',
             'tcp://easytier.1-hub.com:11010',
-            'udp://easytier.1-hub.com:11010'
+            'udp://easytier.1-hub.com:11010',
+            'tcp://public.easytier.io:11010',
+            'udp://public.easytier.io:11010'
         ];
         terracottaPublicNodesExpiry = Date.now() + 600000;
-        console.log('[Terracotta] 使用硬编码默认公共节点');
+        console.log('[Terracotta] 使用硬编码默认公共节点 (8个)');
     }
     return terracottaPublicNodes;
 }
@@ -1776,7 +1780,7 @@ function stopTerracotta() {
 }
 
 const TERRACOTTA_ERROR_MAP = {
-    0: { key: 'PING_HOST_FAIL', msg: '无法连接到主机，请检查网络' },
+    0: { key: 'PING_HOST_FAIL', msg: '无法连接到P2P网络，请检查网络或尝试重启软件。如持续失败，可能是防火墙/杀毒软件拦截了陶瓦联机组件' },
     1: { key: 'PING_HOST_RST', msg: '主机连接被重置，可能NAT类型不兼容' },
     2: { key: 'GUEST_ET_CRASH', msg: '客户端网络组件崩溃' },
     3: { key: 'HOST_ET_CRASH', msg: '主机网络组件崩溃' },
@@ -23061,6 +23065,49 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             case '/api/easytier/stop': {
                 stopTerracotta();
                 sendJSON({ success: true });
+                break;
+            }
+
+            case '/api/easytier/diagnose': {
+                const diagResults = [];
+                const nodes = await fetchTerracottaPublicNodes(true);
+                console.log(`[Terracotta] 诊断: 测试 ${nodes.length} 个公共节点...`);
+                for (const node of nodes) {
+                    const start = Date.now();
+                    let status = 'unknown';
+                    let latency = -1;
+                    try {
+                        if (node.startsWith('http')) {
+                            const ctrl = new AbortController();
+                            const t = setTimeout(() => ctrl.abort(), 5000);
+                            const r = await fetch(node, { method: 'HEAD', signal: ctrl.signal });
+                            clearTimeout(t);
+                            status = r.ok ? 'ok' : `http_${r.status}`;
+                            latency = Date.now() - start;
+                        } else {
+                            const proto = node.split('://')[0];
+                            const hostPort = node.split('://')[1];
+                            const host = hostPort.split(':')[0];
+                            const port = parseInt(hostPort.split(':')[1], 10) || 11010;
+                            const net = require('net');
+                            await new Promise((resolve, reject) => {
+                                const sock = net.createConnection({ host, port, timeout: 5000 }, () => {
+                                    status = 'ok';
+                                    latency = Date.now() - start;
+                                    sock.destroy();
+                                    resolve();
+                                });
+                                sock.on('error', (e) => { status = `err_${e.code}`; reject(e); });
+                                sock.on('timeout', () => { status = 'timeout'; sock.destroy(); reject(new Error('timeout')); });
+                            });
+                        }
+                    } catch (e) {
+                        if (status === 'unknown') status = `err_${e.code || e.message}`;
+                    }
+                    diagResults.push({ node, status, latency });
+                    console.log(`[Terracotta] 诊断: ${node} -> ${status} (${latency}ms)`);
+                }
+                sendJSON({ nodes: diagResults });
                 break;
             }
 
