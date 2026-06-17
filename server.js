@@ -24508,6 +24508,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                     const session = modDownloadSessions.get(sessionId);
                                     if (session) { session.status = 'completed'; session.progress = 100; session.message = `${safeName} 下载完成！`; }
                                 }
+                                }
                             } catch (e) {
                             const session = modDownloadSessions.get(sessionId);
                             if (session) {
