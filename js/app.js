@@ -3383,9 +3383,21 @@ async function installModLoader() {
             return;
         }
         if (result.success) {
+            let installedId = result.versionId;
+            if (!installedId) {
+                if (currentLoaderType === 'fabric') installedId = `fabric-loader-${loaderVersion}-${gameVersion}`;
+                else if (currentLoaderType === 'forge') installedId = `${gameVersion}-forge-${loaderVersion}`;
+                else if (currentLoaderType === 'neoforge') installedId = `${gameVersion}-neoforge-${loaderVersion}`;
+                else installedId = `${gameVersion}-${currentLoaderType}-${loaderVersion}`;
+            }
             showToast(`${loaderNames[currentLoaderType] || currentLoaderType} 安装成功！`, 'success');
             closeModLoaderModal();
             await loadVersions(true);
+            if (launchVersionCustomSelect) {
+                launchVersionCustomSelect.setValue(installedId);
+                _cachedLastLaunchVersion = installedId;
+                try { window.electronAPI.store.set('versepc_last_launch_version', installedId); } catch (_) {}
+            }
         } else {
             showToast(result.error || '安装失败', 'error');
         }
