@@ -19365,6 +19365,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             case '/api/version/delete': {
                 const body6 = await readBody();
                 const { versionId: dvId, permanent: dvPermanent } = body6;
+                console.log(`[version-delete] 收到删除请求: versionId="${dvId}", permanent=${dvPermanent}`);
                 if (!dvId) { sendError('Missing versionId', 400); break; }
                 try {
                     const cleanId = dvId.replace(/ \[外部\d*\]/, '');
@@ -19506,6 +19507,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         _versionsCacheTime = 0;
 
                         sendJSON({ success: true, deleted: allDeletedIds, permanent: !!dvPermanent });
+                        console.log(`[version-delete] 删除成功: ${allDeletedIds.join(', ')}`);
                     } else {
                         sendJSON({ success: false, error: `删除失败: ${deleteError || '文件可能被占用，请关闭游戏后重试'}`, permanent: !!dvPermanent });
                     }

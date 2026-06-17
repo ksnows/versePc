@@ -2414,9 +2414,15 @@ async function updateVersionSelects() {
 }
 
 async function quickDeleteErrorVersion(versionId) {
-    if (!confirm(`确定要删除版本 "${versionId}" 吗？`)) return;
+    console.log('[Delete] quickDeleteErrorVersion called:', versionId);
+    if (!confirm(`确定要删除版本 "${versionId}" 吗？`)) {
+        console.log('[Delete] 用户取消');
+        return;
+    }
+    console.log('[Delete] 用户确认，调用API...');
     try {
         const r = await API.deleteVersion(versionId, false);
+        console.log('[Delete] API返回:', JSON.stringify(r));
         if (r.success) {
             showToast(`版本 ${versionId} 已删除`, 'success');
             await loadVersions(true);
@@ -2424,6 +2430,7 @@ async function quickDeleteErrorVersion(versionId) {
             showToast(r.error || '删除失败', 'error');
         }
     } catch (e) {
+        console.error('[Delete] API异常:', e);
         showToast('删除失败: ' + (e.message || e), 'error');
     }
 }
