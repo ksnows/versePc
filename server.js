@@ -16302,6 +16302,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         if (abortSignal && abortSignal.aborted) { inFlight--; updateOverall(); return; }
         const downloads = fileEntry.downloads || [];
         if (!downloads.length) {
+            console.warn(`[mrpack] 模组 ${index + 1}/${filesList.length} 无下载链接，跳过`);
             if (modFiles[index]) { modFiles[index].status = 'failed'; modFiles[index].error = '无可用下载链接'; }
             failCount++; inFlight--; updateOverall();
             return;
@@ -16310,6 +16311,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         const fileName = path.basename(fileEntry.path || (downloads[0] || 'unknown'));
         let destPath = path.join(versionDir, fileEntry.path || path.join('mods', fileName));
         ensureDir(destPath);
+        console.log(`[mrpack] 下载 [${index + 1}/${filesList.length}] ${fileName} (${(fileEntry.fileSize / 1024).toFixed(0)}KB) 从 ${downloads[0]}`);
 
         if (modFiles[index]) { modFiles[index].status = 'downloading'; modFiles[index].progress = 0; }
         updateOverall();
@@ -16389,7 +16391,23 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 if (projectId) {
                     console.log(`[mrpack] Mod ${fileName} 常规下载失败，通过Modrinth API重新获取下载链接 (projectId=${projectId})...`);
                     try {
-                        const apiRes = await fetchJSON(`${MODRINTH_API}/project/${projectId}/version`);
+                        const loaderList = [...targetLoaders];
+                        let apiRes = [];
+                        if (loaderList.length > 0 && mcVersion) {
+                            const qParams = `loaders=${JSON.stringify(loaderList)}&game_versions=${JSON.stringify([mcVersion])}`;
+                            console.log(`[mrpack] 查询 Modrinth API: projectId=${projectId}, loaders=${loaderList.join(',')}, mc=${mcVersion}`);
+                            apiRes = await fetchJSON(`${MODRINTH_API}/project/${projectId}/version?${qParams}`);
+                        }
+                        if (!apiRes || apiRes.length === 0) {
+                            if (mcVersion) {
+                                console.log(`[mrpack] 精确匹配无结果，放宽为仅匹配 MC 版本 ${mcVersion}`);
+                                apiRes = await fetchJSON(`${MODRINTH_API}/project/${projectId}/version?game_versions=${JSON.stringify([mcVersion])}`);
+                            }
+                        }
+                        if (!apiRes || apiRes.length === 0) {
+                            console.log(`[mrpack] 仍无结果，查询所有版本`);
+                            apiRes = await fetchJSON(`${MODRINTH_API}/project/${projectId}/version`);
+                        }
                         if (apiRes && Array.isArray(apiRes) && apiRes.length > 0) {
                             for (const ver of apiRes) {
                                 if (downloaded) break;
@@ -16433,12 +16451,26 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 const searchName = fileName.replace(/[-_]\d+[\d._-]*\.jar$/, '').replace(/[-_]/g, ' ').trim();
                 if (searchName.length > 2) {
                     try {
-                        const searchRes = await fetchJSON(`${MODRINTH_API}/search?query=${encodeURIComponent(searchName)}&facets=[["project_type:mod"]]`);
+                        const loaderList = [...targetLoaders];
+                        const facets = [['project_type:mod']];
+                        if (loaderList.length > 0) facets.push([`categories:${loaderList[0]}`]);
+                        const searchRes = await fetchJSON(`${MODRINTH_API}/search?query=${encodeURIComponent(searchName)}&facets=${JSON.stringify(facets)}`);
                         if (searchRes && searchRes.hits && searchRes.hits.length > 0) {
+                            console.log(`[mrpack] 搜索到 ${searchRes.hits.length} 个候选项目: ${searchRes.hits.map(h => h.slug).join(', ')}`);
                             for (const hit of searchRes.hits.slice(0, 3)) {
                                 if (downloaded) break;
                                 try {
-                                    const verRes = await fetchJSON(`${MODRINTH_API}/project/${hit.project_id}/version?game_versions=["${mcVersion}"]`);
+                                    const loaderList2 = [...targetLoaders];
+                                    let verRes = [];
+                                    if (loaderList2.length > 0 && mcVersion) {
+                                        verRes = await fetchJSON(`${MODRINTH_API}/project/${hit.project_id}/version?loaders=${JSON.stringify(loaderList2)}&game_versions=${JSON.stringify([mcVersion])}`);
+                                    }
+                                    if (!verRes || verRes.length === 0) {
+                                        verRes = await fetchJSON(`${MODRINTH_API}/project/${hit.project_id}/version?game_versions=${JSON.stringify([mcVersion])}`);
+                                    }
+                                    if (!verRes || verRes.length === 0) {
+                                        verRes = await fetchJSON(`${MODRINTH_API}/project/${hit.project_id}/version`);
+                                    }
                                     if (verRes && Array.isArray(verRes) && verRes.length > 0) {
                                         for (const ver of verRes) {
                                             if (downloaded) break;
@@ -16462,17 +16494,22 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                                                         } else {
                                                             try { fs.unlinkSync(destPath); } catch (_) {}
                                                         }
-                                                    } catch (_) {
+                                                    } catch (dlErr) {
+                                                        console.warn(`[mrpack] 搜索回退下载失败: ${f.filename} - ${dlErr.message}`);
                                                         try { fs.unlinkSync(destPath); } catch (_) {}
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                } catch (_) {}
+                                } catch (verErr) {
+                                    console.warn(`[mrpack] 获取 ${hit.slug} 版本失败: ${verErr.message}`);
+                                }
                             }
                         }
-                    } catch (_) {}
+                    } catch (searchErr) {
+                        console.warn(`[mrpack] 文件名搜索失败: ${searchName} - ${searchErr.message}`);
+                    }
                 }
             }
 
@@ -16515,8 +16552,10 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     await Promise.all(pool);
     try { _modAgent.destroy(); } catch (_) {}
     if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
+    console.log(`[mrpack] Mod下载完成: ${okCount}成功 ${failCount}失败 (共${filesList.length}个, 并行=${Math.min(PARALLEL_MODS, filesList.length)})`);
     if (failCount > 0) {
-        console.warn(`[mrpack] Mod下载汇总: ${okCount}成功 ${failCount}失败 (共${filesList.length}个)`);
+        const failedNames = modFiles.filter(m => m.status === 'failed').map(m => m.name).join(', ');
+        console.warn(`[mrpack] 失败的模组: ${failedNames}`);
     }
 
     progress('repair', '正在修复损坏的模组文件...', 88);
@@ -17033,6 +17072,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         if (abortSignal && abortSignal.aborted) { cfInFlight--; cfUpdateOverall(); return; }
         const projectID = file.projectID;
         const fileID    = file.fileID;
+        console.log(`[CurseForge] 下载 [${index + 1}/${cfFiles.length}] project=${projectID} file=${fileID}`);
         const fileSize  = file.fileLength || 0;
         if (cfModFiles[index]) { cfModFiles[index].status = 'downloading'; cfModFiles[index].progress = 0; }
         cfUpdateOverall();
@@ -17124,8 +17164,13 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         if (!cfDownloaded && !(abortSignal && abortSignal.aborted) && cfApiKey) {
             console.log(`[CurseForge] Mod ${projectID}:${fileID} 常规下载失败，尝试通过API获取其他版本...`);
             try {
-                const allFilesRes = await fetchJSON(`${CURSEFORGE_API}/mods/${projectID}/files`, { 'x-api-key': cfApiKey });
+                let cfLoaderTypeFilter = '';
+                if (forgeVerCF) cfLoaderTypeFilter = '&modLoaderType=1';
+                else if (fabricVerCF) cfLoaderTypeFilter = '&modLoaderType=4';
+                else if (neoforgeVerCF) cfLoaderTypeFilter = '&modLoaderType=5';
+                const allFilesRes = await fetchJSON(`${CURSEFORGE_API}/mods/${projectID}/files?gameVersion=${mcVersion}${cfLoaderTypeFilter}`, { 'x-api-key': cfApiKey });
                 if (allFilesRes && allFilesRes.data && Array.isArray(allFilesRes.data)) {
+                    console.log(`[CurseForge] 查询到 ${allFilesRes.data.length} 个备用版本 (mc=${mcVersion}, loader=${cfLoaderTypeFilter || 'any'})`);
                     const mcVer = mcVersion;
                     const matchingFiles = allFilesRes.data.filter(f =>
                         f.gameVersions && f.gameVersions.includes(mcVer) &&
@@ -17390,6 +17435,9 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         const failedModNames = cfFailedMods.map(m => m.name || m.projectID).join(', ');
         failWarning = `${cfFailedCount}/${cfFiles.length} 个Mod下载失败: ${failedModNames}。请检查网络后重试。`;
         console.warn(`[CurseForge] Mod下载汇总: ${cfFiles.length - cfFailedCount}成功 ${cfFailedCount}失败`);
+        console.warn(`[CurseForge] 失败的模组: ${failedModNames}`);
+    } else {
+        console.log(`[CurseForge] Mod下载完成: 全部${cfFiles.length}个成功`);
     }
     return {
         success: true, name: packName, versionId, mcVersion, targetVersion: targetVersion || '',
@@ -18380,19 +18428,25 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         if (loader && mcVersion) {
                             try {
                                 versions = await fetchJSON(versionUrl + '?' + `loaders=["${loader}"]&game_versions=["${mcVersion}"]`);
-                            } catch (e) {}
+                            } catch (e) {
+                                console.warn(`[mods/download] Modrinth 精确查询失败: ${projectId} - ${e.message}`);
+                            }
                         }
                         if (!versions || !versions.length) {
                             if (mcVersion) {
                                 try {
                                     versions = await fetchJSON(versionUrl + '?' + `game_versions=["${mcVersion}"]`);
-                                } catch (e) {}
+                                } catch (e) {
+                                    console.warn(`[mods/download] Modrinth MC版本查询失败: ${projectId} - ${e.message}`);
+                                }
                             }
                         }
                         if (!versions || !versions.length) {
                             try {
                                 versions = await fetchJSON(versionUrl + '?limit=10');
-                            } catch (e) {}
+                            } catch (e) {
+                                console.warn(`[mods/download] Modrinth 全量查询失败: ${projectId} - ${e.message}`);
+                            }
                         }
 
                         if (versions && versions.length) {
@@ -18432,9 +18486,11 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             }
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    console.error(`[mods/download] 获取下载链接失败: ${source}/${projectId} - ${e.message}`);
+                }
 
-                if (!downloadUrl) { sendError('未找到可下载的文件'); break; }
+                if (!downloadUrl) { sendError(`未找到可下载的文件 (${source}/${projectId}, loader=${loader}, mc=${mcVersion})`); break; }
 
                 const safeName = (fileName || `${projectId}.jar`).replace(/[^a-zA-Z0-9._\-]/g, '_');
                 const destPath = path.join(modsDestDir, safeName);
