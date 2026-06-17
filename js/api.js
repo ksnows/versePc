@@ -490,8 +490,8 @@ const API = {
     getResourceDetail: (projectId) => apiGet('/api/resources/detail', { projectId }),
     getResourceVersions: (projectId, loader = '', gameVersion = '') =>
         apiGet('/api/resources/versions', { projectId, loader, gameVersion }),
-    downloadResource: (versionId, projectId, projectType = 'mod', targetVersionId = '', savePath = '') =>
-        apiPost('/api/resources/download', { versionId, projectId, projectType, targetVersionId, savePath }, 120000),
+    downloadResource: (versionId, projectId, projectType = 'mod', targetVersionId = '', savePath = '', customName = '') =>
+        apiPost('/api/resources/download', { versionId, projectId, projectType, targetVersionId, savePath, customName }, 120000),
 
     // === 局域网联机 (LAN) ===
     lanCreateRoom: (name, port, playerName) =>

@@ -5093,9 +5093,105 @@ function installModFile(projectId, source, versionId, fileId) {
 }
 
 async function installModpackVersion(projectId, versionId) {
+    const modpackTitle = currentModDetailData?.title || currentModDetailData?.name || projectId;
+    showModpackNameModal(modpackTitle, projectId, versionId);
+}
+
+function showModpackNameModal(defaultName, projectId, versionId) {
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);';
+
+    const card = document.createElement('div');
+    card.style.cssText = 'max-width:420px;width:90%;background:var(--bg-secondary);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,0.3);overflow:hidden;';
+
+    card.innerHTML = `
+        <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:15px;font-weight:600;color:var(--text-primary);">设置整合包名称</span>
+            <button id="mpnm-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:4px;">✕</button>
+        </div>
+        <div style="padding:20px;">
+            <div style="margin-bottom:12px;">
+                <label style="display:block;font-size:13px;color:var(--text-secondary);margin-bottom:6px;">版本名称</label>
+                <input id="mpnm-input" type="text" value="${defaultName.replace(/"/g, '&quot;')}" 
+                    style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-primary);color:var(--text-primary);font-size:14px;outline:none;box-sizing:border-box;" />
+                <div id="mpnm-hint" style="margin-top:6px;font-size:12px;color:var(--text-muted);"></div>
+            </div>
+            <div id="mpnm-warn" style="display:none;padding:10px 12px;border-radius:8px;background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.3);margin-bottom:12px;">
+                <span style="font-size:13px;color:#e6a817;">⚠ 已有相同名称的版本</span>
+            </div>
+        </div>
+        <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px;">
+            <button id="mpnm-cancel" style="padding:8px 20px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text-primary);cursor:pointer;font-size:13px;">取消</button>
+            <button id="mpnm-confirm" style="padding:8px 20px;border-radius:8px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:13px;font-weight:500;">确认安装</button>
+        </div>
+    `;
+
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+
+    const input = document.getElementById('mpnm-input');
+    const hint = document.getElementById('mpnm-hint');
+    const warn = document.getElementById('mpnm-warn');
+    const confirmBtn = document.getElementById('mpnm-confirm');
+
+    async function checkName() {
+        const name = input.value.trim();
+        if (!name) {
+            warn.style.display = 'none';
+            hint.textContent = '';
+            confirmBtn.disabled = true;
+            confirmBtn.style.opacity = '0.5';
+            return;
+        }
+        try {
+            const result = await API.checkVersionName(name);
+            if (result.exists) {
+                warn.style.display = 'block';
+                hint.textContent = '';
+                confirmBtn.disabled = true;
+                confirmBtn.style.opacity = '0.5';
+                confirmBtn.style.cursor = 'not-allowed';
+            } else {
+                warn.style.display = 'none';
+                hint.textContent = '✓ 名称可用';
+                confirmBtn.disabled = false;
+                confirmBtn.style.opacity = '1';
+                confirmBtn.style.cursor = 'pointer';
+            }
+        } catch (e) {
+            warn.style.display = 'none';
+            confirmBtn.disabled = false;
+            confirmBtn.style.opacity = '1';
+            confirmBtn.style.cursor = 'pointer';
+        }
+    }
+
+    input.addEventListener('input', checkName);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !confirmBtn.disabled) confirmBtn.click();
+    });
+
+    document.getElementById('mpnm-close').onclick = () => modal.remove();
+    document.getElementById('mpnm-cancel').onclick = () => modal.remove();
+    modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+
+    confirmBtn.onclick = async () => {
+        const name = input.value.trim();
+        if (!name || confirmBtn.disabled) return;
+        modal.remove();
+        _doInstallModpack(projectId, versionId, name);
+    };
+
+    checkName();
+    input.focus();
+    input.select();
+}
+
+async function _doInstallModpack(projectId, versionId, customName) {
     showToast('正在下载整合包，将创建新版本...', 'info');
     try {
-        const result = await API.downloadResource(versionId, projectId, 'modpack', '');
+        const result = await API.downloadResource(versionId, projectId, 'modpack', '', '', customName);
         if (result.success) {
             showModpackInstallModal(result.fileName, result.sessionId);
         } else {
@@ -5109,19 +5205,8 @@ async function installModpackVersion(projectId, versionId) {
 }
 
 async function quickInstallModpack(projectId, versionId) {
-    showToast('正在下载整合包，将创建新版本...', 'info');
-    try {
-        const result = await API.downloadResource(versionId, projectId, 'modpack', '');
-        if (result.success) {
-            showModpackInstallModal(result.fileName, result.sessionId);
-        } else {
-            console.error('[Modpack] quickInstallModpack downloadResource failed:', JSON.stringify(result));
-            showToast(`整合包安装失败: ${result.error || '未知错误'}`, 'error');
-        }
-    } catch (e) {
-        console.error('[Modpack] quickInstallModpack downloadResource error:', e);
-        showToast(`整合包安装失败: ${e.message || e}`, 'error');
-    }
+    const modpackTitle = currentModDetailData?.title || currentModDetailData?.name || projectId;
+    showModpackNameModal(modpackTitle, projectId, versionId);
 }
 
 function showModpackInstallModal(fileName, sessionId) {

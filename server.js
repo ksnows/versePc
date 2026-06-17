@@ -24053,6 +24053,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const rdProjectId = rdData.projectId;
                 const rdType = rdData.projectType || 'mod';
                 const rdSavePath = rdData.savePath || '';
+                const rdCustomName = rdData.customName || '';
 
                 if (!rdVersionId && !rdProjectId) { sendError('Missing versionId or projectId', 400); break; }
 
@@ -24331,7 +24332,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                                                 }
                                             }
                                         } catch (_) {}
-                                    }, rdType === 'modpack' ? '' : targetVersionId, abortController.signal);
+                                    }, rdType === 'modpack' ? rdCustomName : targetVersionId, abortController.signal);
 
                                     const s = modDownloadSessions.get(sessionId);
                                     if (s && s.status === 'cancelled') {
