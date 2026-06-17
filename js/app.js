@@ -2403,13 +2403,28 @@ async function updateVersionSelects() {
                                 <span class="error-version-name">${escapeHtml(displayName)}</span>
                                 <span class="error-version-reason">${escapeHtml(v.errorReason || '无法识别')}</span>
                             </div>
-                            <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:4px 12px;font-size:12px" onclick="event.stopPropagation();deleteVersion('${escapeOnclick(v.id)}')">删除</button>
+                            <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:4px 12px;font-size:12px" onclick="event.stopPropagation();quickDeleteErrorVersion('${escapeOnclick(v.id)}')">删除</button>
                         </div>`;
                     }).join('')}
                 </div>
             </div>`;
         }
         homeList.innerHTML = html;
+    }
+}
+
+async function quickDeleteErrorVersion(versionId) {
+    if (!confirm(`确定要删除版本 "${versionId}" 吗？`)) return;
+    try {
+        const r = await API.deleteVersion(versionId, false);
+        if (r.success) {
+            showToast(`版本 ${versionId} 已删除`, 'success');
+            await loadVersions(true);
+        } else {
+            showToast(r.error || '删除失败', 'error');
+        }
+    } catch (e) {
+        showToast('删除失败: ' + (e.message || e), 'error');
     }
 }
 
