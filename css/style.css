@@ -2472,7 +2472,7 @@ body {
     border-color: #e8a0a0;
     color: #b22;
 }
-@media (max-width: 800px) {
+@media (max-width: 600px) {
     .acct-detail { flex-direction: column; }
     .acct-detail-right { width: 100%; min-width: 0; padding: 24px; }
     .acct-detail-left { min-height: 300px; }
