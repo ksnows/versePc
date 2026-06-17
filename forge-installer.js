@@ -81,19 +81,27 @@ function resolveMavenPath(name) {
     if (parts.length < 3) return null;
     const groupPath = parts[0].replace(/\./g, '/');
     const artifact = parts[1];
-    const version = parts[2];
+    let version = parts[2];
     let classifier = '';
     let ext = 'jar';
+    let atIdx = version.indexOf('@');
+    if (atIdx >= 0) {
+        ext = version.substring(atIdx + 1);
+        version = version.substring(0, atIdx);
+    }
     if (parts[3]) {
-        const atIdx = parts[3].indexOf('@');
-        if (atIdx >= 0) {
-            classifier = parts[3].substring(0, atIdx);
-            ext = parts[3].substring(atIdx + 1);
+        const atIdx3 = parts[3].indexOf('@');
+        if (atIdx3 >= 0) {
+            classifier = parts[3].substring(0, atIdx3);
+            ext = parts[3].substring(atIdx3 + 1);
         } else {
             classifier = parts[3];
         }
     }
-    if (parts[4]) ext = parts[4];
+    if (parts[4]) {
+        const atIdx4 = parts[4].indexOf('@');
+        ext = atIdx4 >= 0 ? parts[4].substring(atIdx4 + 1) : parts[4];
+    }
     const fileName = classifier ? `${artifact}-${version}-${classifier}.${ext}` : `${artifact}-${version}.${ext}`;
     return path.join(LIBS, groupPath, artifact, version, fileName);
 }
@@ -108,11 +116,15 @@ function normalizePath(val) {
 
 function normalizeVariable(val, variables, side) {
     if (!val) return val;
-    return val.replace(/{([A-Za-z0-9_-]+)}/g, (_, key) => {
+    let result = val.replace(/{([A-Za-z0-9_-]+)}/g, (_, key) => {
         if (key === 'SIDE') return side;
         if (variables[key]) return normalizePath(variables[key][side] || '');
         return '';
     });
+    if (result.match(/^\[.+\]$/g)) {
+        result = resolveMavenPath(result.substring(1, result.length - 1)) || result;
+    }
+    return result;
 }
 
 const side = 'client';

@@ -55,11 +55,12 @@
 <body>
     <!-- 高级启动动画 - White Background + Software Icon -->
     <div id="splash-overlay" style="position:fixed;inset:0;z-index:999999;overflow:hidden;transition:opacity 0.3s ease,transform 0.3s ease;transform-origin:center center;background:var(--bg-primary, #ffffff);">
-        <div style="position:relative;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">
+        <video id="splash-video" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;display:none;" playsinline loop preload="auto"></video>
+        <div id="splash-content" style="position:relative;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;">
             <div id="splash-logo" style="margin-bottom:20px;opacity:0;transform:translateY(20px) scale(0.95);">
                 <img src="img/icon.svg" alt="VersePC" width="80" height="80"/>
             </div>
-            
+
             <div id="splash-text" style="text-align:center;opacity:0;transform:translateY(10px);">
                 <div id="splash-title" style="font-size:28px;font-weight:800;letter-spacing:-0.03em;margin-bottom:6px;font-family:system-ui,-apple-system,sans-serif;">
                     Verse<span id="splash-title-accent">PC</span>
@@ -68,7 +69,7 @@
                     Minecraft Launcher
                 </div>
             </div>
-            
+
             <div id="splash-progress-container" style="margin-top:50px;width:200px;opacity:0;transform:translateY(10px);">
                 <div id="splash-track" style="position:relative;height:3px;border-radius:2px;overflow:hidden;">
                     <div id="splash-progress" style="position:absolute;top:0;left:0;height:100%;width:0%;border-radius:2px;transition:width 0.4s ease-out;"></div>
@@ -78,7 +79,7 @@
                 </div>
             </div>
         </div>
-        
+
         <div id="splash-version" style="position:absolute;bottom:20px;right:25px;font-size:10px;letter-spacing:0.1em;">
             v1.0.0
         </div>
@@ -122,6 +123,23 @@
         #splash-progress-container {
             animation:splash-text-enter 0.5s cubic-bezier(0.16,1,0.3,1) forwards;
             animation-delay:0.3s;
+        }
+        /* When video boot animation is active, hide the default logo/text and keep only progress */
+        #splash-overlay.video-boot-active #splash-content {
+            justify-content: flex-end;
+            padding-bottom: 120px;
+        }
+        #splash-overlay.video-boot-active #splash-logo,
+        #splash-overlay.video-boot-active #splash-text,
+        #splash-overlay.video-boot-active #splash-progress-container {
+            display: none;
+        }
+        #splash-overlay.video-boot-active #splash-video {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
         }
         @keyframes splash-logo-enter {
             from { opacity:0; transform:translateY(20px) scale(0.95); }
@@ -2826,6 +2844,34 @@
                                             <div class="theme-dot" style="background: #ffffff;"></div>
                                         </div>
                                         <span class="theme-name">白色</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h3>启动动画</h3>
+                            <div class="form-group">
+                                <div class="wallpaper-control-row" style="margin-bottom:12px;">
+                                    <label>启用视频启动动画</label>
+                                    <label class="switch" style="margin-left:12px;">
+                                        <input type="checkbox" id="bootAnimationToggle" onchange="onBootAnimationToggleChange(this.checked)">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
+                                <p style="font-size:12px;color:var(--text-muted);margin:0;">开启后，启动 VersePC 时会播放一段全屏视频动画。</p>
+                            </div>
+                            <div class="form-group" id="boot-animation-theme-group">
+                                <label>启动动画主题</label>
+                                <div class="wallpaper-picker-grid wallpaper-picker-text-only">
+                                    <div class="boot-animation-theme-option active" data-theme="light" onclick="selectBootAnimationTheme(this)">
+                                        <span class="wallpaper-name">白色</span>
+                                    </div>
+                                    <div class="boot-animation-theme-option" data-theme="dark" onclick="selectBootAnimationTheme(this)">
+                                        <span class="wallpaper-name">黑色</span>
+                                    </div>
+                                    <div class="boot-animation-theme-option" data-theme="auto" onclick="selectBootAnimationTheme(this)">
+                                        <span class="wallpaper-name">跟随主题</span>
                                     </div>
                                 </div>
                             </div>

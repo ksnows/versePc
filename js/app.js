@@ -1331,11 +1331,48 @@ async function init() {
     function setProgress(val, statusText) {
         if (!splashProgress) return;
         splashProgress.style.width = Math.min(val, 100) + '%';
-        
+
         const splashStatus = document.getElementById('splash-status');
         if (splashStatus && statusText) {
             splashStatus.textContent = statusText;
         }
+    }
+
+    // Apply optional video boot animation (default off)
+    let bootVideo = null;
+    let bootVideoReady = Promise.resolve();
+    try {
+        const bootEnabled = await window.electronAPI?.store?.get('versepc_boot_animation_enabled');
+        if (bootEnabled === true) {
+            const savedTheme = await window.electronAPI?.store?.get('versepc_boot_animation_theme') || 'light';
+            const currentUiTheme = document.documentElement.getAttribute('data-theme') || 'light';
+            const videoTheme = savedTheme === 'dark' ? 'dark' : (savedTheme === 'light' ? 'light' : (currentUiTheme === 'dark' ? 'dark' : 'light'));
+            // Use the custom protocol URL; main process will serve the unpacked video file
+            // with proper Range support so Chromium can stream/seek it on every launch.
+            const videoSrc = `versepc://app/assets/boot-animations/${videoTheme}.mp4`;
+            bootVideo = document.getElementById('splash-video');
+            if (bootVideo) {
+                bootVideo.src = videoSrc;
+                bootVideo.style.display = 'block';
+                splashOverlay.classList.add('video-boot-active');
+                // Wait for the first playback to finish before entering the main UI.
+                // Without this the splash closes after the default 800ms and the video never plays.
+                bootVideo.loop = false;
+                bootVideoReady = new Promise(resolve => {
+                    const onEnded = () => {
+                        try { bootVideo.removeEventListener('ended', onEnded); } catch (_) {}
+                        resolve();
+                    };
+                    bootVideo.addEventListener('ended', onEnded);
+                    const playPromise = bootVideo.play();
+                    if (playPromise) playPromise.catch(() => {});
+                    // Fallback: if metadata/load fails, still enter after 6s.
+                    setTimeout(resolve, 6000);
+                });
+            }
+        }
+    } catch (e) {
+        console.error('[Init] Boot animation error:', e);
     }
 
     function safeSetup(name, fn) {
@@ -1497,6 +1534,24 @@ async function init() {
                 if (typeof setPanoramaMouseFollow === 'function') setPanoramaMouseFollow(true);
             }
 
+            // Restore boot animation settings (default off)
+            try {
+                const savedBootEnabled = await window.electronAPI?.store?.get('versepc_boot_animation_enabled');
+                const bootToggle = document.getElementById('bootAnimationToggle');
+                if (bootToggle) bootToggle.checked = savedBootEnabled === true;
+                const savedBootTheme = await window.electronAPI?.store?.get('versepc_boot_animation_theme') || 'light';
+                const bootThemeEl = document.querySelector(`.boot-animation-theme-option[data-theme="${savedBootTheme}"]`);
+                if (bootThemeEl) {
+                    document.querySelectorAll('.boot-animation-theme-option').forEach(opt => opt.classList.remove('active'));
+                    bootThemeEl.classList.add('active');
+                }
+                const themeGroup = document.getElementById('boot-animation-theme-group');
+                if (themeGroup) themeGroup.style.opacity = savedBootEnabled === true ? '1' : '0.5';
+                if (themeGroup) themeGroup.style.pointerEvents = savedBootEnabled === true ? '' : 'none';
+            } catch (e) {
+                console.error('[Init] Load boot animation settings error:', e);
+            }
+
             const savedCustomImage = await window.electronAPI.store.get('versepc_custom_image');
             if (savedCustomImage) {
                 const nameEl = document.getElementById('custom-wallpaper-file-name');
@@ -1518,9 +1573,13 @@ async function init() {
     }
 
     const elapsed = Date.now() - startTime;
-    if (elapsed < MIN_SPLASH_DURATION) {
-        await new Promise(r => setTimeout(r, MIN_SPLASH_DURATION - elapsed));
-    }
+    const remainingMinTime = Math.max(MIN_SPLASH_DURATION - elapsed, 0);
+    // When a boot video is enabled, wait until it finishes (or fallback timeout).
+    // Otherwise just enforce the minimum splash duration.
+    await Promise.all([
+        new Promise(r => setTimeout(r, remainingMinTime)),
+        bootVideoReady
+    ]);
 
     await new Promise(r => setTimeout(r, 200));
 
@@ -1528,7 +1587,12 @@ async function init() {
         splashOverlay.style.transition = 'opacity 0.4s cubic-bezier(0.4,0,0.2,1)';
         splashOverlay.style.opacity = '0';
         splashOverlay.style.pointerEvents = 'none';
+        // Wait until the splash is fully invisible before resetting the video.
+        // Resetting currentTime while fading out would flash the first frame.
         await new Promise(r => setTimeout(r, 400));
+        if (bootVideo) {
+            try { bootVideo.pause(); bootVideo.currentTime = 0; } catch (err) {}
+        }
         try { splashOverlay.remove(); } catch (err) {}
     }
 
@@ -11087,6 +11151,22 @@ function selectPanoramaTheme(element) {
     const theme = element.dataset.theme;
     if (typeof setPanoramaTheme === 'function') setPanoramaTheme(theme);
     window.electronAPI?.store?.set('versepc_panorama_theme', theme).catch(() => {});
+}
+
+function onBootAnimationToggleChange(enabled) {
+    window.electronAPI?.store?.set('versepc_boot_animation_enabled', enabled).catch(() => {});
+    const themeGroup = document.getElementById('boot-animation-theme-group');
+    if (themeGroup) {
+        themeGroup.style.opacity = enabled ? '1' : '0.5';
+        themeGroup.style.pointerEvents = enabled ? '' : 'none';
+    }
+}
+
+function selectBootAnimationTheme(element) {
+    document.querySelectorAll('.boot-animation-theme-option').forEach(opt => opt.classList.remove('active'));
+    element.classList.add('active');
+    const theme = element.dataset.theme;
+    window.electronAPI?.store?.set('versepc_boot_animation_theme', theme).catch(() => {});
 }
 
 function onPanoramaSpeedChange(value) {

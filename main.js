@@ -824,6 +824,18 @@ ipcMain.handle('store-delete', async (event, key) => {
     return true;
 });
 
+ipcMain.handle('get-boot-animation-path', async (event, theme) => {
+    const fileName = theme === 'dark' ? 'dark.mp4' : 'light.mp4';
+    // Use asar.unpacked path so Chromium can stream/seek the video file.
+    const unpackedDir = path.join(__dirname, '..', 'app.asar.unpacked', 'assets', 'boot-animations');
+    const asarDir = path.join(__dirname, 'assets', 'boot-animations');
+    let filePath = path.join(unpackedDir, fileName);
+    if (!fs.existsSync(filePath)) {
+        filePath = path.join(asarDir, fileName);
+    }
+    return filePath;
+});
+
 ipcMain.handle('get-machine-id', async () => {
     try {
         const crypto = require('crypto');
@@ -1603,7 +1615,7 @@ async function handleVersePCProtocol(request) {
             return await handleAPIRequest(request, reqUrl);
         }
 
-        return await handleStaticFile(pathname);
+        return await handleStaticFile(pathname, request);
     } catch (e) {
         console.error('Protocol handler error:', e);
         return new Response(JSON.stringify({ error: e.message }), {
@@ -1740,7 +1752,7 @@ function handleSSERequest(pathname, method, body, query) {
  * 处理静态文件请求
  * 安全检查：只允许访问应用目录内的文件，防止路径遍历攻击
  */
-async function handleStaticFile(pathname) {
+async function handleStaticFile(pathname, request) {
     let filePath;
     if (pathname === '/' || pathname === '/index.html') {
         filePath = path.join(__dirname, 'index.html');
@@ -1754,16 +1766,50 @@ async function handleStaticFile(pathname) {
         return new Response('Forbidden', { status: 403 });
     }
 
+    // Files unpacked from asar live in app.asar.unpacked next to app.asar
+    if (!fs.existsSync(filePath)) {
+        const unpackedPath = path.join(path.dirname(__dirname), 'app.asar.unpacked', pathname.replace(/^\//, ''));
+        if (fs.existsSync(unpackedPath)) {
+            filePath = path.resolve(unpackedPath);
+        }
+    }
+
     try {
-        const data = await fs.promises.readFile(filePath);
+        const stats = await fs.promises.stat(filePath);
         const ext = path.extname(filePath).toLowerCase();
         const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-        const body = data instanceof Buffer
-            ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-            : data;
-        return new Response(body, {
+        const rangeHeader = request?.headers?.get?.('range');
+
+        if (rangeHeader) {
+            const parts = rangeHeader.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
+            if (isNaN(start) || isNaN(end) || start >= stats.size || end >= stats.size || start > end) {
+                return new Response('Range Not Satisfiable', { status: 416 });
+            }
+            const chunkSize = end - start + 1;
+            const stream = fs.createReadStream(filePath, { start, end });
+            return new Response(stream, {
+                status: 206,
+                headers: {
+                    'Content-Type': contentType,
+                    'Content-Length': String(chunkSize),
+                    'Content-Range': `bytes ${start}-${end}/${stats.size}`,
+                    'Accept-Ranges': 'bytes',
+                    'Cache-Control': 'no-cache'
+                }
+            });
+        }
+
+        const stream = fs.createReadStream(filePath);
+        return new Response(stream, {
             status: 200,
-            headers: { 'Content-Type': contentType }
+            headers: {
+                'Content-Type': contentType,
+                'Content-Length': String(stats.size),
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'no-cache'
+            }
         });
     } catch (e) {
         return new Response('Not Found', { status: 404 });

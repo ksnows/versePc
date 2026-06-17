@@ -313,10 +313,10 @@ const BMCLAPI_MIRROR = {
     'https://maven.minecraftforge.net/': 'https://bmclapi2.bangbang93.com/maven/',
     'https://maven.neoforged.net/': 'https://bmclapi2.bangbang93.com/maven/',
     'https://maven.fabricmc.net/': 'https://bmclapi2.bangbang93.com/maven/',
-    'https://cdn.modrinth.com/': 'https://mod.mcimirror.top/modrinth/',
-    'https://edge.forgecdn.net/': 'https://mod.mcimirror.top/curseforge/',
-    'https://mediafilez.forgecdn.net/': 'https://mod.mcimirror.top/curseforge/',
-    'https://media.forgecdn.net/': 'https://mod.mcimirror.top/curseforge/',
+    'https://cdn.modrinth.com/': 'https://mod.mcimirror.top/',
+    'https://edge.forgecdn.net/': 'https://mod.mcimirror.top/',
+    'https://mediafilez.forgecdn.net/': 'https://mod.mcimirror.top/',
+    'https://media.forgecdn.net/': 'https://mod.mcimirror.top/',
 };
 
 const MCIM_MIRROR = {
@@ -2578,9 +2578,9 @@ function loadSettings() {
 
         downloadSource: 'auto',
         versionSource: 'auto',
-        maxThreads: 64,
+        maxThreads: 16,
         enableChunkDownload: true,
-        maxChunksPerFile: 64,
+        maxChunksPerFile: 16,
         speedLimit: 0,
         targetDir: '',
         sslVerify: false,
@@ -3771,8 +3771,8 @@ function _mergeInheritsChain(data, dirName) {
                     merged.libraries = [...parentData[key], ...(merged.libraries || [])];
                 } else if (key === 'arguments' && typeof parentData[key] === 'object') {
                     merged.arguments = merged.arguments || {};
-                    if (parentData[key].game && !merged.arguments.game) merged.arguments.game = parentData[key].game;
-                    if (parentData[key].jvm && !merged.arguments.jvm) merged.arguments.jvm = parentData[key].jvm;
+                    if (parentData[key].game && (!merged.arguments.game || merged.arguments.game.length === 0)) merged.arguments.game = parentData[key].game;
+                    if (parentData[key].jvm && (!merged.arguments.jvm || merged.arguments.jvm.length === 0)) merged.arguments.jvm = parentData[key].jvm;
                 }
             }
             current = parentData;
@@ -4230,7 +4230,7 @@ async function fetchWithRacing(tasks, timeout = 15000) {
 
 const DownloadManager = {
     activeConnections: 0,
-    connectionLimit: 512,
+    connectionLimit: 32,
     speedHistory: [],
     totalBytesDownloaded: 0,
     lastBytesSnapshot: 0,
@@ -4263,6 +4263,10 @@ const DownloadManager = {
         }
     },
     acquireConnection() {
+        // Enforce a real global connection cap so high-concurrency callers
+        // (chunked downloads + parallel mods) queue instead of flooding the CDN.
+        // PCL2 keeps parallel downloads <= 8; 32 lets a few files download in parallel.
+        if (this.activeConnections >= this.connectionLimit) return false;
         this.activeConnections++;
         this._startSpeedTimer();
         return true;
@@ -4428,7 +4432,7 @@ async function downloadFileH2(url, destPath, options = {}) {
         }
         if (fileSize <= 0) throw new Error('H2: 无法获取文件大小');
 
-        if (!supportsRange || fileSize <= 8 * 1024 * 1024) {
+        if (!supportsRange || fileSize <= 1 * 1024 * 1024) {
             await new Promise((resolve, reject) => {
                 if (abortSignal && abortSignal.aborted) { reject(new Error('已取消')); return; }
                 const req = https.get(url, {
@@ -4510,7 +4514,7 @@ async function downloadFileH2(url, destPath, options = {}) {
 async function downloadFileChunked(url, destPath, options = {}) {
     const { retries = 3, onProgress = null, sha1 = null, timeout = 120000, mirrors = null, abortSignal = null, agent: customAgent = null } = options;
     const minChunkSize = 512 * 1024;
-    const CHUNK_THRESHOLD = 8 * 1024 * 1024;
+    const CHUNK_THRESHOLD = 1 * 1024 * 1024;
     await fs.promises.mkdir(path.dirname(destPath), { recursive: true });
 
     const allUrls = mirrors ? [url, ...mirrors.filter(m => m !== url)] : getMirrorUrls(url);
@@ -4559,7 +4563,7 @@ async function downloadFileChunked(url, destPath, options = {}) {
                 if (!useChunk || fileSize <= 0) {
                     return await _dlSingle(workingUrl, destPath, { onProgress, sha1, timeout, abortSignal, agent: customAgent });
                 }
-                const maxC = Math.min(parseInt(settings.maxChunksPerFile, 10) || 64, 64);
+                const maxC = Math.min(parseInt(settings.maxChunksPerFile, 10) || 8, 16);
                 const cCount = Math.min(maxC, Math.ceil(fileSize / minChunkSize));
                 const cSize = Math.ceil(fileSize / cCount);
                 const chunks = [];
@@ -10662,7 +10666,6 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
 
     const hasUserGc = jvmArgs.some(a => /^-XX:\+?Use/.test(a) || /-XX:Use/.test(a));
     if (!hasUserGc) {
-        const javaMajorVer = getJavaMajorVersion(selectJavaForVersion(actualVersionId, settings, versionJson) || 'java');
         let modCount = 0;
         try {
             const versionDir = path.join(VERSIONS_DIR, actualVersionId || versionId);
@@ -10672,18 +10675,9 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
             }
         } catch(e) {}
 
-        if (maxMemMB >= 8192 && javaMajorVer >= 21 && javaMajorVer <= 23) {
-            // ZGC + Generational ZGC (Java 21-23 only; removed in Java 24+)
-            jvmArgs.push('-XX:+UseZGC', '-XX:+ZGenerational', '-XX:SoftMaxHeapSize=' + Math.floor(maxMemMB * 0.75) + 'M');
-            if (modCount > 100) {
-                jvmArgs.push('-XX:ZAllocationSpikeTolerance=2');
-            }
-        } else if (maxMemMB >= 8192 && javaMajorVer >= 24) {
-            // Java 24+: ZGC is generational by default, no extra flags needed
-            jvmArgs.push('-XX:+UseZGC');
-        } else if (maxMemMB >= 4096 && javaMajorVer >= 15 && modCount > 80) {
-            jvmArgs.push('-XX:+UseShenandoahGC', '-XX:ShenandoahGCHeuristics=compact');
-        } else if (maxMemMB <= 1024) {
+        // Default to G1GC to match PCL2. ZGC/ShenandoahGC can cause stutter in Forge modpacks
+        // because they behave poorly when mods allocate many short-lived objects.
+        if (maxMemMB <= 1024) {
             jvmArgs.push('-XX:+UseSerialGC');
         } else {
             jvmArgs.push('-XX:+UseG1GC', '-XX:MaxGCPauseMillis=200');
@@ -16299,8 +16293,11 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
     let okCount = 0, failCount = 0;
     let inFlight = 0;
-    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 32, 64);
-    const _modAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: PARALLEL_MODS + 8, maxFreeSockets: 16, timeout: 120000 });
+    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 16, 32);
+    const _modAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: PARALLEL_MODS * 4 + 16, maxFreeSockets: PARALLEL_MODS * 2 + 8, timeout: 120000 });
+    // Raise global connection limit for mrpack downloads (like PCL2's 200 connections/server)
+    const _prevConnLimit = DownloadManager.connectionLimit;
+    DownloadManager.connectionLimit = Math.max(PARALLEL_MODS * 4, 64);
     let lastProgUpdate = 0;
     let lastReportedPct = 0;
     let smoothPct = 0;
@@ -16378,43 +16375,57 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 }
             }
 
+            const _modOnProgress = (p) => {
+                if (p && modFiles[index]) {
+                    modFiles[index].progress = Math.round(p.progress || 0);
+                    modFiles[index].downloaded = p.downloaded || 0;
+                    modFiles[index].speed = p.speed || 0;
+                }
+                updateOverall();
+            };
+            const _modTimeout = getModTimeout(fileSize);
+
             for (const tryUrl of allUrls) {
                 if (downloaded || (abortSignal && abortSignal.aborted)) break;
                 try {
-                    await _dlSingle(tryUrl, destPath, {
-                        onProgress: (p) => {
-                            if (p && modFiles[index]) {
-                                modFiles[index].progress = Math.round(p.progress || 0);
-                                modFiles[index].downloaded = p.downloaded || 0;
-                                modFiles[index].speed = p.speed || 0;
-                            }
-                            updateOverall();
-                        },
-                        retries: 0,
-                        abortSignal: abortSignal,
-                        timeout: getModTimeout(fileSize),
-                        stallTimeout: 60000,
-                        agent: _modAgent
+                    await downloadFileChunked(tryUrl, destPath, {
+                        onProgress: _modOnProgress, retries: 1, timeout: _modTimeout,
+                        abortSignal, agent: _modAgent
                     });
                     if (isJarIntact(destPath)) {
                         const expectedSha1 = fileEntry.hashes && fileEntry.hashes.sha1;
                         if (expectedSha1) {
                             const actualSha1 = await calculateSHA1(destPath);
-                            if (actualSha1 === expectedSha1) {
-                                downloaded = true;
-                            } else {
-                                console.warn(`[mrpack] SHA1校验失败: ${fileName}`);
-                                try { fs.unlinkSync(destPath); } catch (_) {}
-                            }
-                        } else {
-                            downloaded = true;
-                        }
-                    } else {
-                        try { fs.unlinkSync(destPath); } catch (_) {}
-                    }
+                            if (actualSha1 === expectedSha1) { downloaded = true; }
+                            else { console.warn(`[mrpack] SHA1校验失败: ${fileName}`); try { fs.unlinkSync(destPath); } catch (_) {} }
+                        } else { downloaded = true; }
+                    } else { try { fs.unlinkSync(destPath); } catch (_) {} }
                 } catch (e) {
                     if (abortSignal && abortSignal.aborted) break;
-                    console.warn(`[mrpack] ${fileName} 失败: ${e.message}`);
+                    console.warn(`[mrpack] ${fileName} chunked失败(${tryUrl.split('/').pop()}): ${e.message}`);
+                }
+            }
+
+            if (!downloaded && !(abortSignal && abortSignal.aborted)) {
+                for (const tryUrl of allUrls) {
+                    if (downloaded || (abortSignal && abortSignal.aborted)) break;
+                    try {
+                        await _dlSingle(tryUrl, destPath, {
+                            onProgress: _modOnProgress, retries: 0, abortSignal,
+                            timeout: _modTimeout, stallTimeout: 60000, agent: _modAgent
+                        });
+                        if (isJarIntact(destPath)) {
+                            const expectedSha1 = fileEntry.hashes && fileEntry.hashes.sha1;
+                            if (expectedSha1) {
+                                const actualSha1 = await calculateSHA1(destPath);
+                                if (actualSha1 === expectedSha1) { downloaded = true; }
+                                else { try { fs.unlinkSync(destPath); } catch (_) {} }
+                            } else { downloaded = true; }
+                        } else { try { fs.unlinkSync(destPath); } catch (_) {} }
+                    } catch (e) {
+                        if (abortSignal && abortSignal.aborted) break;
+                        console.warn(`[mrpack] ${fileName} single失败: ${e.message}`);
+                    }
                 }
             }
 
@@ -16592,6 +16603,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     }
     await Promise.all(pool);
     try { _modAgent.destroy(); } catch (_) {}
+    DownloadManager.connectionLimit = _prevConnLimit;
     if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
     console.log(`[mrpack] Mod下载完成: ${okCount}成功 ${failCount}失败 (共${filesList.length}个, 并行=${Math.min(PARALLEL_MODS, filesList.length)})`);
     if (failCount > 0) {
@@ -24288,19 +24300,20 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                             };
                             console.log(`[Modpack] 开始下载: ${safeName} (URL: ${downloadUrl?.substring(0, 80)}...)`);
                             const _mpUrls = getMirrorUrls(downloadUrl);
-                            const _mpAgent = new https.Agent({ keepAlive: false, maxSockets: 16, timeout: 120000 });
+                            // Reuse shared agent (keepAlive:true) instead of creating a throwaway agent per download.
+                            // A throwaway agent with keepAlive:false forces a new TCP+TLS handshake for every chunk,
+                            // adding 6-19s to large modpack downloads.
                             for (const _tryUrl of _mpUrls) {
                                 if (abortController.signal && abortController.signal.aborted) break;
                                 try {
                                     console.log(`[Modpack] 尝试: ${_tryUrl.substring(0, 80)}...`);
-                                    await downloadFileChunked(_tryUrl, destPath, { onProgress: _mpOnProgress, retries: 0, abortSignal: abortController.signal, timeout: 600000, agent: _mpAgent });
+                                    await downloadFileChunked(_tryUrl, destPath, { onProgress: _mpOnProgress, retries: 0, abortSignal: abortController.signal, timeout: 600000 });
                                     if (fs.existsSync(destPath) && fs.statSync(destPath).size > 0) { console.log(`[Modpack] 下载成功: ${safeName}`); break; }
                                 } catch (e) {
                                     if (abortController.signal && abortController.signal.aborted) break;
                                     console.warn(`[Modpack] 失败: ${e.message}`);
                                 }
                             }
-                            try { _mpAgent.destroy(); } catch (_) {}
                             clearTimeout(_mpOverallTimer);
 
                             if (!fs.existsSync(destPath) || fs.statSync(destPath).size === 0) {
