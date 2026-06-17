@@ -7014,8 +7014,13 @@ function showAccountDetail(accountId) {
         document.getElementById('accounts-list').style.display = 'none';
         const header = document.querySelector('#page-accounts .page-header');
         if (header) header.style.display = 'none';
+        const pageAccounts = document.getElementById('page-accounts');
+        const activePage = pageAccounts.closest('.page.active') || pageAccounts.parentElement;
+        if (activePage) {
+            pageAccounts.style.height = activePage.clientHeight + 'px';
+        }
+        pageAccounts.style.overflow = 'hidden';
         document.getElementById('page-account-detail').style.display = '';
-        document.getElementById('page-accounts').style.overflow = 'hidden';
         setSkinBg(_currentSkinBg);
         initSkinViewer(skinUrl);
         loadSkinSelector(acc);
@@ -7027,7 +7032,9 @@ function showAccountList() {
     document.getElementById('accounts-list').style.display = '';
     const header = document.querySelector('#page-accounts .page-header');
     if (header) header.style.display = '';
-    document.getElementById('page-accounts').style.overflow = '';
+    const pageAccounts = document.getElementById('page-accounts');
+    pageAccounts.style.height = '';
+    pageAccounts.style.overflow = '';
     destroySkinViewer();
     _currentDetailAccount = null;
 }

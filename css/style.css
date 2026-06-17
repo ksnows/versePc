@@ -594,8 +594,6 @@ body {
 }
 
 .page.active {
-    display: flex;
-    flex-direction: column;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
@@ -1957,10 +1955,7 @@ body {
 }
 
 #page-accounts {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
+    position: relative;
 }
 
 .account-list {
@@ -3697,8 +3692,7 @@ body {
 }
 
 .page.active {
-    display: flex;
-    flex-direction: column;
+    display: block;
     animation: pageIn 0.18s var(--ease-out-expo) backwards;
     pointer-events: auto;
 }
