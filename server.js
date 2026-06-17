@@ -3523,7 +3523,7 @@ async function performRepair(sessionId, versionId) {
                 if (patchingStillMissing.length > 0) {
                     session.stage = 'forge_reinstall';
                     session.message = '正在重装Forge以生成补丁JAR...';
-                    session.progress = 90;
+                    session.progress = Math.max(session.progress, 90);
                     try {
                         const baseJar = path.join(VERSIONS_DIR, pmcVer, `${pmcVer}.jar`);
                         rlog(`Phase5.5 原版JAR: ${baseJar} (存在: ${fs.existsSync(baseJar)})`);

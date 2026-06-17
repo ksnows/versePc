@@ -3100,9 +3100,7 @@ async function pollInstallProgress(sessionId) {
             if (!data || !data.sessionId) return;
 
             const rawPct = data.progress || 0;
-            if (smoothInstallPct <= 0 || rawPct < smoothInstallPct) {
-                smoothInstallPct = rawPct;
-            } else {
+            if (rawPct > smoothInstallPct) {
                 smoothInstallPct = smoothInstallPct * 0.85 + rawPct * 0.15;
             }
             const smoothPct = Math.round(smoothInstallPct);
