@@ -2985,6 +2985,9 @@ function isVersionComplete(versionId) {
         (versionJson.inheritsFrom && versionJson.inheritsFrom.toLowerCase().includes('forge') && !versionJson.inheritsFrom.toLowerCase().includes('neoforge'));
     if (isForgeChain && versionJson.libraries) {
         let forgeCoreMissing = 0;
+        const mcVer = versionJson.inheritsFrom || '';
+        const mcMajor = parseInt((mcVer.split('.')[1] || '0'), 10);
+        const isNewForgeFormat = mcMajor >= 20;
         for (const lib of versionJson.libraries) {
             if (!lib.name) continue;
             const fp = lib.name.split(':');
@@ -3001,9 +3004,11 @@ function isVersionComplete(versionId) {
                     if (fs.existsSync(extPath)) { found = true; break; }
                 }
             }
+            const isOldFormatSrgOrExtra = fp[0] === 'net.minecraft' && fp[1] === 'client' && (fp[3] === 'srg' || fp[3] === 'extra');
+            if (isNewForgeFormat && isOldFormatSrgOrExtra) continue;
             const isForgeCore = (
                 (fp[0] === 'net.minecraftforge' && fp[1] === 'forge') ||
-                (fp[0] === 'net.minecraft' && fp[1] === 'client' && (fp[3] === 'srg' || fp[3] === 'extra'))
+                isOldFormatSrgOrExtra
             );
             if (isForgeCore && !found) {
                 forgeCoreMissing++;
