@@ -2403,6 +2403,7 @@ async function updateVersionSelects() {
                                 <span class="error-version-name">${escapeHtml(displayName)}</span>
                                 <span class="error-version-reason">${escapeHtml(v.errorReason || '无法识别')}</span>
                             </div>
+                            <button class="btn btn-danger btn-sm" style="flex-shrink:0;padding:4px 12px;font-size:12px" onclick="event.stopPropagation();deleteVersion('${escapeOnclick(v.id)}')">删除</button>
                         </div>`;
                     }).join('')}
                 </div>
