@@ -14096,6 +14096,16 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
 
         try { fs.unlinkSync(installerPath); } catch (_) {}
 
+        const vJsonPath = path.join(versionDir, `${versionId}.json`);
+        if (!fs.existsSync(vJsonPath)) {
+            try {
+                fs.writeFileSync(vJsonPath, JSON.stringify(versionJson, null, 2));
+                console.log(`[NeoForge] Wrote version JSON: ${vJsonPath}`);
+            } catch (writeErr) {
+                console.error(`[NeoForge] Failed to write version JSON:`, writeErr.message);
+            }
+        }
+
         if (onProgress) onProgress(1, 'NeoForge 安装完成');
         return { success: true, versionId: versionId, libsMissing: neoLibFailures };
     } catch (e) {
