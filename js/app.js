@@ -7015,6 +7015,7 @@ function showAccountDetail(accountId) {
         const header = document.querySelector('#page-accounts .page-header');
         if (header) header.style.display = 'none';
         document.getElementById('page-account-detail').style.display = '';
+        document.getElementById('page-accounts').style.overflow = 'hidden';
         setSkinBg(_currentSkinBg);
         initSkinViewer(skinUrl);
         loadSkinSelector(acc);
@@ -7026,6 +7027,7 @@ function showAccountList() {
     document.getElementById('accounts-list').style.display = '';
     const header = document.querySelector('#page-accounts .page-header');
     if (header) header.style.display = '';
+    document.getElementById('page-accounts').style.overflow = '';
     destroySkinViewer();
     _currentDetailAccount = null;
 }
