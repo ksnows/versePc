@@ -6548,7 +6548,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                     }
                 }
                 // 新式Forge (1.13+, bootstraplauncher): 检查模块化核心库
-                if ((versionJson.mainClass || '').includes('bootstraplauncher')) {
+                if ((versionJson.mainClass || '').includes('bootstraplauncher') || (versionJson.mainClass || '').includes('ForgeBootstrap')) {
                     const fmlVersion = `${mcVer}-${fVer}`;
                     const moduleNames = ['fmlcore', 'javafmllanguage', 'mclanguage', 'lowcodelanguage'];
                     for (const modName of moduleNames) {
@@ -6569,7 +6569,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                 if (mcpDirName) {
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcpDirName}:srg`, path: path.join(clientBaseDir, mcpDirName, `client-${mcpDirName}-srg.jar`), desc: 'Minecraft SRG映射客户端' });
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcpDirName}:extra`, path: path.join(clientBaseDir, mcpDirName, `client-${mcpDirName}-extra.jar`), desc: 'Minecraft额外客户端' });
-                } else if (!(versionJson.mainClass || '').includes('bootstraplauncher')) {
+                } else if (!((versionJson.mainClass || '').includes('bootstraplauncher') || (versionJson.mainClass || '').includes('ForgeBootstrap'))) {
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:srg`, path: path.join(clientBaseDir, `${mcVer}-mcp`, `client-${mcVer}-mcp-srg.jar`), desc: 'Minecraft SRG映射客户端' });
                     forgeCoreLibs.push({ name: `net.minecraft:client:${mcVer}:extra`, path: path.join(clientBaseDir, `${mcVer}-mcp`, `client-${mcVer}-mcp-extra.jar`), desc: 'Minecraft额外客户端' });
                 }
