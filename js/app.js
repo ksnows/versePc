@@ -2397,7 +2397,7 @@ async function updateVersionSelects() {
                 <div class="error-versions-list" id="${errorId}">
                     ${errorVersions.map(v => {
                         const displayName = v.customName || v.id.replace(/ \[外部\d*\]/, '');
-                        return `<div class="error-version-item">
+                        return `<div class="error-version-item" style="cursor:pointer" onclick="openVersionSettings('${escapeOnclick(v.id)}','${escapeOnclick(displayName)}')">
                             <div class="error-version-icon">${tntIcon}</div>
                             <div class="error-version-info">
                                 <span class="error-version-name">${escapeHtml(displayName)}</span>
