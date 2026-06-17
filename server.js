@@ -3945,9 +3945,7 @@ function scanExternalFolder(folderPath) {
                 let error = false;
                 let errorReason = '';
                 if (inheritsFrom) {
-                    const parentDir = path.join(path.dirname(versionDir), inheritsFrom);
-                    const parentStandardJson = path.join(parentDir, `${inheritsFrom}.json`);
-                    const parentJson = fs.existsSync(parentStandardJson) ? parentStandardJson : null;
+                    const parentJson = _findVersionJsonInAnyDir(inheritsFrom);
                     if (!parentJson) {
                         error = true;
                         errorReason = `需要安装 ${inheritsFrom} 作为前置版本`;
@@ -22184,7 +22182,10 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     let metadataXml = null;
                     const forgeUrls = [
                         metadataUrl,
-                        'https://mirror.ghproxy.com/' + metadataUrl
+                        'https://mirror.ghproxy.com/' + metadataUrl,
+                        'https://ghproxy.net/' + metadataUrl,
+                        'https://ghfast.top/' + metadataUrl,
+                        'https://raw.gitmirror.com/Anzhiyuan/MinecraftForgeMaven/main/maven/net/minecraftforge/forge/maven-metadata.xml'
                     ];
                     for (const tryUrl of forgeUrls) {
                         try {
