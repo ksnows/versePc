@@ -6420,8 +6420,9 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
         const hasNeoForgeLibs = (versionJson.libraries || []).some(l => l.name && l.name.startsWith('net.neoforged'));
 
         const forgeClientLib = forgeLibraries.find(l =>
-            l.name && /^net\.minecraftforge:forge:\d/.test(l.name) &&
-            (l.name.endsWith(':client') || l.name.split(':').length === 3));
+            l.name && /^net\.minecraftforge:forge:\d/.test(l.name) && l.name.endsWith(':client')) ||
+            forgeLibraries.find(l =>
+            l.name && /^net\.minecraftforge:forge:\d/.test(l.name) && l.name.split(':').length === 3);
         const forgeMainLib = forgeLibraries.find(l =>
             l.name && /^net\.minecraftforge:forge:\d/.test(l.name) && l.name.split(':').length === 3);
         const neoForgeLib = forgeLibraries.find(l => l.name && l.name.startsWith('net.neoforged:neoforge:'));
@@ -9014,14 +9015,7 @@ function resolveVersionJson(versionId, externalVersionDir = null, visited = null
         const detectedParent = detectModLoaderParent(data, externalVersionDir);
         if (detectedParent) {
             data.inheritsFrom = detectedParent;
-            try {
-                const originalJson = JSON.parse(fs.readFileSync(jsonFile, 'utf-8'));
-                originalJson.inheritsFrom = detectedParent;
-                fs.writeFileSync(jsonFile, JSON.stringify(originalJson, null, 2));
-                console.log(`[ResolveJson] 已修正 ${jsonFile} 的 inheritsFrom: ${detectedParent}`);
-            } catch (e) {
-                console.warn(`[ResolveJson] 写回 inheritsFrom 失败: ${e.message}`);
-            }
+            console.log(`[ResolveJson] 内存修正 ${versionId} 的 inheritsFrom: ${detectedParent}（不写回磁盘）`);
         }
     }
     if (data.inheritsFrom) {
@@ -9065,6 +9059,9 @@ function resolveVersionJson(versionId, externalVersionDir = null, visited = null
         console.warn(`[ResolveVersion] Parent version not found: ${data.inheritsFrom}`);
     }
     if (data && !data.error) {
+        if (data.arguments?.jvm) {
+            data.arguments.jvm = deduplicateJvmArgs(data.arguments.jvm);
+        }
         _resolvedJsonCache.set(versionId, JSON.parse(JSON.stringify(data)));
         _resolvedJsonCacheTime.set(versionId, Date.now());
     }
@@ -9231,17 +9228,31 @@ function deduplicateJvmArgs(args) {
         return args || [];
     }
 
-    const SINGLE_VALUE_OPTIONS = new Set([
-        '-Djava.net.preferIPv6Addresses', '-DignoreList', '-DmergeModules',
-        '-DlibraryDirectory', '-p', '--add-modules', '--add-opens',
-        '--add-exports', '--add-reads', '-Xms', '-Xmx', '-XX:'
-    ]);
+    const MULTI_VALUE_FLAGS = new Set(['--add-opens', '--add-exports', '--add-reads', '--add-modules']);
+    const expanded = [];
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (typeof arg === 'string' && MULTI_VALUE_FLAGS.has(arg)) {
+            const values = [];
+            while (i + 1 < args.length && typeof args[i + 1] === 'string' && !args[i + 1].startsWith('-')) {
+                i++;
+                values.push(args[i]);
+            }
+            if (values.length === 0) {
+                expanded.push(arg);
+            } else {
+                for (const v of values) { expanded.push(arg, v); }
+            }
+        } else {
+            expanded.push(arg);
+        }
+    }
 
     const seenStringArgs = new Set();
     const result = [];
 
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
+    for (let i = 0; i < expanded.length; i++) {
+        const arg = expanded[i];
 
         if (typeof arg !== 'string') {
             result.push(arg);
@@ -10839,9 +10850,11 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
                 if (isMultiValueFlag) {
                     jvmArgs.push(replaced);
                     if (i + 1 < jvmArgSources.length && typeof jvmArgSources[i + 1] === 'string') {
-                        const nextReplaced = replaceVariables(jvmArgSources[i + 1], variables);
-                        jvmArgs.push(nextReplaced);
-                        i++;
+                        const peeked = jvmArgSources[i + 1];
+                        if (!peeked.startsWith('-')) {
+                            i++;
+                            jvmArgs.push(replaceVariables(peeked, variables));
+                        }
                     }
                 } else {
                     const gcPatterns = ['-XX:\\+Use', '-XX:-Use'];
@@ -10863,10 +10876,10 @@ function buildLaunchArguments(versionJson, settings, account, versionId, customG
                 if (rulesMatch) {
                     if (typeof arg.value === 'string') {
                         const replaced = replaceVariables(arg.value, variables);
-                        const isMultiValueFlag = replaced === '--add-opens' || replaced === '--add-exports' ||
+                        const isMultiValueFlag2 = replaced === '--add-opens' || replaced === '--add-exports' ||
                             replaced === '--add-reads' || replaced === '--add-modules' ||
                             replaced === '--patch-module' || replaced === '-javaagent';
-                        if (isMultiValueFlag) {
+                        if (isMultiValueFlag2) {
                             jvmArgs.push(replaced);
                         } else {
                             const gcPatterns = ['-XX:\\+Use', '-XX:-Use'];
@@ -12083,87 +12096,38 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
         const totalCmdLength = args.reduce((sum, a) => sum + a.length + 3, javaPath.length + 3);
         
         if (totalCmdLength > 30000 || (process.platform === 'win32' && totalCmdLength > 25000)) {
-            console.log(`[Launch] 命令行过长(${totalCmdLength}字符)，使用Manifest JAR方式启动`);
-            const cpIdx = args.indexOf('-cp');
-            let classpathStr = '';
-            let jvmOnlyArgs = [];
-            let gameOnlyArgs = [];
-            const mainClassIdx = args.indexOf(mainClass);
-            
-            if (cpIdx !== -1 && cpIdx + 1 < args.length) {
-                classpathStr = args[cpIdx + 1];
-                jvmOnlyArgs = [...args.slice(0, cpIdx)];
-                if (mainClassIdx !== -1 && mainClassIdx > cpIdx + 1) {
-                    jvmOnlyArgs = [...jvmOnlyArgs, ...args.slice(cpIdx + 2, mainClassIdx)];
-                    gameOnlyArgs = [...args.slice(mainClassIdx + 1)];
-                } else {
-                    jvmOnlyArgs = [...jvmOnlyArgs, ...args.slice(cpIdx + 2)];
-                }
-            } else {
-                if (mainClassIdx !== -1) {
-                    jvmOnlyArgs = args.slice(0, mainClassIdx);
-                    gameOnlyArgs = args.slice(mainClassIdx + 1);
-                } else {
-                    jvmOnlyArgs = [...args];
-                }
-            }
-            
+            console.log(`[Launch] 命令行过长(${totalCmdLength}字符)，使用@argfile方式启动`);
             const tmpDir = path.join(os.tmpdir(), 'versepc-launch');
             if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-            const wrapperJar = path.join(tmpDir, `launcher-${Date.now()}.jar`);
-            
-            try {
-                const cpEntries = classpathStr.split(';');
-                const manifestClassPath = cpEntries.map(p => {
-                    let encoded = p;
-                    if (path.isAbsolute(p)) {
-                        encoded = p.replace(/\\/g, '/');
-                    }
-                    return encoded.replace(/%/g, '%25').replace(/ /g, '%20');
-                }).join(' ');
-                
-                let manifest = 'Manifest-Version: 1.0\r\n';
-                manifest += `Main-Class: ${mainClass}\r\n`;
-                
-                const classPathLine = `Class-Path: ${manifestClassPath}`;
-                let manifestLine = '';
-                for (let i = 0; i < classPathLine.length; i++) {
-                    if (i > 0 && i % 71 === 0) {
-                        manifestLine += '\r\n ';
-                    }
-                    manifestLine += classPathLine[i];
+            const argFilePath = path.join(tmpDir, `args-${Date.now()}.txt`);
+            const argFileLines = [];
+            for (const a of args) {
+                if (process.platform === 'win32' && (a.includes(' ') || a.includes('(') || a.includes(')'))) {
+                    argFileLines.push(`"${a}"`);
+                } else {
+                    argFileLines.push(a);
                 }
-                manifest += manifestLine + '\r\n\r\n';
-                
-                const manifestDir = path.join(tmpDir, 'META-INF');
-                if (!fs.existsSync(manifestDir)) fs.mkdirSync(manifestDir, { recursive: true });
-                fs.writeFileSync(path.join(manifestDir, 'MANIFEST.MF'), manifest);
-                
-                const AdmZip = require('adm-zip');
-                const zip = new AdmZip();
-                zip.addLocalFile(path.join(manifestDir, 'MANIFEST.MF'), 'META-INF');
-                zip.writeZip(wrapperJar);
-                
-                const newArgs = [...jvmOnlyArgs, '-jar', wrapperJar, ...gameOnlyArgs];
-                console.log(`[Launch] Manifest JAR: ${wrapperJar}, classpath条目: ${cpEntries.length}`);
+            }
+            fs.writeFileSync(argFilePath, argFileLines.join('\r\n'), 'utf-8');
+            const newArgs = [`@${argFilePath}`];
+            console.log(`[Launch] @argfile: ${argFilePath}, 参数数量: ${args.length}`);
 
-                let skinBackups = [];
-                try { skinBackups = injectOfflineSkin(versionJson, account, ASSETS_DIR); } catch (e) {}
+            let skinBackups = [];
+            try { skinBackups = injectOfflineSkin(versionJson, account, ASSETS_DIR); } catch (e) {}
 
-                const gameProcess = spawn(javaPath, newArgs, spawnOptions);
+            const gameProcess = spawn(javaPath, newArgs, spawnOptions);
 
-                gameProcess.on('exit', () => {
-                    try { clearInterval(_logSaveTimer); } catch (e) {}
-                    try { fs.unlinkSync(wrapperJar); } catch (e) {}
-                    try { fs.rmSync(manifestDir, { recursive: true, force: true }); } catch (e) {}
-                    try { restoreOfflineSkin(skinBackups); } catch (e) {}
-                });
+            gameProcess.on('exit', () => {
+                try { clearInterval(_logSaveTimer); } catch (e) {}
+                try { fs.unlinkSync(argFilePath); } catch (e) {}
+                try { restoreOfflineSkin(skinBackups); } catch (e) {}
+            });
+            
+            console.log(`[Launch] 进程已启动(@argfile模式), PID: ${gameProcess.pid}`);
                 
-                console.log(`[Launch] 进程已启动(Manifest JAR模式), PID: ${gameProcess.pid}`);
+            applyPerformanceOptimizations(gameProcess.pid);
                 
-                applyPerformanceOptimizations(gameProcess.pid);
-                
-                const instanceInfo = {
+            const instanceInfo = {
                     sessionId,
                     process: gameProcess,
                     versionId,
@@ -12373,10 +12337,6 @@ async function doLaunch(versionId, versionJson, settings, account, externalVersi
                     gameDir,
                     versionId
                 };
-            } catch (manifestErr) {
-                console.error(`[Launch] Manifest JAR创建失败，回退到普通模式: ${manifestErr.message}`);
-                try { fs.unlinkSync(wrapperJar); } catch (e) {}
-            }
         }
 
         let skinBackups = [];
@@ -13672,7 +13632,6 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                     if (msg.success) {
                         _invalidateResolvedJsonCache(versionId);
                     }
-                    resolve(msg);
                 }
             } catch (_) {}
         };
@@ -13688,18 +13647,75 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
             stderr = lines.pop();
             for (const line of lines) parse(line.trim());
         });
-        proc.on('close', (code) => {
+        proc.on('close', async (code) => {
             if (stdout.trim()) parse(stdout.trim());
             if (stderr.trim()) parse(stderr.trim());
             if (!doneMsg) {
                 if (code === 0) {
                     _invalidateResolvedJsonCache(versionId);
-                    resolve({ success: true, versionId });
+                    doneMsg = { success: true, versionId };
                 } else {
                     const errMsg = stderr.trim() || stdout.trim() || `Exit code ${code}`;
                     resolve({ success: false, error: `forge-installer.js exited with code ${code}: ${errMsg.slice(-300)}` });
+                    return;
                 }
             }
+            if (doneMsg && doneMsg.success) {
+                try {
+                    const vJsonPath = path.join(versionDir, `${versionId}.json`);
+                    if (fs.existsSync(vJsonPath)) {
+                        const vJson = JSON.parse(fs.readFileSync(vJsonPath, 'utf8'));
+
+                        if (vJson.inheritsFrom) {
+                            const vanillaId = vJson.inheritsFrom;
+                            const vanillaPath = path.join(path.dirname(versionDir), vanillaId, `${vanillaId}.json`);
+                            if (fs.existsSync(vanillaPath)) {
+                                const vanillaJson = JSON.parse(fs.readFileSync(vanillaPath, 'utf8'));
+                                const seen = new Set((vJson.libraries || []).map(l => l.name).filter(Boolean));
+                                for (const vl of (vanillaJson.libraries || [])) {
+                                    if (vl.name && !seen.has(vl.name)) {
+                                        vJson.libraries = vJson.libraries || [];
+                                        vJson.libraries.push(vl);
+                                        seen.add(vl.name);
+                                    }
+                                }
+                                if (!vJson.arguments && vanillaJson.arguments) vJson.arguments = vanillaJson.arguments;
+                            }
+                            delete vJson.inheritsFrom;
+                            fs.writeFileSync(vJsonPath, JSON.stringify(vJson, null, 2));
+                        }
+
+                        const libs = vJson.libraries || [];
+                        const missing = [];
+                        for (const lib of libs) {
+                            const dl = lib.downloads && lib.downloads.artifact;
+                            if (dl && dl.path) {
+                                const lp = path.join(LIBRARIES_DIR, dl.path);
+                                if (!fs.existsSync(lp) || (dl.sha1 && !isLibValid(lp, dl.size, dl.sha1))) {
+                                    missing.push(lib);
+                                }
+                            }
+                        }
+                        if (missing.length > 0 && onProgress) onProgress(0.95, `下载 Forge 库文件 (0/${missing.length})...`);
+                        let dlCount = 0;
+                        for (const lib of missing) {
+                            dlCount++;
+                            const dl = lib.downloads.artifact;
+                            const lp = path.join(LIBRARIES_DIR, dl.path);
+                            fs.mkdirSync(path.dirname(lp), { recursive: true });
+                            if (onProgress) onProgress(0.95 + Math.min(dlCount / missing.length, 1) * 0.05, `下载 Forge 库文件 (${dlCount}/${missing.length})...`);
+                            try {
+                                await downloadFileWithMirror(dl.url, lp, null, 2, null, 60000);
+                            } catch (e) {
+                                console.warn(`[installForge] 下载库 ${lib.name} 失败: ${e.message}`);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`[installForge] 下载库失败: ${e.message}`);
+                }
+            }
+            resolve(doneMsg || { success: code === 0, versionId });
         });
         proc.on('error', (err) => {
             resolve({ success: false, error: `Failed to start forge-installer.js: ${err.message}` });
@@ -16055,26 +16071,144 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
         progress('version-config', '正在创建版本配置...', 14);
 
-        if (loaderVersionId) {
-            let loaderMainClass = '';
-            try {
-                const lvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
-                if (fs.existsSync(lvJsonPath)) {
-                    const lvJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
-                    loaderMainClass = lvJson.mainClass || '';
+        function pcl2StyleMerge(baseJson, loaderJson, versionId) {
+            const merged = { ...baseJson };
+            const vanillaLibs = baseJson.libraries || [];
+            const loaderLibs = loaderJson.libraries || [];
+            const seenNames = new Set(loaderLibs.map(l => l.name).filter(Boolean));
+            const mergedLibs = [...loaderLibs];
+            for (const vl of vanillaLibs) {
+                if (vl.name && !seenNames.has(vl.name)) {
+                    mergedLibs.push(vl);
+                    seenNames.add(vl.name);
                 }
-            } catch (_lvErr) {}
-            const versionJson = {
+            }
+            merged.libraries = mergedLibs;
+            for (const key of Object.keys(loaderJson)) {
+                if (key === 'libraries') continue;
+                if (key === 'inheritsFrom' || key === 'jar') continue;
+                if (key === 'arguments' && loaderJson.arguments && baseJson.arguments) {
+                    const mergedGame = [...(baseJson.arguments.game || [])];
+                    for (const ge of (loaderJson.arguments.game || [])) {
+                        const geStr = typeof ge === 'string' ? ge : JSON.stringify(ge);
+                        if (!mergedGame.some(mg => (typeof mg === 'string' ? mg : JSON.stringify(mg)) === geStr)) {
+                            mergedGame.push(ge);
+                        }
+                    }
+                    const expandedLoaderJvm = [];
+                    const jvmArr = loaderJson.arguments.jvm || [];
+                    for (let ji = 0; ji < jvmArr.length; ji++) {
+                        const je = jvmArr[ji];
+                        if (typeof je === 'string' && (je === '--add-opens' || je === '--add-exports' || je === '--add-reads' || je === '--add-modules')) {
+                            const values = [];
+                            while (ji + 1 < jvmArr.length && typeof jvmArr[ji + 1] === 'string' && !jvmArr[ji + 1].startsWith('-')) {
+                                ji++;
+                                values.push(jvmArr[ji]);
+                            }
+                            if (values.length === 0) {
+                                expandedLoaderJvm.push(je);
+                            } else {
+                                for (const val of values) {
+                                    expandedLoaderJvm.push(je, val);
+                                }
+                            }
+                        } else {
+                            expandedLoaderJvm.push(je);
+                        }
+                    }
+                    const mergedJvm = [...(baseJson.arguments.jvm || [])];
+                    for (const je of expandedLoaderJvm) {
+                        const jeStr = typeof je === 'string' ? je : JSON.stringify(je);
+                        if (!mergedJvm.some(mj => (typeof mj === 'string' ? mj : JSON.stringify(mj)) === jeStr)) {
+                            mergedJvm.push(je);
+                        }
+                    }
+                    merged.arguments = { game: mergedGame, jvm: mergedJvm };
+                } else {
+                    if (loaderJson[key] && typeof loaderJson[key] === 'object' && !Array.isArray(loaderJson[key]) && Object.keys(loaderJson[key]).length === 0 && baseJson[key] && typeof baseJson[key] === 'object' && Object.keys(baseJson[key]).length > 0) {
+                        continue;
+                    }
+                    merged[key] = loaderJson[key];
+                }
+            }
+            delete merged.inheritsFrom;
+            delete merged._comment_;
+            delete merged.jar;
+            merged.id = versionId;
+            merged.time = new Date().toISOString();
+            merged.releaseTime = new Date().toISOString();
+            return merged;
+        }
+
+        if (loaderVersionId) {
+            const lvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
+            let mergedJson = null;
+            try {
+                if (fs.existsSync(lvJsonPath) && mcVersion) {
+                    const vanillaJsonPath = path.join(VERSIONS_DIR, mcVersion, `${mcVersion}.json`);
+                    let baseJson = null;
+                    if (fs.existsSync(vanillaJsonPath)) {
+                        baseJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf-8'));
+                    }
+                    const lvJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
+                    if (baseJson) {
+                        mergedJson = pcl2StyleMerge(baseJson, lvJson, versionId);
+                    } else {
+                        mergedJson = { ...lvJson };
+                        delete mergedJson.inheritsFrom;
+                        delete mergedJson._comment_;
+                        delete mergedJson.jar;
+                        mergedJson.id = versionId;
+                        mergedJson.time = new Date().toISOString();
+                        mergedJson.releaseTime = new Date().toISOString();
+                    }
+                    if (!mergedJson.clientVersion && mcVersion) {
+                        mergedJson.clientVersion = mcVersion;
+                    }
+                    console.log(`[mrpack] PCL2式合并JSON: ${loaderVersionId} → ${versionId} (libs: ${(mergedJson.libraries || []).length}, mainClass: ${mergedJson.mainClass || '未设置'}, baseJson: ${baseJson ? '原版' : '加载器'})`);
+                } else if (fs.existsSync(lvJsonPath)) {
+                    mergedJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
+                    delete mergedJson.inheritsFrom;
+                    delete mergedJson._comment_;
+                    delete mergedJson.jar;
+                    mergedJson.id = versionId;
+                    mergedJson.time = new Date().toISOString();
+                    mergedJson.releaseTime = new Date().toISOString();
+                }
+            } catch (lvErr) {
+                console.error(`[mrpack] 读取加载器JSON失败:`, lvErr.message);
+            }
+            const versionJson = mergedJson || {
                 id: versionId,
-                inheritsFrom: loaderVersionId,
                 type: 'release',
                 time: new Date().toISOString(),
                 releaseTime: new Date().toISOString()
             };
-            if (loaderMainClass) versionJson.mainClass = loaderMainClass;
+            if (versionJson.arguments?.jvm) {
+                versionJson.arguments.jvm = deduplicateJvmArgs(versionJson.arguments.jvm);
+            }
             fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(versionJson, null, 2));
             _invalidateResolvedJsonCache(versionId);
-            console.log(`[mrpack] 创建版本JSON: ${versionId}.json (继承 ${loaderVersionId}, mainClass: ${loaderMainClass || '未设置'})`);
+            console.log(`[mrpack] 创建版本JSON: ${versionId}.json (PCL2式合并, 无inheritsFrom)`);
+            try {
+                const vanillaJar = path.join(VERSIONS_DIR, mcVersion || '', `${mcVersion}.jar`);
+                const targetJar = path.join(versionDir, `${versionId}.jar`);
+                if (!fs.existsSync(targetJar) && fs.existsSync(vanillaJar)) {
+                    fs.copyFileSync(vanillaJar, targetJar);
+                    console.log(`[mrpack] 复制原版jar到整合包: ${targetJar}`);
+                }
+            } catch (e) {
+                console.warn(`[mrpack] 复制版本jar失败: ${e.message}`);
+            }
+            try {
+                const loaderDir = path.join(VERSIONS_DIR, loaderVersionId);
+                if (fs.existsSync(loaderDir) && loaderDir !== versionDir) {
+                    fs.rmSync(loaderDir, { recursive: true, force: true });
+                    console.log(`[mrpack] 已删除独立加载器文件夹: ${loaderVersionId}`);
+                }
+            } catch (e) {
+                console.warn(`[mrpack] 删除加载器文件夹失败: ${e.message}`);
+            }
         } else {
             const versionJson = {
                 id: versionId,
@@ -16092,24 +16226,21 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         progress('loader', '模组加载器就绪', 15);
     }
 
-    // 整合包重装/重导入: 检测现有版本JSON的inheritsFrom是否与整合包声明的MC+Loader一致
-    // 不一致则自动安装正确的Base+Loader并更新版本JSON，避免出现 "整合包说MC1.20.1，版本却继承自1.19.2" 的错配
+    // 整合包重装/重导入: 检测现有版本JSON是否已合并加载器内容
+    // 如果没有合并（旧版创建的inheritsFrom方式），则重新合并
     {
         const versionJsonPath = path.join(versionDir, `${versionId}.json`);
-        const expectedInheritsFrom = loaderVersionId || mcVersion || '';
         let existingJson = null;
         try {
             if (fs.existsSync(versionJsonPath)) {
                 existingJson = JSON.parse(fs.readFileSync(versionJsonPath, 'utf-8'));
             }
         } catch (_e) {}
-        const currentInheritsFrom = existingJson ? (existingJson.inheritsFrom || '') : '';
 
-        if (expectedInheritsFrom && currentInheritsFrom && currentInheritsFrom !== expectedInheritsFrom) {
-            console.log(`[mrpack] ⚠ 检测到版本 ${versionId} 的基础版本不匹配: 当前=${currentInheritsFrom} 整合包要求=${expectedInheritsFrom}`);
-            progress('base-fix', `正在同步基础版本到 ${expectedInheritsFrom}...`, 12);
-
-            const oldInheritsFrom = currentInheritsFrom;
+        // If the existing JSON still has inheritsFrom, it's an old-style version that needs merging
+        if (existingJson && existingJson.inheritsFrom && loaderVersionId) {
+            console.log(`[mrpack] 检测到旧版版本JSON (inheritsFrom: ${existingJson.inheritsFrom})，重新合并加载器`);
+            progress('base-fix', `正在同步加载器到 ${loaderVersionId}...`, 12);
 
             if (mcVersion) {
                 const baseFix = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
@@ -16127,10 +16258,10 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 const needInstall = !fs.existsSync(lvJsonPath) || !verifyLoaderLibs(loaderVersionId);
                 if (needInstall) {
                     if (fs.existsSync(lvJsonPath) && !verifyLoaderLibs(loaderVersionId)) {
-                        console.log(`[mrpack] 整合包要求的 ${loaderVersionId} 库文件缺失，重新安装`);
+                        console.log(`[mrpack] ${loaderVersionId} 库文件缺失，重新安装`);
                         try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
                     }
-                    console.log(`[mrpack] 正在安装整合包要求的加载器: ${loaderVersionId}`);
+                    console.log(`[mrpack] 正在安装加载器: ${loaderVersionId}`);
                     try {
                         let ir;
                         if (forgeVer) ir = await installForge(mcVersion, forgeVer, (p, msg) => { const np = p > 1 ? p / 100 : p; progress('loader-install', msg || '正在安装Forge...', 13 + np * 2); });
@@ -16145,56 +16276,104 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 }
             }
 
+            // PCL2-style re-merge: vanilla JSON as base, merge loader on top
             try {
-                let newJson = existingJson || {};
-                newJson.id = versionId;
-                newJson.inheritsFrom = expectedInheritsFrom;
-                if (!newJson.type) newJson.type = 'release';
-                if (loaderVersionId) {
-                    try {
-                        const lvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
-                        if (fs.existsSync(lvJsonPath)) {
-                            const lvJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
-                            if (lvJson.mainClass) newJson.mainClass = lvJson.mainClass;
+                const lvJsonPath = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
+                if (fs.existsSync(lvJsonPath)) {
+                    let newJson = null;
+                    if (mcVersion) {
+                        const vanillaJsonPath = path.join(VERSIONS_DIR, mcVersion, `${mcVersion}.json`);
+                        let baseJson = null;
+                        if (fs.existsSync(vanillaJsonPath)) {
+                            baseJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf-8'));
                         }
-                    } catch (_lvErr) {}
-                } else if (!newJson.mainClass) {
-                    newJson.mainClass = 'net.minecraft.client.main.Main';
+                        const lvJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
+                        if (baseJson) {
+                            newJson = pcl2StyleMerge(baseJson, lvJson, versionId);
+                        } else {
+                            newJson = { ...lvJson };
+                            delete newJson.inheritsFrom;
+                            delete newJson._comment_;
+                            delete newJson.jar;
+                            newJson.id = versionId;
+                            newJson.time = new Date().toISOString();
+                            newJson.releaseTime = new Date().toISOString();
+                        }
+                    } else {
+                        newJson = JSON.parse(fs.readFileSync(lvJsonPath, 'utf-8'));
+                        delete newJson.inheritsFrom;
+                        delete newJson._comment_;
+                        delete newJson.jar;
+                        newJson.id = versionId;
+                        newJson.time = new Date().toISOString();
+                        newJson.releaseTime = new Date().toISOString();
+                    }
+                    if (!newJson.clientVersion && mcVersion) {
+                        newJson.clientVersion = mcVersion;
+                    }
+                    if (newJson.arguments?.jvm) {
+                        newJson.arguments.jvm = deduplicateJvmArgs(newJson.arguments.jvm);
+                    }
+                    fs.writeFileSync(versionJsonPath, JSON.stringify(newJson, null, 2));
+                    _invalidateResolvedJsonCache(versionId);
+                    console.log(`[mrpack] 已PCL2式重新合并 ${versionId} (libs: ${(newJson.libraries || []).length})`);
                 }
-                if (!newJson.time) newJson.time = new Date().toISOString();
-                if (!newJson.releaseTime) newJson.releaseTime = new Date().toISOString();
-                fs.writeFileSync(versionJsonPath, JSON.stringify(newJson, null, 2));
-                _invalidateResolvedJsonCache(versionId);
-                console.log(`[mrpack] ✓ 已更新版本 ${versionId} 的基础版本: ${oldInheritsFrom} → ${expectedInheritsFrom}`);
             } catch (e) {
-                console.error(`[mrpack] 更新版本JSON失败:`, e.message);
+                console.error(`[mrpack] 重新合并版本JSON失败:`, e.message);
             }
-        } else if (!expectedInheritsFrom) {
-            console.log(`[mrpack] 整合包未指定MC版本，跳过基础版本校验`);
+            try {
+                const loaderDir = path.join(VERSIONS_DIR, loaderVersionId);
+                if (fs.existsSync(loaderDir) && loaderDir !== versionDir) {
+                    fs.rmSync(loaderDir, { recursive: true, force: true });
+                    console.log(`[mrpack] 已删除独立加载器文件夹: ${loaderVersionId}`);
+                }
+            } catch (e) {
+                console.warn(`[mrpack] 删除加载器文件夹失败: ${e.message}`);
+            }
+        } else if (!loaderVersionId) {
+            console.log(`[mrpack] 整合包未指定加载器，跳过加载器校验`);
         } else {
-            console.log(`[mrpack] 版本 ${versionId} 的基础版本匹配 (${expectedInheritsFrom})，无需更新`);
+            console.log(`[mrpack] 版本 ${versionId} 已合并加载器，无需更新`);
         }
     }
 
     if (isNewVersionDir && !fs.existsSync(path.join(versionDir, `${versionId}.json`))) {
         console.log(`[mrpack] 重导入场景: 版本JSON缺失，重新创建 ${versionId}.json`);
-        const fallbackJson = {
+        let fallbackJson = {
             id: versionId,
-            inheritsFrom: loaderVersionId || mcVersion || undefined,
             type: 'release',
             mainClass: 'net.minecraft.client.main.Main',
             time: new Date().toISOString(),
             releaseTime: new Date().toISOString()
         };
         try {
-            if (loaderVersionId) {
+            if (loaderVersionId && mcVersion) {
                 const lvP = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
+                const vanillaJsonPath = path.join(VERSIONS_DIR, mcVersion, `${mcVersion}.json`);
                 if (fs.existsSync(lvP)) {
+                    let baseJson = null;
+                    if (fs.existsSync(vanillaJsonPath)) {
+                        baseJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf-8'));
+                    }
                     const lvJ = JSON.parse(fs.readFileSync(lvP, 'utf-8'));
-                    if (lvJ.mainClass) fallbackJson.mainClass = lvJ.mainClass;
+                    if (baseJson) {
+                        fallbackJson = pcl2StyleMerge(baseJson, lvJ, versionId);
+                    } else {
+                        fallbackJson = { ...lvJ };
+                        delete fallbackJson.inheritsFrom;
+                        delete fallbackJson._comment_;
+                        delete fallbackJson.jar;
+                        fallbackJson.id = versionId;
+                        fallbackJson.time = new Date().toISOString();
+                        fallbackJson.releaseTime = new Date().toISOString();
+                    }
+                    if (!fallbackJson.clientVersion) fallbackJson.clientVersion = mcVersion;
                 }
             }
         } catch (_e) {}
+        if (fallbackJson.arguments?.jvm) {
+            fallbackJson.arguments.jvm = deduplicateJvmArgs(fallbackJson.arguments.jvm);
+        }
         fs.writeFileSync(path.join(versionDir, `${versionId}.json`), JSON.stringify(fallbackJson, null, 2));
         _invalidateResolvedJsonCache(versionId);
     }

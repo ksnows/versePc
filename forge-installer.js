@@ -242,6 +242,78 @@ async function main() {
             }
         }
 
+        const mergedForgeLibs = vj.libraries || [];
+        const seenNames = new Set(mergedForgeLibs.map(l => l.name).filter(Boolean));
+        if (vj.inheritsFrom) {
+            const vanillaJsonPath = path.join(ROOT, 'versions', vj.inheritsFrom, `${vj.inheritsFrom}.json`);
+            log(`Vanilla JSON path: ${vanillaJsonPath} exists=${fs.existsSync(vanillaJsonPath)}`);
+            if (fs.existsSync(vanillaJsonPath)) {
+                try {
+                    const vanillaJson = JSON.parse(fs.readFileSync(vanillaJsonPath, 'utf8'));
+                    const vanillaLibs = vanillaJson.libraries || [];
+                    for (const vl of vanillaLibs) {
+                        if (vl.name && !seenNames.has(vl.name)) {
+                            mergedForgeLibs.push(vl);
+                            seenNames.add(vl.name);
+                        }
+                    }
+                    if (vanillaJson.arguments) {
+                        if (!vj.arguments) {
+                            vj.arguments = vanillaJson.arguments;
+                        } else {
+                            const mergedGame = [...(vanillaJson.arguments.game || [])];
+                            for (const fg of (vj.arguments.game || [])) {
+                                const fgStr = typeof fg === 'string' ? fg : JSON.stringify(fg);
+                                if (!mergedGame.some(mg => (typeof mg === 'string' ? mg : JSON.stringify(mg)) === fgStr)) {
+                                    mergedGame.push(fg);
+                                }
+                            }
+                            vj.arguments.game = mergedGame;
+                            const expandedJvm = [];
+                            const fjArr = vj.arguments.jvm || [];
+                            for (let fji = 0; fji < fjArr.length; fji++) {
+                                const fj = fjArr[fji];
+                                if (typeof fj === 'string' && (fj === '--add-opens' || fj === '--add-exports' || fj === '--add-reads' || fj === '--add-modules')) {
+                                    const vals = [];
+                                    while (fji + 1 < fjArr.length && typeof fjArr[fji + 1] === 'string' && !fjArr[fji + 1].startsWith('-')) {
+                                        fji++;
+                                        vals.push(fjArr[fji]);
+                                    }
+                                    if (vals.length === 0) {
+                                        expandedJvm.push(fj);
+                                    } else {
+                                        for (const v of vals) { expandedJvm.push(fj, v); }
+                                    }
+                                } else {
+                                    expandedJvm.push(fj);
+                                }
+                            }
+                            const mergedJvm = [...(vanillaJson.arguments.jvm || [])];
+                            for (const fj of expandedJvm) {
+                                const fjStr = typeof fj === 'string' ? fj : JSON.stringify(fj);
+                                if (!mergedJvm.some(mj => (typeof mj === 'string' ? mj : JSON.stringify(mj)) === fjStr)) {
+                                    mergedJvm.push(fj);
+                                }
+                            }
+                            vj.arguments.jvm = mergedJvm;
+                        }
+                    }
+                    log(`Merged ${vanillaLibs.length} vanilla libraries, arguments merged`);
+                } catch (e) {
+                    log(`Warning: Failed to merge vanilla JSON: ${e.message}`);
+                }
+            }
+        }
+        const outputJson = {};
+        for (const key of Object.keys(vj)) {
+            if (key !== 'inheritsFrom') outputJson[key] = vj[key];
+        }
+        outputJson.libraries = mergedForgeLibs;
+        const vjPath2 = path.join(versionDir, `${vj.id}.json`);
+        fs.writeFileSync(vjPath2, JSON.stringify(outputJson, null, 2));
+        try { fs.fsyncSync(fs.openSync(vjPath2, 'r')); } catch (_) {}
+        log(`Wrote version JSON (inheritsFrom removed): ${vjPath2}`);
+
         send({ type: 'progress', percent: 1.0, message: 'Forge install complete' });
         send({ type: 'done', success: true, versionId: vj.id });
         log(`\n=== SUCCESS ===`);
