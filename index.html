@@ -2601,12 +2601,12 @@
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label>游戏目录</label>
-                                <p class="hint" style="margin-bottom:8px;margin-top:0">非隔离模式下游戏数据（存档、模组等）的存放位置，默认为启动器数据目录</p>
+                                <label>数据目录</label>
+                                <p class="hint" style="margin-bottom:8px;margin-top:0">启动器核心数据（版本、资源、库文件等）的存放位置，修改后需重启生效</p>
                                 <div style="display:flex;gap:8px;align-items:center">
-                                    <input type="text" id="setting-game-dir" class="text-input" style="flex:1" placeholder="默认（启动器数据目录）">
-                                    <button type="button" class="btn btn-secondary btn-sm" onclick="browseGameDir()">浏览</button>
-                                    <button type="button" class="btn btn-secondary btn-sm" onclick="resetGameDir()">重置</button>
+                                    <input type="text" id="setting-data-dir" class="text-input" style="flex:1" placeholder="加载中..." readonly>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="browseDataDir()">浏览</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="resetDataDir()">重置</button>
                                 </div>
                             </div>
                             <div class="form-group">
@@ -3396,6 +3396,7 @@
     <script src="js/ai-chat.js"></script>
     <script src="js/skinview3d.bundle.js"></script>
     <script src="js/app.js"></script>
+    <script src="js/pcl-slug-map.js" defer></script>
     <script src="js/mod-chinese-names.js" defer></script>
     <script src="js/file-browser.js" defer></script>
     <script src="js/crashAnalyzerUI.js" defer></script>

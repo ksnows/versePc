@@ -2191,7 +2191,6 @@ async function loadSettings() {
         sv('setting-java-path').value = settings.javaPath || '';
         sv('setting-max-memory').value = settings.maxMemory || 4096;
         sv('setting-min-memory').value = settings.minMemory || 1024;
-        sv('setting-game-dir').value = settings.gameDir || '';
         sv('setting-version-isolation').checked = settings.versionIsolation !== false;
         sv('setting-fullscreen').checked = !!settings.fullscreen;
         sv('setting-resolution').value = settings.resolution || '1920x1080';
@@ -2263,7 +2262,6 @@ async function saveCurrentSettings() {
         javaPath: g('setting-java-path')?.value || '',
         maxMemory: parseInt(g('setting-max-memory')?.value || '2048', 10),
         minMemory: parseInt(g('setting-min-memory')?.value || '256', 10),
-        gameDir: g('setting-game-dir')?.value || '',
         versionIsolation: g('setting-version-isolation')?.checked || false,
         fullscreen: g('setting-fullscreen')?.checked || false,
         resolution: g('setting-resolution')?.value || '',
@@ -3491,7 +3489,7 @@ async function loadInstalledMods() {
                 return '<div class="mod-item">' +
                     '<div class="mod-icon"><img src="' + escapeHtml(mod.icon || '') + '" alt="" loading="lazy" onerror="this.style.display=\'none\';this.parentElement.classList.add(\'mod-icon--fallback\')"></div>' +
                     '<div class="mod-info">' +
-                        '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(mod.id || mod.fileName, mod.name)) + '</div>' +
+                        '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(mod.slug || mod.id || mod.fileName, mod.name)) + '</div>' +
                         '<div class="mod-desc">' + escapeHtml(mod.description) + '</div>' +
                         '<div class="mod-meta">' +
                             '<span>' + mod.size + '</span>' +
@@ -3616,7 +3614,7 @@ async function loadMods() {
                     (modMultiSelectMode ? '<div class="mod-checkbox' + (isSelected ? ' checked' : '') + '" data-mod-id="' + mod.id + '" onclick="event.stopPropagation();toggleModSelect(\'' + mod.id + '\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>' : '') +
                     '<div class="mod-icon"><img src="' + escapeHtml(mod.icon || '') + '" alt="" loading="lazy" onerror="this.style.display=\'none\';this.parentElement.classList.add(\'mod-icon--fallback\')"></div>' +
                     '<div class="mod-info">' +
-                        '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(mod.id || mod.slug, mod.title)) +
+                        '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(mod.slug || mod.id, mod.title)) +
                             (sourceFilter === 'any' ? ' <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:' + (mod.source === 'curseforge' ? '#f1643620;color:#f16436;border:1px solid #f1643630' : '#4caf5020;color:#4caf50;border:1px solid #4caf5030') + ';font-weight:500;vertical-align:middle">' + (mod.source === 'curseforge' ? 'CF' : 'MR') + '</span>' : '') +
                         '</div>' +
                         '<div class="mod-desc">' + escapeHtml(mod.description) + '</div>' +
@@ -3886,7 +3884,7 @@ async function renderFavSubList() {
                 (_favSubMultiSelect ? '<div class="mod-checkbox' + (isChecked ? ' checked' : '') + '" data-mod-id="' + escapeHtml(p.id) + '" onclick="event.stopPropagation();toggleFavSubItemSelect(\'' + escapeOnclick(p.id) + '\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>' : '') +
                 '<div class="mod-icon"><img src="' + escapeHtml(p.icon || '') + '" alt="" loading="lazy" onerror="this.style.display=\'none\';this.parentElement.classList.add(\'mod-icon--fallback\')"></div>' +
                 '<div class="mod-info">' +
-                    '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(p.id || p.slug, p.title)) + '</div>' +
+                    '<div class="mod-name">' + escapeHtml(formatModNameWithChinese(p.slug || p.id, p.title)) + '</div>' +
                     '<div class="mod-desc">' + escapeHtml(p.description || '') + '</div>' +
                     '<div class="mod-meta">' +
                         '<span>\u2B07 ' + formatNumber(p.downloads || 0) + '</span>' +
@@ -4391,7 +4389,7 @@ async function getInstalledVersionInfo() {
 
 function _renderModDetailHeader(detail, source, projectId) {
     currentModDetailData = detail;
-    const modTitle = formatModNameWithChinese(detail.id || detail.slug, detail.title || '未知模组');
+    const modTitle = formatModNameWithChinese(detail.slug || detail.id, detail.title || '未知模组');
     const mdName = document.getElementById('md-name');
     const mdDesc = document.getElementById('md-desc');
     const mdIconImg = document.getElementById('md-icon-img');
@@ -4846,7 +4844,7 @@ function renderDepsList(depArray, resolved, versionInfo, hasVersionFilter, curre
         return `<div class="md-dep-item" onclick="openModDetail('${escapeOnclick(d.projectId)}', 'modrinth')">
             ${icon ? `<div class="md-dep-icon"><img src="${icon}" alt="" onerror="this.parentElement.remove()"></div>` : ''}
             <div class="md-dep-info">
-                <div class="md-dep-name">${escapeHtml(formatModNameWithChinese(d.projectId, title))}</div>
+                <div class="md-dep-name">${escapeHtml(formatModNameWithChinese(info.slug || d.projectId, title))}</div>
                 <div class="md-dep-desc">${escapeHtml(desc)}</div>
                 ${versionInfoHtml}
             </div>
@@ -5925,7 +5923,7 @@ async function batchDownloadMods() {
     const batchTaskId = 'batch-' + Date.now();
     const files = modIds.map(id => {
         const info = modInfoMap[id];
-        const displayName = info ? formatModNameWithChinese(id, info.title) : id;
+        const displayName = info ? formatModNameWithChinese(info.slug || id, info.title) : id;
         return { name: displayName, status: 'pending', size: '' };
     });
     dlManager.add(batchTaskId, `批量下载 ${total} 个模组`, 'mod', '');
@@ -5938,7 +5936,7 @@ async function batchDownloadMods() {
     for (let i = 0; i < modIds.length; i++) {
         const modId = modIds[i];
         const info = modInfoMap[modId];
-        const displayName = info ? formatModNameWithChinese(modId, info.title) : modId;
+        const displayName = info ? formatModNameWithChinese(info.slug || modId, info.title) : modId;
 
         files[i].status = 'downloading';
         dlManager.update(batchTaskId, {
@@ -8993,8 +8991,6 @@ function browseFolder(type) {
             if (!result.canceled && result.filePaths.length > 0) {
                 if (type === 'target') {
                     document.getElementById('setting-target-dir').value = result.filePaths[0];
-                } else if (type === 'game') {
-                    document.getElementById('setting-game-dir').value = result.filePaths[0];
                 }
             }
         }).catch(() => {});
@@ -9400,7 +9396,7 @@ async function loadResourceList(type) {
                 <div class="mod-item mod-item-clickable" onclick="openResourceDetail('${item.id}', '${type}')" onmouseenter="preloadModVersions('${item.id}', 'modrinth')">
                     ${item.icon ? `<div class="mod-icon"><img src="${item.icon}" alt="" onerror="this.parentElement.remove()"></div>` : ''}
                     <div class="mod-info">
-                        <div class="mod-name">${escapeHtml(formatModNameWithChinese(item.id || item.slug, item.title))}</div>
+                        <div class="mod-name">${escapeHtml(formatModNameWithChinese(item.slug || item.id, item.title))}</div>
                         <div class="mod-desc">${escapeHtml(item.description)}</div>
                         <div class="mod-meta">
                             <span>⬇ ${formatNumber(item.downloads)}</span>
@@ -9462,7 +9458,7 @@ async function openResourceDetail(projectId, type) {
     if (cached) {
         console.log('[ResDetail] Cache hit, rendering immediately');
         currentModDetailData = cached;
-        mdName.textContent = formatModNameWithChinese(cached.id || cached.slug, cached.title || typeNames[type] || '未知');
+        mdName.textContent = formatModNameWithChinese(cached.slug || cached.id, cached.title || typeNames[type] || '未知');
         if (mdDesc) mdDesc.textContent = (cached.description || '').substring(0, 200);
         if (cached.icon && mdIconImg && mdIconFallback) { mdIconImg.src = cached.icon; mdIconImg.style.display = ''; mdIconFallback.style.display = 'none'; }
         const mdDownloads = document.getElementById('md-downloads');
@@ -9503,7 +9499,7 @@ async function openResourceDetail(projectId, type) {
         if (!cached) {
             _projectDataCache.set(projectId, detail);
             currentModDetailData = detail;
-            mdName.textContent = formatModNameWithChinese(detail.id || detail.slug, detail.title || typeNames[type] || '未知');
+            mdName.textContent = formatModNameWithChinese(detail.slug || detail.id, detail.title || typeNames[type] || '未知');
             if (mdDesc) mdDesc.textContent = (detail.description || '').substring(0, 200);
             if (detail.icon && mdIconImg && mdIconFallback) { mdIconImg.src = detail.icon; mdIconImg.style.display = ''; mdIconFallback.style.display = 'none'; }
             const mdDownloads = document.getElementById('md-downloads');
@@ -10329,7 +10325,7 @@ function renderModMgrList(mods) {
             wrapper.dataset.desc = desc;
             wrapper.innerHTML = `${iconHtml}
             <div class="modmgr-info">
-                <div class="modmgr-name" style="${nameStyle}">${escapeHtml(formatModNameWithChinese(m.id || m.fileName, m.name))}${isDisabled ? ' (已禁用)' : ''}</div>
+                <div class="modmgr-name" style="${nameStyle}">${escapeHtml(formatModNameWithChinese(m.slug || m.id || m.fileName, m.name))}${isDisabled ? ' (已禁用)' : ''}</div>
                 <div class="modmgr-meta">${author ? escapeHtml(author) : ''}${verStr ? ' | ' + escapeHtml(verStr) : ''}</div>
                 <div class="modmgr-desc">${escapeHtml(desc)}</div>
             </div>
@@ -10720,8 +10716,6 @@ async function saveLaunchSettings() {
 
     try {
         await window.electronAPI.store.set('versepc_launch_settings', JSON.stringify(settings));
-        const gameDirVal = document.getElementById('setting-game-dir')?.value || '';
-        await API.saveSettings({ gameDir: gameDirVal });
         showToast('启动设置已保存', 'success');
         
         // 应用窗口大小到启动器窗口
@@ -10758,22 +10752,48 @@ function applyLauncherWindowSize(windowSize) {
     }
 }
 
-async function browseGameDir() {
+async function browseDataDir() {
     try {
-        const current = document.getElementById('setting-game-dir').value;
+        const current = document.getElementById('setting-data-dir').value;
         const opts = { properties: ['openDirectory'] };
-        if (current) opts.defaultPath = current;
+        if (current && current !== '加载中...') opts.defaultPath = current;
         const result = await window.electronAPI.showOpenDialog(opts);
-        if (result && result.filePaths && result.filePaths.length > 0) {
-            document.getElementById('setting-game-dir').value = result.filePaths[0];
+        if (!result || !result.filePaths || result.filePaths.length === 0) return;
+        const selectedPath = result.filePaths[0];
+        const res = await fetch('/api/settings/data-dir', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dataDir: selectedPath })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            document.getElementById('setting-data-dir').value = selectedPath;
+            if (data.message) {
+                alert(data.message);
+            }
+        } else if (data.error) {
+            alert('保存失败: ' + data.error);
         }
     } catch (e) {
-        console.error('Browse game dir error:', e);
+        alert('保存失败: ' + e.message);
     }
 }
 
-function resetGameDir() {
-    document.getElementById('setting-game-dir').value = '';
+async function resetDataDir() {
+    try {
+        const res = await fetch('/api/settings/data-dir', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reset: true })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            document.getElementById('setting-data-dir').value = '';
+            if (data.message) {
+                alert(data.message);
+            }
+        }
+    } catch (e) {
+        alert('重置失败: ' + e.message);
+    }
 }
 
 async function resetLaunchSettings() {
@@ -10781,7 +10801,6 @@ async function resetLaunchSettings() {
     if (!confirmed) return;
 
     document.getElementById('launch-version-isolation').value = 'all';
-    document.getElementById('setting-game-dir').value = '';
     document.getElementById('launch-window-title').value = '';
     document.getElementById('launch-custom-info').value = 'VersePC';
     document.getElementById('launcher-visibility').value = 'keep';
@@ -10883,13 +10902,6 @@ async function loadLaunchSettings() {
 
         updateSystemMemoryInfo();
         checkCdsStatus();
-        try {
-            const serverSettings = await API.getSettings();
-            if (serverSettings && serverSettings.gameDir && serverSettings.gameDir !== '') {
-                const gameDirInput = document.getElementById('setting-game-dir');
-                if (gameDirInput) gameDirInput.value = serverSettings.gameDir;
-            }
-        } catch (e) {}
     } catch (e) {
         console.error('[Settings] Load launch settings error:', e);
     }
@@ -11626,6 +11638,13 @@ async function initSettingsPages() {
     loadLaunchSettings();
     await loadPersonalizeSettings();
     loadOtherSettings();
+    fetch('/api/settings/data-dir').then(r => r.json()).then(d => {
+        const el = document.getElementById('setting-data-dir');
+        if (el && d.dataDir) {
+            el.value = d.dataDir;
+            el.title = d.dataDir;
+        }
+    }).catch(() => {});
 }
 
 function uploadImage(type) {

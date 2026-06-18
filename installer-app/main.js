@@ -260,6 +260,13 @@ ipcMain.handle('install-files', async (event, installPath) => {
             fs.writeFileSync(path.join(installPath, 'uninstall.bat'), '@echo off\necho 正在卸载 VersePC...\ntaskkill /f /im VersePC.exe 2>nul\ntimeout /t 2 /nobreak >nul\nrd /s /q "' + safePath + '"\ndel "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\VersePC.lnk" 2>nul\ndel "%USERPROFILE%\\Desktop\\VersePC.lnk" 2>nul\necho 卸载完成!\npause\ndel "%~f0"\n', 'utf8');
         } catch (e) {}
 
+        const dataConfigPath = path.join(installPath, 'data-config.json');
+        if (!fs.existsSync(dataConfigPath)) {
+            const defaultDataDir = path.join(installPath, 'data');
+            fs.mkdirSync(defaultDataDir, { recursive: true });
+            fs.writeFileSync(dataConfigPath, JSON.stringify({ dataDir: defaultDataDir }, null, 2));
+        }
+
         mainWindow.webContents.send('install-progress', {
             progress: 100, currentFile: '安装完成', bytesCopied: 0, totalBytes: 0
         });

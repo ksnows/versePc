@@ -193,18 +193,37 @@ function yieldToEventLoop() {
 
 setInterval(() => { dirCache.clear(); }, 5 * 60 * 1000);
 
-const DATA_DIR = path.join(os.homedir(), '.versepc');
-const APP_DATA_PATH = DATA_DIR;
+const DEFAULT_OLD_DATA_DIR = path.join(os.homedir(), '.versepc');
+const APP_DIR = path.dirname(process.execPath);
+const DATA_DIR_CONFIG_FILE = path.join(APP_DIR, 'data-config.json');
+
+function getDataDirConfigPath() { return DATA_DIR_CONFIG_FILE; }
+
+function resolveDataDir() {
+    try {
+        if (fs.existsSync(DATA_DIR_CONFIG_FILE)) {
+            const cfg = JSON.parse(fs.readFileSync(DATA_DIR_CONFIG_FILE, 'utf8'));
+            if (cfg.dataDir && typeof cfg.dataDir === 'string' && fs.existsSync(cfg.dataDir)) {
+                return cfg.dataDir;
+            }
+        }
+    } catch (e) {}
+    if (fs.existsSync(DEFAULT_OLD_DATA_DIR)) return DEFAULT_OLD_DATA_DIR;
+    return path.join(APP_DIR, 'data');
+}
+
+let DATA_DIR = resolveDataDir();
+let APP_DATA_PATH = DATA_DIR;
 const MINECRAFT_DIR = process.platform === 'win32'
     ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), '.minecraft')
     : path.join(os.homedir(), '.minecraft');
-const VERSIONS_DIR = path.join(DATA_DIR, 'versions');
-const LIBRARIES_DIR = path.join(DATA_DIR, 'libraries');
-const ASSETS_DIR = path.join(DATA_DIR, 'assets');
-const MODS_DIR = path.join(DATA_DIR, 'mods');
-const NATIVES_DIR = path.join(DATA_DIR, 'natives');
-const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
-const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+let VERSIONS_DIR = path.join(DATA_DIR, 'versions');
+let LIBRARIES_DIR = path.join(DATA_DIR, 'libraries');
+let ASSETS_DIR = path.join(DATA_DIR, 'assets');
+let MODS_DIR = path.join(DATA_DIR, 'mods');
+let NATIVES_DIR = path.join(DATA_DIR, 'natives');
+let ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
+let SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 function hasNonASCII(str) {
     for (let i = 0; i < str.length; i++) {
@@ -1531,6 +1550,17 @@ function waitForTerracottaPort(filePath, timeout, processRef) {
     });
 }
 
+async function killExistingTerracotta() {
+    try {
+        const isWin = process.platform === 'win32';
+        if (isWin) {
+            try { execSync('taskkill /F /IM terracotta.exe 2>nul', { timeout: 5000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+        } else {
+            try { execSync('pkill -f terracotta 2>/dev/null', { timeout: 5000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+        }
+    } catch (_) {}
+}
+
 async function startTerracotta() {
     if (terracottaProcess && terracottaHttpPort) {
         console.log('[Terracotta] 已有进程运行，执行健康检查...');
@@ -1547,6 +1577,10 @@ async function startTerracotta() {
         console.warn('[Terracotta] 健康检查3次全部失败，准备重启进程');
         stopTerracotta();
     }
+
+    console.log('[Terracotta] 清理残留进程...');
+    await killExistingTerracotta();
+    await new Promise(r => setTimeout(r, 500));
 
     console.log('[Terracotta] 检查组件是否已安装...');
     const installed = await ensureTerracottaInstalled();
@@ -2801,8 +2835,8 @@ function saveAccounts(accounts) {
     safeWriteFileSync(ACCOUNTS_FILE, json);
 }
 
-const VERSIONS_DATA_FILE = path.join(DATA_DIR, 'versions-data.json');
-const EXTERNAL_FOLDERS_FILE = path.join(DATA_DIR, 'external-folders.json');
+let VERSIONS_DATA_FILE = path.join(DATA_DIR, 'versions-data.json');
+let EXTERNAL_FOLDERS_FILE = path.join(DATA_DIR, 'external-folders.json');
 
 let _versionsDirWatcher = null;
 function watchVersionsDir() {
@@ -3539,7 +3573,7 @@ async function performRepair(sessionId, versionId) {
                             rlog(`Phase5.5 原版JAR下载后: ${fs.existsSync(baseJar)}`);
                         }
                         const settings = loadSettingsCached();
-                        const gameDir = settings.gameDir || MINECRAFT_DIR;
+                        const gameDir = settings.gameDir || DATA_DIR;
                         const forgeVerStr = `${pmcVer}-${pfVer}`;
                         const installerPath = path.join(DATA_DIR, 'temp', `forge-repair-${forgeVerStr}.jar`);
                         if (!fs.existsSync(path.dirname(installerPath))) fs.mkdirSync(path.dirname(installerPath), { recursive: true });
@@ -7633,6 +7667,7 @@ function getInstalledMods() {
 
             mods.push({
                 id: id,
+                slug: parsed.projectId || '',
                 name: parsed.name || name,
                 fileName: file,
                 description: parsed.desc || (isDisabled ? '已禁用' : '已安装的模组'),
@@ -9197,15 +9232,26 @@ function mergeVersionJson(parent, child) {
     }
 
     if (merged.mainClass && merged.mainClass.startsWith('net.fabricmc')) {
-        const hasFabricLoader = (merged.libraries || []).some(l => l.name && l.name.startsWith('net.fabricmc:fabric-loader'));
-        if (!hasFabricLoader) {
+        const libs = merged.libraries || [];
+        const hasFabricLoader = libs.some(l => l.name && l.name.startsWith('net.fabricmc:fabric-loader'));
+        const hasIntermediary = libs.some(l => l.name && l.name.startsWith('net.fabricmc:intermediary'));
+        if (!hasFabricLoader || !hasIntermediary) {
             const versionId = child.id || merged.id || '';
-            const fabricMatch = versionId.match(/-Fabric-(\d+\.\d+\.\d+)/);
-            const loaderVer = fabricMatch ? fabricMatch[1] : '0.16.10';
-            const loaderJarName = `fabric-loader-${loaderVer}.jar`;
-            console.log(`[MergeJson] 自动修复: 添加 fabric-loader ${loaderVer}`);
-            merged.libraries = [
-                {
+            let loaderVer = '0.16.10';
+            let mcVer = '';
+            const versePcMatch = versionId.match(/fabric-loader-(\d+\.\d+\.\d+)-(.+)/);
+            const pcl2Match = versionId.match(/-Fabric-(\d+\.\d+\.\d+)/);
+            if (versePcMatch) { loaderVer = versePcMatch[1]; mcVer = versePcMatch[2]; }
+            else if (pcl2Match) { loaderVer = pcl2Match[1]; }
+            if (!mcVer) {
+                const mcMatch = (merged.inheritsFrom || versionId).match(/(\d+\.\d+(?:\.\d+)?)/);
+                if (mcMatch) mcVer = mcMatch[1];
+            }
+            const newLibs = [];
+            if (!hasFabricLoader) {
+                const loaderJarName = `fabric-loader-${loaderVer}.jar`;
+                console.log(`[MergeJson] 自动修复: 添加 fabric-loader ${loaderVer}`);
+                newLibs.push({
                     name: `net.fabricmc:fabric-loader:${loaderVer}`,
                     url: 'https://maven.fabricmc.net/',
                     downloads: {
@@ -9214,9 +9260,25 @@ function mergeVersionJson(parent, child) {
                             url: `https://maven.fabricmc.net/net/fabricmc/fabric-loader/${loaderVer}/${loaderJarName}`
                         }
                     }
-                },
-                ...(merged.libraries || [])
-            ];
+                });
+            }
+            if (!hasIntermediary && mcVer) {
+                const interJarName = `intermediary-${mcVer}.jar`;
+                console.log(`[MergeJson] 自动修复: 添加 intermediary ${mcVer}`);
+                newLibs.push({
+                    name: `net.fabricmc:intermediary:${mcVer}`,
+                    url: 'https://maven.fabricmc.net/',
+                    downloads: {
+                        artifact: {
+                            path: `net/fabricmc/intermediary/${mcVer}/${interJarName}`,
+                            url: `https://maven.fabricmc.net/net/fabricmc/intermediary/${mcVer}/${interJarName}`
+                        }
+                    }
+                });
+            }
+            if (newLibs.length > 0) {
+                merged.libraries = [...newLibs, ...libs];
+            }
         }
     }
 
@@ -12772,88 +12834,104 @@ async function installFabric(gameVersion, loaderVersion, onProgress = null) {
             return { success: false, error: baseResult.error };
         }
         
-        const metaUrl = `${FABRIC_META_URL}/versions/loader/${gameVersion}/${loaderVersion}`;
-        console.log(`[Fabric] Fetching profile from: ${metaUrl}`);
-        const profileData = await fetchJSON(metaUrl);
-        console.log(`[Fabric] Profile data keys: ${Object.keys(profileData).join(', ')}`);
+        const profileJsonUrl = `${FABRIC_META_URL}/versions/loader/${gameVersion}/${loaderVersion}/profile/json`;
+        const baseMetaUrl = `${FABRIC_META_URL}/versions/loader/${gameVersion}/${loaderVersion}`;
+        console.log(`[Fabric] Fetching profile/json from: ${profileJsonUrl}`);
+
+        let fullProfile = null;
+        try {
+            fullProfile = await fetchJSON(profileJsonUrl);
+            fullProfile.id = versionId;
+            fullProfile.inheritsFrom = gameVersion;
+            if (!fullProfile.time) fullProfile.time = fullProfile.releaseTime || new Date().toISOString();
+            console.log(`[Fabric] profile/json returned ${fullProfile.libraries?.length || 0} libraries`);
+        } catch (profileErr) {
+            console.warn(`[Fabric] profile/json failed (${profileErr.message}), falling back to base endpoint`);
+        }
+
+        if (!fullProfile || !fullProfile.libraries || fullProfile.libraries.length === 0) {
+            console.log(`[Fabric] Falling back to base endpoint: ${baseMetaUrl}`);
+            const profileData = await fetchJSON(baseMetaUrl);
+            console.log(`[Fabric] Profile data keys: ${Object.keys(profileData).join(', ')}`);
+
+            fullProfile = {
+                id: versionId,
+                inheritsFrom: gameVersion,
+                mainClass: 'net.fabricmc.loader.impl.launch.knot.KnotClient',
+                type: 'release',
+                time: new Date().toISOString(),
+                libraries: [],
+                arguments: { game: [], jvm: [] }
+            };
+
+            if (profileData.launcherMeta) {
+                const launcherMeta = profileData.launcherMeta;
+                if (launcherMeta.libraries) {
+                    const common = launcherMeta.libraries.common || [];
+                    const client = launcherMeta.libraries.client || [];
+                    fullProfile.libraries = [...common, ...client];
+                    console.log(`[Fabric] Libraries from launcherMeta: ${fullProfile.libraries.length}`);
+                }
+                if (launcherMeta.mainClass) {
+                    const metaMainClass = typeof launcherMeta.mainClass === 'string'
+                        ? launcherMeta.mainClass
+                        : launcherMeta.mainClass?.client;
+                    if (metaMainClass && metaMainClass.includes('fabricmc')) {
+                        fullProfile.mainClass = metaMainClass;
+                    }
+                }
+            }
+
+            if (profileData.loader?.mainClass) {
+                fullProfile.mainClass = profileData.loader.mainClass;
+            }
+            if (profileData.mainClass) {
+                if (typeof profileData.mainClass === 'string') {
+                    fullProfile.mainClass = profileData.mainClass;
+                } else if (profileData.mainClass.client) {
+                    fullProfile.mainClass = profileData.mainClass.client;
+                }
+            }
+
+            if (profileData.loader?.maven) {
+                const loaderParts = profileData.loader.maven.split(':');
+                if (loaderParts.length >= 3) {
+                    fullProfile.libraries.push({
+                        name: profileData.loader.maven,
+                        url: 'https://maven.fabricmc.net/'
+                    });
+                    console.log(`[Fabric] Added fabric-loader library: ${profileData.loader.maven}`);
+                }
+            }
+            if (profileData.intermediary?.maven) {
+                const interParts = profileData.intermediary.maven.split(':');
+                if (interParts.length >= 3) {
+                    fullProfile.libraries.push({
+                        name: profileData.intermediary.maven,
+                        url: 'https://maven.fabricmc.net/'
+                    });
+                    console.log(`[Fabric] Added intermediary library: ${profileData.intermediary.maven}`);
+                }
+            }
+
+            if (profileData.arguments) {
+                for (const key of Object.keys(profileData.arguments)) {
+                    if (Array.isArray(profileData.arguments[key])) {
+                        fullProfile.arguments[key] = profileData.arguments[key];
+                    }
+                }
+            }
+            if (profileData.launcherMeta?.arguments) {
+                for (const key of Object.keys(profileData.launcherMeta.arguments)) {
+                    if (Array.isArray(profileData.launcherMeta.arguments[key])) {
+                        fullProfile.arguments[key] = profileData.launcherMeta.arguments[key];
+                    }
+                }
+            }
+        }
 
         const versionDir = path.join(VERSIONS_DIR, versionId);
         if (!fs.existsSync(versionDir)) fs.mkdirSync(versionDir, { recursive: true });
-
-        const fullProfile = {
-            id: versionId,
-            inheritsFrom: gameVersion,
-            mainClass: 'net.fabricmc.loader.impl.launch.knot.KnotClient',
-            type: 'release',
-            libraries: [],
-            arguments: {
-                game: [],
-                jvm: []
-            }
-        };
-
-        if (profileData.launcherMeta) {
-            const launcherMeta = profileData.launcherMeta;
-            console.log(`[Fabric] launcherMeta keys: ${Object.keys(launcherMeta).join(', ')}`);
-
-            if (launcherMeta.libraries) {
-                const common = launcherMeta.libraries.common || [];
-                const client = launcherMeta.libraries.client || [];
-                const server = launcherMeta.libraries.server || [];
-                fullProfile.libraries = [...common, ...client];
-                console.log(`[Fabric] Libraries: ${common.length} common, ${client.length} client`);
-            }
-
-            // PCL2-style: launcherMeta.mainClass.client returns the VANILLA main class (net.minecraft.client.main.Main),
-            // NOT the Fabric main class. Do NOT use it to override the Fabric KnotClient.
-            if (launcherMeta.mainClass) {
-                const metaMainClass = typeof launcherMeta.mainClass === 'string'
-                    ? launcherMeta.mainClass
-                    : launcherMeta.mainClass?.client;
-                if (metaMainClass && metaMainClass.includes('fabricmc')) {
-                    fullProfile.mainClass = metaMainClass;
-                    console.log(`[Fabric] mainClass from launcherMeta: ${fullProfile.mainClass}`);
-                } else {
-                    console.log(`[Fabric] Ignoring launcherMeta.mainClass (${metaMainClass}) - not Fabric, keeping ${fullProfile.mainClass}`);
-                }
-            }
-        }
-
-        if (profileData.loader) {
-            if (profileData.loader.mainClass) {
-                fullProfile.mainClass = profileData.loader.mainClass;
-                console.log(`[Fabric] mainClass from loader: ${fullProfile.mainClass}`);
-            }
-            if (profileData.loader.libraries && fullProfile.libraries.length === 0) {
-                fullProfile.libraries = profileData.loader.libraries;
-            }
-        }
-
-        // Also check top-level mainClass from Fabric meta API v2
-        if (profileData.mainClass) {
-            if (typeof profileData.mainClass === 'string') {
-                fullProfile.mainClass = profileData.mainClass;
-            } else if (profileData.mainClass.client) {
-                fullProfile.mainClass = profileData.mainClass.client;
-            }
-            console.log(`[Fabric] mainClass from profileData: ${fullProfile.mainClass}`);
-        }
-
-        // PCL2-style: Collect arguments from all possible Fabric meta locations
-        if (profileData.arguments) {
-            for (const key of Object.keys(profileData.arguments)) {
-                if (Array.isArray(profileData.arguments[key])) {
-                    fullProfile.arguments[key] = profileData.arguments[key];
-                }
-            }
-        }
-        if (profileData.launcherMeta?.arguments) {
-            for (const key of Object.keys(profileData.launcherMeta.arguments)) {
-                if (Array.isArray(profileData.launcherMeta.arguments[key])) {
-                    fullProfile.arguments[key] = profileData.launcherMeta.arguments[key];
-                }
-            }
-        }
 
         console.log(`[Fabric] Final mainClass: ${fullProfile.mainClass}`);
         console.log(`[Fabric] Final libraries count: ${fullProfile.libraries.length}`);
@@ -16047,9 +16125,24 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                 } else if (fabricVer) {
                     loaderVersionId = `fabric-loader-${fabricVer}-${mcVersion}`;
                     const lvJson = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
-                    if (!fs.existsSync(lvJson) || !verifyLoaderLibs(loaderVersionId)) {
-                        if (fs.existsSync(lvJson) && !verifyLoaderLibs(loaderVersionId)) {
-                            console.log(`[mrpack] Fabric ${loaderVersionId} 库文件缺失，重新安装`);
+                    let fabricNeedInstall = !fs.existsSync(lvJson);
+                    if (!fabricNeedInstall) {
+                        if (!verifyLoaderLibs(loaderVersionId)) {
+                            fabricNeedInstall = true;
+                        } else {
+                            try {
+                                const existingJson = JSON.parse(fs.readFileSync(lvJson, 'utf-8'));
+                                const hasFabricLoader = (existingJson.libraries || []).some(l => l.name && l.name.startsWith('net.fabricmc:fabric-loader'));
+                                if (!hasFabricLoader) {
+                                    console.log(`[mrpack] Fabric ${loaderVersionId} 缺少 fabric-loader 库，重新安装`);
+                                    fabricNeedInstall = true;
+                                }
+                            } catch (_) { fabricNeedInstall = true; }
+                        }
+                    }
+                    if (fabricNeedInstall) {
+                        if (fs.existsSync(lvJson)) {
+                            console.log(`[mrpack] Fabric ${loaderVersionId} 需要重新安装`);
                             try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
                         }
                         console.log(`[mrpack] 安装模组加载器: Fabric ${fabricVer} (MC ${mcVersion})`);
@@ -17136,9 +17229,24 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                 } else if (fabricVerCF) {
                     loaderVersionId = `fabric-loader-${fabricVerCF}-${mcVersion}`;
                     const lvJson = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
-                    if (!fs.existsSync(lvJson) || !verifyLoaderLibs(loaderVersionId)) {
-                        if (fs.existsSync(lvJson) && !verifyLoaderLibs(loaderVersionId)) {
-                            console.log(`[CurseForge] Fabric ${loaderVersionId} 库文件缺失，重新安装`);
+                    let fabricNeedInstall = !fs.existsSync(lvJson);
+                    if (!fabricNeedInstall) {
+                        if (!verifyLoaderLibs(loaderVersionId)) {
+                            fabricNeedInstall = true;
+                        } else {
+                            try {
+                                const existingJson = JSON.parse(fs.readFileSync(lvJson, 'utf-8'));
+                                const hasFabricLoader = (existingJson.libraries || []).some(l => l.name && l.name.startsWith('net.fabricmc:fabric-loader'));
+                                if (!hasFabricLoader) {
+                                    console.log(`[CurseForge] Fabric ${loaderVersionId} 缺少 fabric-loader 库，重新安装`);
+                                    fabricNeedInstall = true;
+                                }
+                            } catch (_) { fabricNeedInstall = true; }
+                        }
+                    }
+                    if (fabricNeedInstall) {
+                        if (fs.existsSync(lvJson)) {
+                            console.log(`[CurseForge] Fabric ${loaderVersionId} 需要重新安装`);
                             try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
                         }
                         console.log(`[CurseForge] 安装模组加载器: Fabric ${fabricVerCF} (MC ${mcVersion})`);
@@ -17783,7 +17891,19 @@ async function _importHmcl(zip, hmclEntry, filePath, progress, targetVersion = '
                 progress('loader-install', '正在安装Fabric...', 12);
                 loaderVersionId = `fabric-loader-${ver}-${mcVersion}`;
                 const lvJson = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
-                if (!fs.existsSync(lvJson)) {
+                let hmclFabricNeedInstall = !fs.existsSync(lvJson);
+                if (!hmclFabricNeedInstall) {
+                    try {
+                        const existingJson = JSON.parse(fs.readFileSync(lvJson, 'utf-8'));
+                        if (!(existingJson.libraries || []).some(l => l.name && l.name.startsWith('net.fabricmc:fabric-loader'))) {
+                            hmclFabricNeedInstall = true;
+                        }
+                    } catch (_) { hmclFabricNeedInstall = true; }
+                }
+                if (hmclFabricNeedInstall) {
+                    if (fs.existsSync(lvJson)) {
+                        try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
+                    }
                     const ir = await installFabric(mcVersion, ver, (p, msg) => progress('loader-install', msg || '正在安装Fabric...', 12 + p * 3));
                     if (!ir.success) { cleanupVersionChain(versionId); return { success: false, versionId, error: ir.error }; }
                 }
@@ -21311,6 +21431,51 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                     }
                 } else {
                     sendError('Method not allowed', 405);
+                }
+                break;
+            }
+
+            case '/api/settings/data-dir': {
+                if (req.method === 'POST') {
+                    try {
+                        const { dataDir, reset } = await readBody();
+                        if (reset) {
+                            try { fs.unlinkSync(getDataDirConfigPath()); } catch (e) {}
+                            sendJSON({ ok: true, message: '已重置为默认目录，重启后生效' });
+                            return;
+                        }
+                        if (!dataDir || typeof dataDir !== 'string') {
+                            sendJSON({ error: '请提供有效的目录路径' }, 400);
+                            return;
+                        }
+                        const resolvedPath = path.resolve(dataDir);
+                        const oldVersionsDir = VERSIONS_DIR;
+                        
+                        fs.mkdirSync(resolvedPath, { recursive: true });
+                        fs.writeFileSync(getDataDirConfigPath(), JSON.stringify({ dataDir: resolvedPath }, null, 2));
+                        
+                        try {
+                            if (fs.existsSync(oldVersionsDir)) {
+                                const entries = fs.readdirSync(oldVersionsDir).filter(e => {
+                                    try { return fs.statSync(path.join(oldVersionsDir, e)).isDirectory(); } catch (_) { return false; }
+                                });
+                                if (entries.length > 0) {
+                                    const folders = loadExternalFolders();
+                                    const alreadyRegistered = folders.some(f => path.resolve(f.path) === path.resolve(path.dirname(oldVersionsDir)));
+                                    if (!alreadyRegistered) {
+                                        folders.push({ name: path.basename(path.dirname(oldVersionsDir)), path: path.dirname(oldVersionsDir) });
+                                        saveExternalFolders(folders);
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                        
+                        sendJSON({ ok: true, dataDir: resolvedPath, message: '数据目录已修改，重启后生效' });
+                    } catch (e) {
+                        sendJSON({ error: '保存失败: ' + e.message }, 500);
+                    }
+                } else {
+                    sendJSON({ dataDir: DATA_DIR, isDefault: !fs.existsSync(getDataDirConfigPath()) });
                 }
                 break;
             }
