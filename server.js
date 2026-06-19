@@ -4931,9 +4931,21 @@ function isJarIntact(filePath) {
     }
 }
 
-function downloadFileSync(urlStr, destPath) {
-    const dir = path.dirname(destPath);
+function ensureDirForFile(filePath) {
+    const parts = filePath.split(path.sep);
+    let current = parts[0] || path.sep;
+    for (let i = 1; i < parts.length - 1; i++) {
+        current = path.join(current, parts[i]);
+        if (fs.existsSync(current) && !fs.statSync(current).isDirectory()) {
+            fs.unlinkSync(current);
+        }
+    }
+    const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function downloadFileSync(urlStr, destPath) {
+    ensureDirForFile(destPath);
     try {
         execSync(`curl --silent --location --output "${destPath}" "${urlStr}"`, { timeout: 30000, windowsHide: true, stdio: 'ignore' });
     } catch (e) {
@@ -4948,8 +4960,7 @@ function downloadFileSync(urlStr, destPath) {
 }
 
 function downloadFileSyncAsync(urlStr, destPath) {
-    const dir = path.dirname(destPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    ensureDirForFile(destPath);
     return new Promise((resolve, reject) => {
         const { exec } = require('child_process');
         exec(`curl --silent --location --retry 2 --connect-timeout 10 --max-time 120 --output "${destPath}" "${urlStr}"`,
@@ -12732,7 +12743,16 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
                         if (fs.existsSync(libPath)) fs.unlinkSync(libPath);
                         await downloadFileWithMirror(lib.downloads.artifact.url, libPath, null, 3, null, 60000);
                     } catch (e) {
-                        console.log(`[BaseVersion] Failed to download library ${lib.name}: ${e.message}`);
+                        console.log(`[BaseVersion] 下载库失败 ${lib.name}: ${e.message}, 尝试curl...`);
+                        const _bmcl = lib.downloads.artifact.url.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/maven/');
+                        const _fm = lib.downloads.artifact.url.replace('https://libraries.minecraft.net/', 'https://maven.minecraftforge.net/');
+                        try { ensureDirForFile(libPath); execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libPath}" "${_bmcl}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                        if (!fs.existsSync(libPath) || fs.statSync(libPath).size < 100) {
+                            try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libPath}" "${_fm}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                        }
+                        if (!fs.existsSync(libPath) || fs.statSync(libPath).size < 100) {
+                            try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libPath}" "${lib.downloads.artifact.url}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                        }
                     }
                 }
             } else if (lib.name) {
@@ -12754,7 +12774,16 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
                         try {
                             await downloadFileWithMirror(downloadUrl, libFile);
                         } catch (e) {
-                            console.log(`[BaseVersion] Failed to download library ${lib.name}: ${e.message}`);
+                            console.log(`[BaseVersion] 下载库失败 ${lib.name}: ${e.message}, 尝试curl...`);
+                            const _bmcl2 = downloadUrl.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/maven/');
+                            const _fm2 = downloadUrl.replace('https://libraries.minecraft.net/', 'https://maven.minecraftforge.net/');
+                            try { ensureDirForFile(libFile); execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libFile}" "${_bmcl2}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                            if (!fs.existsSync(libFile) || fs.statSync(libFile).size < 100) {
+                                try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libFile}" "${_fm2}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                            }
+                            if (!fs.existsSync(libFile) || fs.statSync(libFile).size < 100) {
+                                try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libFile}" "${downloadUrl}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                            }
                         }
                     }
                 }

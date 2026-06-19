@@ -79,9 +79,6 @@
             "node_modules/@img/**/*",
             "node_modules/detect-libc/**/*"
         ],
-        "asarUnpack": [
-            "assets/boot-animations/**/*"
-        ],
         "publish": {
             "provider": "github",
             "owner": "doujie081231",

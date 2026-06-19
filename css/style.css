@@ -4255,46 +4255,6 @@ body {
     justify-content: center;
 }
 
-.boot-animation-theme-option {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 10px 12px;
-    border: 2px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-tertiary);
-    cursor: pointer;
-    transition: all 0.2s var(--ease-out-expo);
-    text-align: center;
-}
-
-.boot-animation-theme-option:hover {
-    border-color: var(--accent);
-    background: var(--bg-hover);
-    transform: translateY(-2px);
-}
-
-.boot-animation-theme-option.active {
-    border-color: var(--accent);
-    background: rgba(var(--accent-rgb), 0.08);
-    box-shadow: 0 0 0 3px var(--accent-glow);
-}
-
-.boot-animation-theme-option .wallpaper-name {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    white-space: nowrap;
-}
-
-.boot-animation-theme-option.active .wallpaper-name {
-    color: var(--accent);
-}
-
-#boot-animation-theme-group .wallpaper-picker-grid {
-    grid-template-columns: repeat(3, 1fr);
-}
-
 .wallpaper-option {
     display: flex;
     flex-direction: column;

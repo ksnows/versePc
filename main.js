@@ -824,18 +824,6 @@ ipcMain.handle('store-delete', async (event, key) => {
     return true;
 });
 
-ipcMain.handle('get-boot-animation-path', async (event, theme) => {
-    const fileName = theme === 'dark' ? 'dark.mp4' : 'light.mp4';
-    // Use asar.unpacked path so Chromium can stream/seek the video file.
-    const unpackedDir = path.join(__dirname, '..', 'app.asar.unpacked', 'assets', 'boot-animations');
-    const asarDir = path.join(__dirname, 'assets', 'boot-animations');
-    let filePath = path.join(unpackedDir, fileName);
-    if (!fs.existsSync(filePath)) {
-        filePath = path.join(asarDir, fileName);
-    }
-    return filePath;
-});
-
 ipcMain.handle('get-machine-id', async () => {
     try {
         const crypto = require('crypto');

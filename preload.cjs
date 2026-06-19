@@ -131,7 +131,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         set: (key, value) => ipcRenderer.invoke('store-set', key, value),
         delete: (key) => ipcRenderer.invoke('store-delete', key),
     },
-    getBootAnimationPath: (theme) => ipcRenderer.invoke('get-boot-animation-path', theme),
     openExternal: (url) => ipcRenderer.invoke('shell-open-external', url),
     memoryOptimize: () => ipcRenderer.invoke('memory-optimize'),
     getMemoryInfo: () => ipcRenderer.invoke('get-memory-info'),
