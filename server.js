@@ -13763,6 +13763,10 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                     doneMsg = { success: true, versionId };
                 } else {
                     const errMsg = stderr.trim() || stdout.trim() || `Exit code ${code}`;
+                    try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (_) {}
+                    try { if (fs.existsSync(installerPath)) fs.unlinkSync(installerPath); } catch (_) {}
+                    try { if (fs.existsSync(configPath)) fs.unlinkSync(configPath); } catch (_) {}
+                    try { if (fs.existsSync(installerScriptDst)) fs.unlinkSync(installerScriptDst); } catch (_) {}
                     resolve({ success: false, error: `forge-installer.js exited with code ${code}: ${errMsg.slice(-300)}` });
                     return;
                 }
@@ -13825,6 +13829,10 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
             resolve(doneMsg || { success: code === 0, versionId });
         });
         proc.on('error', (err) => {
+            try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (_) {}
+            try { if (fs.existsSync(installerPath)) fs.unlinkSync(installerPath); } catch (_) {}
+            try { if (fs.existsSync(configPath)) fs.unlinkSync(configPath); } catch (_) {}
+            try { if (fs.existsSync(installerScriptDst)) fs.unlinkSync(installerScriptDst); } catch (_) {}
             resolve({ success: false, error: `Failed to start forge-installer.js: ${err.message}` });
         });
     });
