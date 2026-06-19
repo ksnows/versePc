@@ -99,3 +99,16 @@ img/icon-new.png
 *报名*
 check-jars.js
 find-bad.js
+_*.js
+activate-tool.*
+activation.*
+activation.obfuscated.js
+ai-enabled.json
+copy-to-release.bat
+create-activation-tool.bat
+files-to-upload.json
+github-api-upload.js
+obfuscate-activation.js
+obfuscate-config.json
+push-to-github.js
+upload-to-github.js
