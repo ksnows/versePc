@@ -1425,6 +1425,7 @@ async function init() {
         if (typeof initWallpaper === 'function') {
             _lazyLoadScript('js/three.bundle.js').then(() => {
                 try { initWallpaper(); } catch (e) { console.error('[Wallpaper] init error:', e); }
+                loadWallpaperSettings();
             }).catch(() => console.warn('[Wallpaper] THREE.js load failed'));
         }
 
@@ -1437,79 +1438,6 @@ async function init() {
         }
         _perfInit('AIChat.init');
 
-        try {
-            Promise.all([
-                window.electronAPI.store.get('versepc_custom_image'),
-                window.electronAPI.store.get('versepc_custom_video'),
-                window.electronAPI.store.get('versepc_wallpaper'),
-                window.electronAPI.store.get('versepc_wallpaper_opacity'),
-                window.electronAPI.store.get('versepc_wallpaper_blur'),
-                window.electronAPI.store.get('versepc_wallpaper_fit'),
-                window.electronAPI.store.get('versepc_panorama_theme'),
-                window.electronAPI?.store?.get('versepc_panorama_speed'),
-                window.electronAPI?.store?.get('versepc_panorama_mouse_follow'),
-            ]).then(([
-                savedCustomImage,
-                savedCustomVideo,
-                savedWallpaper,
-                savedOpacity,
-                savedBlur,
-                savedFit,
-                savedPanoramaTheme,
-                savedPanoramaSpeed,
-                savedMouseFollow,
-            ]) => {
-                if (savedCustomImage && typeof setCustomWallpaperImage === 'function') {
-                    setCustomWallpaperImage(savedCustomImage);
-                }
-                if (savedCustomVideo && typeof setCustomWallpaperVideo === 'function') {
-                    setCustomWallpaperVideo(savedCustomVideo);
-                }
-                if (savedWallpaper) {
-                    let wpName = savedWallpaper;
-                    if (wpName === 'starry') wpName = 'panorama';
-                    const wpEl = document.querySelector(`.wallpaper-option[data-wallpaper="${wpName}"]`);
-                    if (wpEl) selectWallpaper(wpEl);
-                }
-                if (savedOpacity != null) {
-                    const slider = document.getElementById('wallpaper-opacity-slider');
-                    if (slider) { slider.value = savedOpacity; onWallpaperOpacityChange(savedOpacity); }
-                }
-                if (savedBlur != null) {
-                    const slider = document.getElementById('wallpaper-blur-slider');
-                    if (slider) { slider.value = savedBlur; onWallpaperBlurChange(savedBlur); }
-                }
-                if (savedFit) {
-                    const select = document.getElementById('wallpaper-fit-select');
-                    if (select) { select.value = savedFit; onWallpaperFitChange(savedFit); }
-                }
-                if (savedPanoramaTheme) {
-                    const themeEl = document.querySelector(`.panorama-theme-option[data-theme="${savedPanoramaTheme}"]`);
-                    if (themeEl) selectPanoramaTheme(themeEl);
-                }
-                if (savedPanoramaSpeed) {
-                    const slider = document.getElementById('panoramaSpeedSlider');
-                    if (slider) slider.value = savedPanoramaSpeed;
-                    const label = document.getElementById('panoramaSpeedLabel');
-                    if (label) label.textContent = savedPanoramaSpeed;
-                    if (typeof setPanoramaRotationSpeed === 'function') setPanoramaRotationSpeed(savedPanoramaSpeed * 0.001);
-                }
-                if (savedMouseFollow === true) {
-                    const toggle = document.getElementById('panoramaMouseFollowToggle');
-                    if (toggle) toggle.checked = true;
-                    if (typeof setPanoramaMouseFollow === 'function') setPanoramaMouseFollow(true);
-                }
-                if (savedCustomImage) {
-                    const nameEl = document.getElementById('custom-wallpaper-file-name');
-                    if (nameEl) nameEl.textContent = savedCustomImage.split(/[\\/]/).pop();
-                    _updateCustomImagePreview(savedCustomImage);
-                }
-                if (savedCustomVideo) {
-                    const nameEl = document.getElementById('custom-wallpaper-file-name');
-                    if (nameEl) nameEl.textContent = savedCustomVideo.split(/[\\/]/).pop();
-                }
-            }).catch(e => console.error('[Init] Load wallpaper settings error:', e));
-        } catch (e) {}
     } catch (e) {
         console.error('Init critical error:', e);
         setProgress(100, '初始化完成');
@@ -1537,6 +1465,80 @@ async function init() {
             loadFeaturedMods()
         ]).catch(e => console.error('延迟加载失败:', e));
     }, 100);
+}
+
+function loadWallpaperSettings() {
+    Promise.all([
+        window.electronAPI.store.get('versepc_custom_image'),
+        window.electronAPI.store.get('versepc_custom_video'),
+        window.electronAPI.store.get('versepc_wallpaper'),
+        window.electronAPI.store.get('versepc_wallpaper_opacity'),
+        window.electronAPI.store.get('versepc_wallpaper_blur'),
+        window.electronAPI.store.get('versepc_wallpaper_fit'),
+        window.electronAPI.store.get('versepc_panorama_theme'),
+        window.electronAPI?.store?.get('versepc_panorama_speed'),
+        window.electronAPI?.store?.get('versepc_panorama_mouse_follow'),
+    ]).then(([
+        savedCustomImage,
+        savedCustomVideo,
+        savedWallpaper,
+        savedOpacity,
+        savedBlur,
+        savedFit,
+        savedPanoramaTheme,
+        savedPanoramaSpeed,
+        savedMouseFollow,
+    ]) => {
+        if (savedCustomImage && typeof setCustomWallpaperImage === 'function') {
+            setCustomWallpaperImage(savedCustomImage);
+        }
+        if (savedCustomVideo && typeof setCustomWallpaperVideo === 'function') {
+            setCustomWallpaperVideo(savedCustomVideo);
+        }
+        if (savedWallpaper) {
+            let wpName = savedWallpaper;
+            if (wpName === 'starry') wpName = 'panorama';
+            const wpEl = document.querySelector(`.wallpaper-option[data-wallpaper="${wpName}"]`);
+            if (wpEl) selectWallpaper(wpEl);
+        }
+        if (savedOpacity != null) {
+            const slider = document.getElementById('wallpaper-opacity-slider');
+            if (slider) { slider.value = savedOpacity; onWallpaperOpacityChange(savedOpacity); }
+        }
+        if (savedBlur != null) {
+            const slider = document.getElementById('wallpaper-blur-slider');
+            if (slider) { slider.value = savedBlur; onWallpaperBlurChange(savedBlur); }
+        }
+        if (savedFit) {
+            const select = document.getElementById('wallpaper-fit-select');
+            if (select) { select.value = savedFit; onWallpaperFitChange(savedFit); }
+        }
+        if (savedPanoramaTheme) {
+            const themeEl = document.querySelector(`.panorama-theme-option[data-theme="${savedPanoramaTheme}"]`);
+            if (themeEl) selectPanoramaTheme(themeEl);
+        }
+        if (savedPanoramaSpeed) {
+            const slider = document.getElementById('panoramaSpeedSlider');
+            if (slider) slider.value = savedPanoramaSpeed;
+            const label = document.getElementById('panoramaSpeedLabel');
+            if (label) label.textContent = savedPanoramaSpeed;
+            if (typeof setPanoramaRotationSpeed === 'function') setPanoramaRotationSpeed(savedPanoramaSpeed * 0.001);
+        }
+        if (savedMouseFollow === true) {
+            const toggle = document.getElementById('panoramaMouseFollowToggle');
+            if (toggle) toggle.checked = true;
+            if (typeof setPanoramaMouseFollow === 'function') setPanoramaMouseFollow(true);
+        }
+        if (savedCustomImage) {
+            const nameEl = document.getElementById('custom-wallpaper-file-name');
+            if (nameEl) nameEl.textContent = savedCustomImage.split(/[\\/]/).pop();
+            _updateCustomImagePreview(savedCustomImage);
+        }
+        if (savedCustomVideo) {
+            const nameEl = document.getElementById('custom-wallpaper-file-name');
+            if (nameEl) nameEl.textContent = savedCustomVideo.split(/[\\/]/).pop();
+        }
+    }).catch(e => console.error('[Init] Load wallpaper settings error:', e));
 }
 
 function setupNavigation() {
@@ -11070,7 +11072,11 @@ async function selectWallpaper(element) {
 
     if (isPanorama) {
         try {
-            const savedTheme = await window.electronAPI?.store?.get('versepc_panorama_theme');
+            const [savedTheme, savedSpeed, savedFollow] = await Promise.all([
+                window.electronAPI?.store?.get('versepc_panorama_theme'),
+                window.electronAPI?.store?.get('versepc_panorama_speed'),
+                window.electronAPI?.store?.get('versepc_panorama_mouse_follow'),
+            ]);
             if (savedTheme) {
                 const themeEl = document.querySelector(`.panorama-theme-option[data-theme="${savedTheme}"]`);
                 if (themeEl) {
@@ -11079,8 +11085,20 @@ async function selectWallpaper(element) {
                     if (typeof setPanoramaTheme === 'function') setPanoramaTheme(savedTheme);
                 }
             }
+            if (savedSpeed != null) {
+                const slider = document.getElementById('panoramaSpeedSlider');
+                if (slider) slider.value = savedSpeed;
+                const label = document.getElementById('panoramaSpeedLabel');
+                if (label) label.textContent = savedSpeed;
+                if (typeof setPanoramaRotationSpeed === 'function') setPanoramaRotationSpeed(savedSpeed * 0.001);
+            }
+            if (savedFollow === true) {
+                const toggle = document.getElementById('panoramaMouseFollowToggle');
+                if (toggle) toggle.checked = true;
+                if (typeof setPanoramaMouseFollow === 'function') setPanoramaMouseFollow(true);
+            }
         } catch (e) {
-            console.warn('[Settings] Failed to restore panorama theme:', e);
+            console.warn('[Settings] Failed to restore panorama settings:', e);
         }
     }
 

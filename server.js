@@ -6115,13 +6115,24 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
         const mainJarFound = !!mainJarPath && fs.existsSync(mainJarPath);
 
         if (!parentJsonFound && !mainJarFound) {
-            result.parentVersion.ok = false;
-            result.parentVersion.message = `缺少基础版本 ${versionJson.inheritsFrom}，请先安装`;
-            result.missingFiles.push({
-                type: 'parent_version',
-                id: versionJson.inheritsFrom,
-                message: `缺少基础版本 ${versionJson.inheritsFrom} (JSON: ${parentJsonFound ? '有' : '无'}, JAR: ${mainJarFound ? '有' : '无'})`
-            });
+            const hasMainClass = !!versionJson.mainClass;
+            const hasLibs = Array.isArray(versionJson.libraries) && versionJson.libraries.length > 0;
+            const hasForgeLibs = hasLibs && versionJson.libraries.some(l => l.name && (
+                l.name.includes('net.minecraftforge') || l.name.includes('fancymodloader') ||
+                l.name.includes('net.neoforged') || l.name.includes('fabric-loader')
+            ));
+            const isSelfSufficient = externalVersionDir && (hasMainClass || hasForgeLibs);
+            if (!isSelfSufficient) {
+                result.parentVersion.ok = false;
+                result.parentVersion.message = `缺少基础版本 ${versionJson.inheritsFrom}，请先安装`;
+                result.missingFiles.push({
+                    type: 'parent_version',
+                    id: versionJson.inheritsFrom,
+                    message: `缺少基础版本 ${versionJson.inheritsFrom} (JSON: ${parentJsonFound ? '有' : '无'}, JAR: ${mainJarFound ? '有' : '无'})`
+                });
+            } else {
+                console.log(`[DepCheck] 外部版本 ${versionId} 缺少前置 ${versionJson.inheritsFrom}，但自身包含完整配置，跳过前置检查`);
+            }
         }
     }
 
@@ -11598,22 +11609,28 @@ async function launchGame(versionId, settings, account, checkOnly = false) {
                 m.path && m.path.includes(path.join('net', 'neoforged', 'neoforge')) && path.basename(m.path).includes('universal'));
             for (const m of neoMissing) {
                 const relPath = path.relative(LIBRARIES_DIR, m.path).replace(/\\/g, '/');
-                const neoMavenBases = [
-                    'https://maven.neoforged.net/releases',
-                    'https://bmclapi2.bangbang93.com/maven'
+                const neoUrls = [
+                    `https://maven.neoforged.net/releases/${relPath}`,
+                    `https://bmclapi2.bangbang93.com/maven/${relPath}`
                 ];
+                console.log(`[LaunchGame] 尝试补下载NeoForge核心JAR: ${path.basename(m.path)}`);
                 let neoOk = false;
-                for (const base of neoMavenBases) {
-                    const url = `${base}/${relPath}`;
+                for (const url of neoUrls) {
                     try {
                         if (!fs.existsSync(path.dirname(m.path))) fs.mkdirSync(path.dirname(m.path), { recursive: true });
-                        await downloadFileWithMirror(url, m.path);
-                        if (fs.existsSync(m.path) && isJarIntact(m.path)) { neoOk = true; break; }
-                    } catch (_) {}
-                    try { if (fs.existsSync(m.path) && !isJarIntact(m.path)) fs.unlinkSync(m.path); } catch (_) {}
+                        await downloadFile(url, m.path);
+                        if (fs.existsSync(m.path) && isJarIntact(m.path)) {
+                            console.log(`[LaunchGame] NeoForge核心JAR补下载成功: ${path.basename(m.path)} (from ${url})`);
+                            neoOk = true;
+                            break;
+                        }
+                        console.warn(`[LaunchGame] 下载后JAR无效: ${url}`);
+                        try { fs.unlinkSync(m.path); } catch (_) {}
+                    } catch (e) {
+                        console.warn(`[LaunchGame] NeoForge核心JAR下载失败: ${url} - ${e.message}`);
+                    }
                 }
                 if (neoOk) {
-                    console.log(`[LaunchGame] NeoForge核心JAR补下载成功: ${path.basename(m.path)}`);
                     forgeRepaired = true;
                 }
             }
@@ -14459,6 +14476,55 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
         }
         try { await mergeNeoForgeLoaderToVersion(versionId, gameVersion, neoVersion, onProgress); } catch (mergeErr) {
             console.warn(`[NeoForge] merge 补全失败: ${mergeErr.message}`);
+        }
+
+        const neoCoreJarRel = `net/neoforged/neoforge/${neoVersion}/neoforge-${neoVersion}-universal.jar`;
+        const neoCoreJarPath = path.join(LIBRARIES_DIR, neoCoreJarRel);
+        if (!fs.existsSync(neoCoreJarPath) || (await fs.promises.stat(neoCoreJarPath).catch(() => ({ size: 0 })).then(s => s.size)) < 1024) {
+            console.warn(`[NeoForge] 核心jar缺失或无效，尝试补下载: ${neoCoreJarPath}`);
+            if (onProgress) onProgress(0.85, '补下载NeoForge核心文件...');
+            const neoCoreUrls = [
+                `https://maven.neoforged.net/releases/${neoCoreJarRel}`,
+                `https://bmclapi2.bangbang93.com/maven/${neoCoreJarRel}`
+            ];
+            let coreOk = false;
+            for (const url of neoCoreUrls) {
+                try {
+                    fs.mkdirSync(path.dirname(neoCoreJarPath), { recursive: true });
+                    await downloadFile(url, neoCoreJarPath);
+                    if (fs.existsSync(neoCoreJarPath) && isJarIntact(neoCoreJarPath)) {
+                        console.log(`[NeoForge] 核心jar补下载成功: ${url}`);
+                        coreOk = true;
+                        break;
+                    }
+                    console.warn(`[NeoForge] 下载后JAR无效: ${url}`);
+                    try { fs.unlinkSync(neoCoreJarPath); } catch (_) {}
+                } catch (e) {
+                    console.warn(`[NeoForge] 核心jar下载失败: ${url} - ${e.message}`);
+                }
+            }
+            if (!coreOk) {
+                console.warn(`[NeoForge] 核心jar补下载全部失败`);
+            } else {
+                neoLibFailures = Math.max(0, neoLibFailures - 1);
+            }
+        }
+
+        const patchedJarRel = `net/neoforged/minecraft-client-patched/${neoVersion}/minecraft-client-patched-${neoVersion}.jar`;
+        const patchedJarLibPath = path.join(LIBRARIES_DIR, patchedJarRel);
+        const patchedJarVerPath = path.join(versionDir, `${versionId}.jar`);
+        if (!fs.existsSync(patchedJarLibPath) || (await fs.promises.stat(patchedJarLibPath).catch(() => ({ size: 0 })).then(s => s.size)) < 1024) {
+            if (fs.existsSync(patchedJarVerPath)) {
+                try {
+                    fs.mkdirSync(path.dirname(patchedJarLibPath), { recursive: true });
+                    fs.copyFileSync(patchedJarVerPath, patchedJarLibPath);
+                    console.log(`[NeoForge] Patched JAR已复制到libraries: ${path.basename(patchedJarLibPath)}`);
+                } catch (e) {
+                    console.warn(`[NeoForge] 复制patched JAR失败: ${e.message}`);
+                }
+            } else {
+                console.warn(`[NeoForge] Patched JAR缺失: ${patchedJarLibPath} 且版本目录也无`);
+            }
         }
 
         try { fs.unlinkSync(installerPath); } catch (_) {}
