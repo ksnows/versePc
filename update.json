@@ -1,13 +1,13 @@
 {
-  "version": "1.0.0",
-  "releaseDate": "2026-06-20T00:00:00Z",
-  "releaseName": "VersePC v1.0.0 预览版",
-  "releaseNotes": "VersePC 启动器正式开放预览版，可能存在较多 Bug，介意请等待八月份稳定版。",
+  "version": "1.0.1",
+  "releaseDate": "2026-06-21T00:00:00Z",
+  "releaseName": "VersePC v1.0.1 预览版",
+  "releaseNotes": "VersePC v1.0.1 预览版更新",
   "files": {
     "win-x64": {
-      "url": "https://github.com/doujie081231/versePc/releases/download/v1.0.0/VersePC-Setup-1.0.0.exe",
-      "size": 163829544,
-      "sha256": "866d57a967516914d794f5a492da03d5dfd6242a2f004e8c7f6b2cebccd81451"
+      "url": "https://github.com/doujie081231/versePc/releases/download/v1.0.1/VersePC-Setup-1.0.1.exe",
+      "size": 163832250,
+      "sha256": "bb53388460ae89ded5eabe7a68dd780ace00962ca140ead498dfecc9d30179e3"
     }
   }
 }

@@ -1139,8 +1139,8 @@ function dismissSupportModal() {
 }
 
 var ANNOUNCEMENT_CONTENT = {
-    version: '1.0.0',
-    title: 'VersePC v1.0.0 预览版公告',
+    version: '1.0.1',
+    title: 'VersePC v1.0.1 预览版公告',
     body: `
         <div class="announcement-section">
             <p style="font-size:16px;line-height:1.8;">亲爱的小伙伴们，VersePC 启动器正式开放<strong>预览版</strong>啦！</p>
@@ -1164,6 +1164,12 @@ var ANNOUNCEMENT_CONTENT = {
             <h4>实验性功能</h4>
             <p>实验性功能（AI 助手等）目前需要<strong>赞助后获取测试版</strong>才能解锁使用。</p>
             <p>如果你对实验性功能感兴趣，欢迎前往 <a href="javascript:void(0)" onclick="window.electronAPI?.openExternal('https://afdian.com/a/versejava')" style="color:#9b59b6;font-weight:bold;">爱发电</a> 支持我们的发展</p>
+        </div>
+
+        <div class="announcement-section">
+            <h4>Bug 反馈</h4>
+            <p>如果你在使用过程中遇到任何问题，欢迎加入我们的腾讯频道反馈：</p>
+            <p style="font-size:15px;font-weight:bold;color:#4a9eff;margin-top:8px;">腾讯频道：verselauncher1</p>
         </div>
 
         <div class="announcement-footer">
