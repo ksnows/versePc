@@ -6625,6 +6625,17 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
         const isNeoForgeVersion = (versionJson.libraries || []).some(l => l.name && (l.name.startsWith('net.neoforged:neoforge:') || l.name.startsWith('net.neoforged.fancymodloader:')));
         const hasNeoForgeLibs = (versionJson.libraries || []).some(l => l.name && l.name.startsWith('net.neoforged'));
 
+        const gameArgs = versionJson.arguments?.game || [];
+        const hasFmlArgs = gameArgs.some(a => typeof a === 'string' && (a === '--fml.forgeVersion' || a === '--fml.mcVersion'));
+        const hasBootstrapMain = (versionJson.mainClass || '').includes('bootstraplauncher') || (versionJson.mainClass || '').includes('BootstrapLauncher') || (versionJson.mainClass || '').includes('cpw.mods');
+        const hasForgeLibsInJson = forgeLibraries.some(l => l.name && (l.name.startsWith('net.minecraftforge:forge:') || l.name.startsWith('net.minecraftforge:fmlloader:') || l.name.startsWith('net.minecraftforge:fmlcore:')));
+        const isNewForgeFormat = !isNeoForgeVersion && !hasFmlArgs && !hasBootstrapMain && !hasForgeLibsInJson;
+
+        if (isNewForgeFormat) {
+            console.log(`[DepCheck] 检测到新版Forge格式(MC26+)，核心已嵌入版本JAR，跳过核心库检查`);
+            result.forgeCore = { ok: true, missing: [], message: '新版Forge格式，核心已嵌入版本JAR' };
+        } else {
+
         const forgeClientLib = forgeLibraries.find(l =>
             l.name && /^net\.minecraftforge:forge:\d/.test(l.name) && l.name.endsWith(':client')) ||
             forgeLibraries.find(l =>
@@ -6843,6 +6854,8 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
         } else {
             console.log(`[DepCheck] Forge核心库(共${forgeCoreLibs.length}个)全部就绪`);
         }
+
+        } // end else !isNewForgeFormat
     }
 
     if (versionJson.assetIndex) {
