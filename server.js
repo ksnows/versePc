@@ -17180,13 +17180,13 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
     if (isNewVersionDir) {
         const _baseStartTime = Date.now();
-        progress('base', '正在准备基础版本...', 10);
+        progress('base', '正在准备基础版本...', 5);
         console.log(`[mrpack] >>> [步骤1/5] 确保基础版本存在: ${mcVersion} (${new Date().toLocaleTimeString()})`);
         _writeImportLog(`>>> [步骤1/5] 确保基础版本存在: ${mcVersion}`);
         const baseResult = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
             const elapsed = Math.round((Date.now() - _baseStartTime) / 1000);
             console.log(`[mrpack] 基础版本进度: ${msg} (${Math.round(pct)}%, ${elapsed}s)`);
-            progress('base', msg || '正在准备基础版本...', Math.min(Math.round(pct * 0.15), 15));
+            progress('base', msg || '正在准备基础版本...', 5 + Math.min(pct, 100) * 0.15);
         });
         console.log(`[mrpack] <<< [步骤1/5] 基础版本完成: error=${baseResult.error || '无'}, alreadyInstalled=${baseResult.alreadyInstalled || false}, 耗时=${Math.round((Date.now() - _baseStartTime) / 1000)}s`);
         _writeImportLog(`<<< [步骤1/5] 基础版本完成: error=${baseResult.error || '无'}, alreadyInstalled=${baseResult.alreadyInstalled || false}, 耗时=${Math.round((Date.now() - _baseStartTime) / 1000)}s`);
@@ -17197,7 +17197,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
         if (forgeVer || neoforgeVer || fabricVer) {
             const _loaderStartTime = Date.now();
-            progress('loader-install', '正在安装模组加载器...', 12);
+            progress('loader-install', '正在安装模组加载器...', 20);
             try {
                 if (forgeVer) {
                     loaderVersionId = `${mcVersion}-forge-${forgeVer}`;
@@ -17214,7 +17214,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             const np = p > 1 ? p / 100 : p;
                             const elapsed = Math.round((Date.now() - _forgeStartTime) / 1000);
                             console.log(`[mrpack] Forge安装进度: ${(np*100).toFixed(1)}% (${elapsed}s) ${msg || ''}`);
-                            progress('loader-install', msg || '正在安装Forge...', 12 + np * 3);
+                            progress('loader-install', msg || '正在安装Forge...', 20 + np * 15);
                         });
                         console.log(`[mrpack] <<< [步骤2/5] Forge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _forgeStartTime) / 1000)}s, error=${ir.error || '无'}`);
                         _writeImportLog(`<<< [步骤2/5] Forge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _forgeStartTime) / 1000)}s, error=${ir.error || '无'}`);
@@ -17237,7 +17237,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             const np = p > 1 ? p / 100 : p;
                             const elapsed = Math.round((Date.now() - _nfStartTime) / 1000);
                             console.log(`[mrpack] NeoForge安装进度: ${(np*100).toFixed(1)}% (${elapsed}s) ${msg || ''}`);
-                            progress('loader-install', msg || '正在安装NeoForge...', 12 + np * 3);
+                            progress('loader-install', msg || '正在安装NeoForge...', 20 + np * 15);
                         });
                         console.log(`[mrpack] <<< [步骤2/5] NeoForge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _nfStartTime) / 1000)}s, error=${ir.error || '无'}`);
                         _writeImportLog(`<<< [步骤2/5] NeoForge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _nfStartTime) / 1000)}s, error=${ir.error || '无'}`);
@@ -17275,7 +17275,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             const np = p > 1 ? p / 100 : p;
                             const elapsed = Math.round((Date.now() - _fabStartTime) / 1000);
                             console.log(`[mrpack] Fabric安装进度: ${(np*100).toFixed(1)}% (${elapsed}s) ${msg || ''}`);
-                            progress('loader-install', msg || '正在安装Fabric...', 12 + np * 3);
+                            progress('loader-install', msg || '正在安装Fabric...', 20 + np * 15);
                         });
                         console.log(`[mrpack] <<< [步骤2/5] Fabric安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _fabStartTime) / 1000)}s, error=${ir.error || '无'}`);
                         _writeImportLog(`<<< [步骤2/5] Fabric安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _fabStartTime) / 1000)}s, error=${ir.error || '无'}`);
@@ -17472,13 +17472,13 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         if (existingJson && existingJson.inheritsFrom && loaderVersionId) {
             const _remergeStartTime = Date.now();
             console.log(`[mrpack] >>> [重合并] 检测到旧版版本JSON (inheritsFrom: ${existingJson.inheritsFrom})，重新合并加载器 (${new Date().toLocaleTimeString()})`);
-            progress('base-fix', `正在同步加载器到 ${loaderVersionId}...`, 12);
+            progress('base-fix', `正在同步加载器到 ${loaderVersionId}...`, 5);
 
             if (mcVersion) {
                 console.log(`[mrpack] [重合并] 确保基础版本: ${mcVersion}`);
                 const baseFix = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
                     console.log(`[mrpack] [重合并] 基础版本进度: ${msg} (${Math.round(pct)}%)`);
-                    progress('base-fix', msg || `正在准备 ${mcVersion}...`, 12);
+                    progress('base-fix', msg || `正在准备 ${mcVersion}...`, 5 + Math.min(pct, 100) * 0.15);
                 });
                 console.log(`[mrpack] [重合并] 基础版本完成: error=${baseFix.error || '无'}`);
                 if (baseFix.error) {
@@ -17500,9 +17500,9 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                     try {
                         let ir;
                         const _remergeLdrStart = Date.now();
-                        if (forgeVer) ir = await installForge(mcVersion, forgeVer, (p, msg) => { const np = p > 1 ? p / 100 : p; console.log(`[mrpack] [重合并] Forge进度: ${(np*100).toFixed(1)}% ${msg || ''}`); progress('loader-install', msg || '正在安装Forge...', 13 + np * 2); });
-                        else if (neoforgeVer) ir = await installNeoForge(mcVersion, neoforgeVer, (p, msg) => { const np = p > 1 ? p / 100 : p; console.log(`[mrpack] [重合并] NeoForge进度: ${(np*100).toFixed(1)}% ${msg || ''}`); progress('loader-install', msg || '正在安装NeoForge...', 13 + np * 2); });
-                        else if (fabricVer) ir = await installFabric(mcVersion, fabricVer, (p, msg) => { const np = p > 1 ? p / 100 : p; console.log(`[mrpack] [重合并] Fabric进度: ${(np*100).toFixed(1)}% ${msg || ''}`); progress('loader-install', msg || '正在安装Fabric...', 13 + np * 2); });
+                        if (forgeVer) ir = await installForge(mcVersion, forgeVer, (p, msg) => { const np = p > 1 ? p / 100 : p; console.log(`[mrpack] [重合并] Forge进度: ${(np*100).toFixed(1)}% ${msg || ''}`); progress('loader-install', msg || '正在安装Forge...', 20 + np * 15); });
+                        else if (neoforgeVer) ir = await installNeoForge(mcVersion, neoforgeVer, (p, msg) => { const np = p > 1 ? p / 100 : p; console.log(`[mrpack] [重合并] NeoForge进度: ${(np*100).toFixed(1)}% ${msg || ''}`); progress('loader-install', msg || '正在安装NeoForge...', 20 + np * 15); });
+                        else if (fabricVer) ir = await installFabric(mcVersion, fabricVer, (p, msg) => { const np = p > 1 ? p / 100 : p; console.log(`[mrpack] [重合并] Fabric进度: ${(np*100).toFixed(1)}% ${msg || ''}`); progress('loader-install', msg || '正在安装Fabric...', 20 + np * 15); });
                         console.log(`[mrpack] [重合并] 加载器安装完成: success=${ir?.success}, 耗时=${Math.round((Date.now() - _remergeLdrStart) / 1000)}s`);
                         if (!ir || !ir.success) throw new Error((ir && ir.error) || `${loaderVersionId} 安装失败`);
                     } catch (e) {
@@ -17745,7 +17745,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
             const w = _modWeights[i] || (1 / modFiles.length);
             weightedPct += ((mf.status === 'completed' || mf.status === 'failed') ? 100 : (mf.progress || 0)) * w;
         }
-        const pct = 25 + Math.round((weightedPct / 100) * 65);
+        const pct = 50 + Math.round((weightedPct / 100) * 45);
         const clamped = Math.min(pct, 95);
         if (smoothPct <= 0 || clamped <= smoothPct) {
             smoothPct = clamped;
@@ -18494,7 +18494,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     }
 
     try {
-    progress('extract', '解压覆盖文件...', 17, [], '');
+    progress('extract', '解压覆盖文件...', 40, [], '');
     const entries = zip.getEntries();
     const overrideFiles = [];
     let cfExtractYieldCounter = 0;
@@ -18542,7 +18542,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
     ensureDir(path.join(modsDir, 'dummy.txt'));
 
     const cfModFiles = cfFiles.map(f => ({ name: `Mod #${f.projectID}`, status: 'pending', progress: 0 }));
-    progress('mods', `下载 Mod 文件 (共 ${cfFiles.length} 个)...`, 25, [...overrideFiles, ...cfModFiles], '');
+    progress('mods', `下载 Mod 文件 (共 ${cfFiles.length} 个)...`, 50, [...overrideFiles, ...cfModFiles], '');
 
     let cfDownloadedCount = 0;
     let cfFailedCount = 0;
@@ -18571,7 +18571,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
             const w = _cfModWeights[i] || (1 / cfModFiles.length);
             weightedPct += ((mf.status === 'completed' || mf.status === 'failed') ? 100 : (mf.progress || 0)) * w;
         }
-        const pct = 25 + Math.round((weightedPct / 100) * 65);
+        const pct = 50 + Math.round((weightedPct / 100) * 45);
         const clamped = Math.min(pct, 95);
         if (cfSmoothPct <= 0 || clamped <= cfSmoothPct) {
             cfSmoothPct = clamped;
@@ -18746,7 +18746,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
 
     const _cfFileInfoMap = {};
     if (cfApiKey && cfFiles.length > 0) {
-        progress('mods', `正在获取 ${cfFiles.length} 个 Mod 的下载信息...`, 20, [...overrideFiles, ...cfModFiles], '');
+        progress('mods', `正在获取 ${cfFiles.length} 个 Mod 的下载信息...`, 50, [...overrideFiles, ...cfModFiles], '');
         const _cfBatchSize = 50;
         for (let bi = 0; bi < cfFiles.length; bi += _cfBatchSize) {
             if (abortSignal && abortSignal.aborted) break;
@@ -19032,7 +19032,7 @@ async function _importHmcl(zip, hmclEntry, filePath, progress, targetVersion = '
     let loaderVersionId = null;
 
     if (isNewVersion && mcVersion) {
-        progress('base', '正在准备基础版本...', 10);
+        progress('base', '正在准备基础版本...', 5);
         const baseResult = await ensureBaseVersionInstalled(mcVersion);
         if (baseResult.error) {
             try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (e) {}
@@ -19044,25 +19044,25 @@ async function _importHmcl(zip, hmclEntry, filePath, progress, targetVersion = '
             const uid = (addon.uid || '').toLowerCase();
             const ver = addon.version || '';
             if (uid === 'net.minecraftforge' && ver) {
-                progress('loader-install', '正在安装Forge...', 12);
+                progress('loader-install', '正在安装Forge...', 20);
                 loaderVersionId = `${mcVersion}-forge-${ver}`;
                 const lvJson = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
                 if (!fs.existsSync(lvJson)) {
-                    const ir = await installForge(mcVersion, ver, (p, msg) => progress('loader-install', msg || '正在安装Forge...', 12 + p * 3));
+                    const ir = await installForge(mcVersion, ver, (p, msg) => progress('loader-install', msg || '正在安装Forge...', 20 + p * 15));
                     if (!ir.success) { cleanupVersionChain(versionId); return { success: false, versionId, error: ir.error }; }
                 }
                 break;
             } else if (uid === 'net.neoforged' && ver) {
-                progress('loader-install', '正在安装NeoForge...', 12);
+                progress('loader-install', '正在安装NeoForge...', 20);
                 loaderVersionId = `${mcVersion}-neoforge-${ver}`;
                 const lvJson = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
                 if (!fs.existsSync(lvJson)) {
-                    const ir = await installNeoForge(mcVersion, ver, (p, msg) => progress('loader-install', msg || '正在安装NeoForge...', 12 + p * 3));
+                    const ir = await installNeoForge(mcVersion, ver, (p, msg) => progress('loader-install', msg || '正在安装NeoForge...', 20 + p * 15));
                     if (!ir.success) { cleanupVersionChain(versionId); return { success: false, versionId, error: ir.error }; }
                 }
                 break;
             } else if (uid === 'net.fabricmc.fabric-loader' && ver) {
-                progress('loader-install', '正在安装Fabric...', 12);
+                progress('loader-install', '正在安装Fabric...', 20);
                 loaderVersionId = `fabric-loader-${ver}-${mcVersion}`;
                 const lvJson = path.join(VERSIONS_DIR, loaderVersionId, `${loaderVersionId}.json`);
                 let hmclFabricNeedInstall = !fs.existsSync(lvJson);
@@ -19078,7 +19078,7 @@ async function _importHmcl(zip, hmclEntry, filePath, progress, targetVersion = '
                     if (fs.existsSync(lvJson)) {
                         try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
                     }
-                    const ir = await installFabric(mcVersion, ver, (p, msg) => progress('loader-install', msg || '正在安装Fabric...', 12 + p * 3));
+                    const ir = await installFabric(mcVersion, ver, (p, msg) => progress('loader-install', msg || '正在安装Fabric...', 20 + p * 15));
                     if (!ir.success) { cleanupVersionChain(versionId); return { success: false, versionId, error: ir.error }; }
                 }
                 break;

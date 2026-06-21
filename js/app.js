@@ -6987,8 +6987,13 @@ function _refreshAccountAvatars() {
                         const usernameParam = selected.username ? `&username=${encodeURIComponent(selected.username)}` : '';
                         const offlineParam = (selected.type === 'offline' && !selected.serverUrl) ? '&offline=1' : '';
                         const newUrl = `/api/avatar?uuid=${accUuid}${serverParam}${usernameParam}${offlineParam}&_=${ts}`;
-                        const homeAvatar = document.getElementById('home-avatar-img');
-                        if (homeAvatar) homeAvatar.src = newUrl;
+                        const homeAvatar = document.getElementById('home-avatar');
+                        if (homeAvatar) {
+                            const existingImg = homeAvatar.querySelector('.account-avatar-img');
+                            if (existingImg && existingImg.src && existingImg.src.includes('/api/avatar')) {
+                                existingImg.src = newUrl;
+                            }
+                        }
                         try { localStorage.setItem('cachedAvatarUrl', newUrl); } catch(e) {}
                     }
                 }
@@ -11915,8 +11920,14 @@ function handleImageUpload(input, type) {
                 if (placeholder) placeholder.style.display = 'none';
                 const homeAvatar = document.getElementById('home-avatar');
                 const launchAvatar = document.getElementById('launch-avatar');
-                if (homeAvatar) homeAvatar.style.backgroundImage = `url(${dataUrl})`;
-                if (launchAvatar) launchAvatar.style.backgroundImage = `url(${dataUrl})`;
+                if (homeAvatar) {
+                    homeAvatar.style.backgroundImage = '';
+                    homeAvatar.innerHTML = `<img src="${dataUrl}" class="account-avatar-img" width="64" height="64">`;
+                }
+                if (launchAvatar) {
+                    launchAvatar.style.backgroundImage = '';
+                    launchAvatar.innerHTML = `<img src="${dataUrl}" class="account-avatar-img">`;
+                }
                 showToast('头像已更新', 'success');
             }
         } catch (err) {
@@ -11946,6 +11957,7 @@ function clearImage(type) {
             const launchAvatar = document.getElementById('launch-avatar');
             if (homeAvatar) homeAvatar.style.backgroundImage = '';
             if (launchAvatar) launchAvatar.style.backgroundImage = '';
+            loadAccounts();
             showToast('头像已清除', 'success');
         }).catch(e => showToast('清除失败', 'error'));
     }
