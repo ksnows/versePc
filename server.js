@@ -14304,9 +14304,18 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
     } catch(_) {}
 
     let nodeExe = 'node';
+    let nodeEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '' };
     if (__dirname.includes('app.asar') && process.platform === 'win32') {
         const possibleNode = path.join(path.dirname(process.execPath), 'node.exe');
-        if (fs.existsSync(possibleNode)) nodeExe = possibleNode;
+        if (fs.existsSync(possibleNode)) {
+            nodeExe = possibleNode;
+        } else {
+            // 用户机器上没有安装 Node.js 时，使用 Electron 自身作为 Node.js 运行时。
+            // process.execPath 是 Electron 可执行文件，设置 ELECTRON_RUN_AS_NODE=1
+            // 后它会以 Node.js 模式运行，功能等同于独立的 node 命令。
+            nodeExe = process.execPath;
+            nodeEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+        }
     }
     const args = [installerScriptDst,
         '--root', DATA_DIR,
@@ -14322,7 +14331,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
         const proc = spawn(nodeExe, args, {
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
-            env: { ...process.env, ELECTRON_RUN_AS_NODE: '' }
+            env: nodeEnv
         });
         let stdout = '', stderr = '', doneMsg = null;
         const parse = (line) => {
