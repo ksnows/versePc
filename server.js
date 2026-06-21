@@ -20225,6 +20225,14 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         settings.windowTitle = verSettings.windowTitle;
                         console.log(`[Launch] 使用版本设置窗口标题: ${settings.windowTitle}`);
                     }
+                    if (verSettings.fullscreen && verSettings.fullscreen !== 'global') {
+                        settings.fullscreen = verSettings.fullscreen === true || verSettings.fullscreen === 'true';
+                        console.log(`[Launch] 使用版本设置全屏模式: ${settings.fullscreen}`);
+                    }
+                    if (verSettings.resolution && verSettings.resolution !== '') {
+                        settings.resolution = verSettings.resolution;
+                        console.log(`[Launch] 使用版本设置分辨率: ${settings.resolution}`);
+                    }
                 } catch (e) {
                     console.log(`[Launch] 读取版本设置失败: ${e.message}`);
                 }
