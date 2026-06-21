@@ -870,6 +870,7 @@ async function fetchAvatarData(cleanUuid, avatarServerUrl, avatarUsername, store
         if (cropped) {
             avatarData = cropped;
             avatarContentType = 'image/png';
+            isFullSkin = false;
             console.log('[Avatar] sharp裁剪全皮肤为头像成功');
         } else {
             console.warn('[Avatar] sharp裁剪失败，保留完整皮肤供前端裁剪');
