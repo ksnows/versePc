@@ -30,6 +30,7 @@
         "@xterm/addon-fit": "^0.11.0",
         "@xterm/xterm": "^6.0.0",
         "adm-zip": "^0.5.17",
+        "app-builder-bin": "^5.0.0-alpha.12",
         "electron-updater": "^6.8.3",
         "monaco-editor": "^0.55.1",
         "recycle-bin": "^0.1.3",

@@ -256,14 +256,18 @@ async function runProcessor(procInfo, index) {
     log(`\n--- Processor ${index + 1}/${processorsInfo.length}: ${jar} ---`);
     log(`Main-Class: ${mainClass}`);
 
+    send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `准备处理器 ${index + 1}/${processorsInfo.length}...` });
+
     let jarPath = resolveMavenPath(jar);
     if (!jarPath || !fs.existsSync(jarPath)) {
-        log(`Processor jar not found, downloading: ${jar}`);
+        log(`[P${index+1}] 处理器JAR不存在，下载: ${jar}`);
+        send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `下载处理器 ${index + 1}...` });
         const ok = await downloadMavenArtifact(jar);
-        if (!ok) { log(`ERROR: Failed to download processor jar: ${jar}`); return false; }
+        if (!ok) { log(`[P${index+1}] ERROR: 下载处理器JAR失败: ${jar}`); return false; }
         jarPath = resolveMavenPath(jar);
-        if (!jarPath || !fs.existsSync(jarPath)) { log(`ERROR: Processor jar still not found after download: ${jarPath}`); return false; }
+        if (!jarPath || !fs.existsSync(jarPath)) { log(`[P${index+1}] ERROR: 下载后JAR仍不存在: ${jarPath}`); return false; }
     }
+    log(`[P${index+1}] 处理器JAR: ${jarPath} (${fs.existsSync(jarPath) ? fs.statSync(jarPath).size : 'missing'} bytes)`);
 
     let resolvedMainClass = mainClass;
     if (!resolvedMainClass && jarPath && fs.existsSync(jarPath)) {
@@ -310,12 +314,15 @@ async function runProcessor(procInfo, index) {
     for (const name of cpNames) {
         let p = resolveMavenPath(name);
         if (!p || !fs.existsSync(p)) {
-            log(`Classpath jar not found, downloading: ${name}`);
+            log(`[P${index+1}] 类路径JAR不存在，下载: ${name}`);
+            send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `下载依赖 ${path.basename(name)}...` });
             await downloadMavenArtifact(name);
             p = resolveMavenPath(name);
         }
         if (p && fs.existsSync(p)) classpath.push(p);
+        else log(`[P${index+1}] WARNING: 类路径JAR下载后仍不存在: ${name}`);
     }
+    log(`[P${index+1}] 类路径: ${classpath.length} 个JAR`);
     classpath.push(jarPath);
     const cpStr = classpath.join(';');
 
@@ -327,7 +334,8 @@ async function runProcessor(procInfo, index) {
         if (m) {
             const p = resolveMavenPath(m[1]);
             if (p && !fs.existsSync(p)) {
-                log(`Data artifact missing, downloading: ${m[1]}`);
+                log(`[P${index+1}] 数据构件不存在，下载: ${m[1]}`);
+                send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `下载构件 ${path.basename(m[1])}...` });
                 await downloadMavenArtifact(m[1]);
             }
         }
@@ -342,16 +350,19 @@ async function runProcessor(procInfo, index) {
             if (mavenFromArg) {
                 const cm = mavenFromArg.match(/^\[([^\]]+)\]$/);
                 if (cm) {
-                    log(`Input file missing, downloading from Maven: ${cm[1]}`);
+                    log(`[P${index+1}] 输入文件不存在，下载: ${cm[1]}`);
+                    send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `下载输入文件...` });
                     await downloadMavenArtifact(cm[1]);
                 }
             }
         }
     }
 
-    log(`Command: java -cp <${classpath.length} jars> ${resolvedMainClass} <${resolvedArgs.length} args>`);
+    log(`[P${index+1}] 命令: java -cp <${classpath.length} jars> ${resolvedMainClass} <${resolvedArgs.length} args>`);
+    send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `运行处理器 ${index + 1}/${processorsInfo.length}...` });
 
     return new Promise((resolve) => {
+        log(`[P${index+1}] 启动Java进程...`);
         const child = spawn(javaPath, ['-cp', cpStr, resolvedMainClass, ...resolvedArgs], {
             timeout: 300000,
             encoding: 'utf8',
@@ -361,13 +372,22 @@ async function runProcessor(procInfo, index) {
 
         let stdout = '';
         let stderr = '';
-        child.stdout.on('data', (data) => { stdout += data; });
-        child.stderr.on('data', (data) => { stderr += data; });
+        let lastOutputTime = Date.now();
+        const heartbeatTimer = setInterval(() => {
+            const elapsed = Math.round((Date.now() - lastOutputTime) / 1000);
+            if (elapsed > 10) {
+                log(`[P${index+1}] 等待中... (${elapsed}s 无输出, stdout=${stdout.length}B, stderr=${stderr.length}B)`);
+            }
+        }, 15000);
+
+        child.stdout.on('data', (data) => { stdout += data; lastOutputTime = Date.now(); });
+        child.stderr.on('data', (data) => { stderr += data; lastOutputTime = Date.now(); });
 
         child.on('close', (code) => {
-            log(`Exit code: ${code}`);
-            if (stdout) log(`stdout: ${stdout.substring(0, 500)}`);
-            if (stderr) log(`stderr: ${stderr.substring(0, 500)}`);
+            clearInterval(heartbeatTimer);
+            log(`[P${index+1}] 退出码: ${code}`);
+            if (stdout) log(`[P${index+1}] stdout: ${stdout.substring(0, 1000)}`);
+            if (stderr) log(`[P${index+1}] stderr: ${stderr.substring(0, 1000)}`);
             if (code !== 0) {
                 log(`Processor FAILED with code ${code}`);
                 resolve(false);

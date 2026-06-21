@@ -90,18 +90,20 @@
         if (window.electronAPI && window.electronAPI.onImportProgress) {
             if (window.electronAPI.removeImportProgressListener) window.electronAPI.removeImportProgressListener();
             let _localSmoothPct = 0;
+            let _maxSeenPct = 0;
             window.electronAPI.onImportProgress(function (data) {
                 if (typeof dlManager !== 'undefined') {
                     const stageText = getImportStageText(data.message);
                     const rawPct = data.progress || 0;
+                    if (rawPct > _maxSeenPct) _maxSeenPct = rawPct;
                     if (_localSmoothPct <= 0 || rawPct <= _localSmoothPct) {
                         _localSmoothPct = rawPct;
                     } else {
                         _localSmoothPct = _localSmoothPct * 0.7 + rawPct * 0.3;
                     }
-                    const smoothPct = Math.max(rawPct, Math.round(_localSmoothPct));
+                    const displayPct = Math.max(_maxSeenPct, Math.round(_localSmoothPct));
                     const updateData = {
-                        progress: smoothPct,
+                        progress: displayPct,
                         status: 'downloading',
                         message: stageText
                     };

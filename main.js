@@ -13,7 +13,11 @@ function _writeCrashLog(message) {
         _fs.appendFileSync(_crashLogPath, '[' + new Date().toISOString() + '] ' + message + '\n', 'utf8');
     } catch (e) {}
 }
-_writeCrashLog('process started, pid=' + process.pid);
+_writeCrashLog('process started, pid=' + process.pid + ', argv=' + JSON.stringify(process.argv));
+_writeCrashLog('__dirname=' + __dirname);
+_writeCrashLog('process.execPath=' + process.execPath);
+_writeCrashLog('APPDATA=' + (process.env.APPDATA || 'undefined'));
+_writeCrashLog('platform=' + process.platform + ', arch=' + process.arch);
 process.on('uncaughtException', (err) => {
     _writeCrashLog('uncaughtException: ' + (err && err.stack || err));
 });
@@ -1426,16 +1430,23 @@ const SERVER_MAX_CRASHES = 3;
 
 function loadServerModule() {
     const serverPath = path.join(__dirname, 'server.js');
-    delete require.cache[require.resolve(serverPath)];
-    const serverModule = require(serverPath);
-    serverModuleCache = serverModule;
-    apiHandler = {
-        handleNativeAPI: serverModule.handleNativeAPI,
-        handleNativeSSE: serverModule.handleNativeSSE,
-    };
-    _serverLoadTime = Date.now();
-    console.log('[Server] Module loaded/reloaded successfully');
-    return serverModule;
+    _writeCrashLog('[Server] Loading module from: ' + serverPath);
+    try {
+        delete require.cache[require.resolve(serverPath)];
+        const serverModule = require(serverPath);
+        serverModuleCache = serverModule;
+        apiHandler = {
+            handleNativeAPI: serverModule.handleNativeAPI,
+            handleNativeSSE: serverModule.handleNativeSSE,
+        };
+        _serverLoadTime = Date.now();
+        console.log('[Server] Module loaded/reloaded successfully');
+        _writeCrashLog('[Server] Module loaded successfully');
+        return serverModule;
+    } catch (e) {
+        _writeCrashLog('[Server] Module load FAILED: ' + (e && e.stack || e));
+        throw e;
+    }
 }
 
 function reloadServerModule() {
@@ -1958,6 +1969,7 @@ function getAllowedPathRoots() {
         path.join(homeDir, '.minecraft'),
         path.join(homeDir, 'AppData', 'Local', 'VersePC'),
     ];
+    try { roots.push(path.resolve(__dirname)); } catch (e) {}
     try { roots.push(app.getPath('userData')); } catch (e) {}
     try { roots.push(app.getPath('temp')); } catch (e) {}
     try { roots.push(app.getPath('downloads')); } catch (e) {}
@@ -2461,7 +2473,13 @@ function matchPattern(filename, pattern) {
 // 多源更新检测与下载
 // ============================================================================
 
-const UPDATE_JSON_SOURCES = [
+const IS_BETA = process.env.ENABLE_AI === 'true';
+
+const UPDATE_JSON_SOURCES = IS_BETA ? [
+    'https://raw.gitmirror.com/doujie081231/VersePC-beta/main/update.json',
+    'https://raw.githubusercontent.com/doujie081231/VersePC-beta/main/update.json',
+    'https://cdn.jsdelivr.net/gh/doujie081231/VersePC-beta@main/update.json',
+] : [
     'https://raw.gitmirror.com/doujie081231/versePc/main/update.json',
     'https://raw.githubusercontent.com/doujie081231/versePc/main/update.json',
     'https://cdn.jsdelivr.net/gh/doujie081231/versePc@main/update.json',

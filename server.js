@@ -34,6 +34,30 @@
  */
 
 // ============================================================================
+// 文件日志系统 - 整合包导入日志写入文件，方便排查问题
+// ============================================================================
+const _importLogDir = (() => {
+    try {
+        const appData = process.env.APPDATA || require('path').join(require('os').homedir(), 'AppData', 'Roaming');
+        return require('path').join(appData, 'VersePC');
+    } catch (_) { return ''; }
+})();
+const _importLogFile = _importLogDir ? require('path').join(_importLogDir, 'import.log') : '';
+function _writeImportLog(msg) {
+    if (!_importLogFile) return;
+    try {
+        if (!_importLogDir) return;
+        const dir = require('path').dirname(_importLogFile);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(_importLogFile, '[' + new Date().toLocaleString('zh-CN', { hour12: false }) + '] ' + msg + '\n', 'utf8');
+    } catch (_) {}
+}
+function _clearImportLog() {
+    if (!_importLogFile) return;
+    try { fs.writeFileSync(_importLogFile, '', 'utf8'); } catch (_) {}
+}
+
+// ============================================================================
 // 模块导入 - Node.js 核心模块
 // ============================================================================
 const http = require('http');
@@ -13202,7 +13226,7 @@ async function verifyFileSha1(filePath, expectedSha1) {
 }
 
 async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
-    const baseLog = (msg) => console.log(`[BaseVersion-DEBUG] ${msg}`);
+    const baseLog = (msg) => { console.log(`[BaseVersion-DEBUG] ${msg}`); _writeImportLog(`[基础版本] ${msg}`); };
     baseLog(`ensureBaseVersionInstalled: ${gameVersion}`);
     const baseJsonPath = path.join(VERSIONS_DIR, gameVersion, `${gameVersion}.json`);
     const baseJarPath = path.join(VERSIONS_DIR, gameVersion, `${gameVersion}.jar`);
@@ -16918,11 +16942,16 @@ async function importModpackFromPath(filePath, onProgress, targetVersion = '', a
         } else {
             stageHistory.push({ stage, message, progress: pct });
         }
+        _writeImportLog(`[进度] ${stage} ${Math.round(pct)}% - ${message || ''} ${currentFile ? '(' + currentFile + ')' : ''}`);
         const filesSnapshot = files ? files.slice(0, Math.min(files.length, 200)).map(f => ({ n: f.name, s: f.status, p: f.progress || 0, e: f.error || '', sp: f.speed || 0 })) : [];
         const stagesSnapshot = stageHistory.map(s => ({ stage: s.stage, message: s.message, progress: s.progress }));
         if (typeof onProgress === 'function') onProgress({ stage, message, progress: pct, files: filesSnapshot, currentFile: currentFile || '', stageHistory: stagesSnapshot });
     };
 
+    _clearImportLog();
+    _writeImportLog(`========== 开始导入整合包 ==========`);
+    _writeImportLog(`文件路径: ${filePath}`);
+    _writeImportLog(`目标版本: ${targetVersion || '(自动)'}`);
     console.log(`[Modpack] ========== 开始导入整合包 ==========`);
     console.log(`[Modpack] 文件路径: ${filePath}`);
     console.log(`[Modpack] 目标版本: ${targetVersion || '(自动)'}`);
@@ -16987,24 +17016,30 @@ async function importModpackFromPath(filePath, onProgress, targetVersion = '', a
     const curseEntry    = zip.getEntry('manifest.json');
     const hmclEntry     = zip.getEntry('modpack.json');
     const mmcEntry      = zip.getEntry('mmc-pack.json');
+    _writeImportLog(`ZIP分析: Modrinth=${!!modrinthEntry}, CurseForge=${!!curseEntry}, HMCL=${!!hmclEntry}, MMC=${!!mmcEntry}`);
 
     let result;
     const tempFiles = [];
     try {
         if (modrinthEntry) {
+            _writeImportLog(`检测到 Modrinth 整合包`);
             console.log(`[Modpack] 检测到 Modrinth 整合包 (.mrpack)`);
             result = await _importMrpack(zip, modrinthEntry, filePath, progress, targetVersion, abortSignal);
         } else if (curseEntry) {
+            _writeImportLog(`检测到 CurseForge 整合包`);
             console.log(`[Modpack] 检测到 CurseForge 整合包`);
             result = await _importCurseForge(zip, curseEntry, filePath, progress, targetVersion, abortSignal);
         } else if (hmclEntry) {
+            _writeImportLog(`检测到 HMCL 整合包`);
             console.log(`[Modpack] 检测到 HMCL 整合包 (modpack.json)`);
             result = await _importHmcl(zip, hmclEntry, filePath, progress, targetVersion, abortSignal);
         } else {
+            _writeImportLog(`未检测到已知格式，尝试普通ZIP导入`);
             console.log(`[Modpack] 未检测到已知整合包格式，尝试作为普通 ZIP 导入`);
             result = await _importRawZip(zip, filePath, progress, targetVersion, abortSignal);
         }
     } catch (e) {
+        _writeImportLog(`[错误] 异常: ${e.stack || e.message}`);
         console.error(`[Modpack] Import exception:`, e.stack || e.message);
         if (result && result.versionId) {
             cleanupVersionChain(result.versionId);
@@ -17048,12 +17083,16 @@ async function importModpackFromPath(filePath, onProgress, targetVersion = '', a
     if (result?.success) {
         _versionsCache = null;
         _versionsCacheTime = 0;
+        _writeImportLog(`========== 导入成功 ==========`);
+        _writeImportLog(`版本ID: ${result.versionId}, 整合包名: ${result.name}`);
         console.log(`[Modpack] ========== 导入成功 ==========`);
         console.log(`[Modpack] 版本ID: ${result.versionId}`);
         console.log(`[Modpack] 整合包名: ${result.name}`);
     } else {
         _versionsCache = null;
         _versionsCacheTime = 0;
+        _writeImportLog(`========== 导入失败 ==========`);
+        _writeImportLog(`错误: ${result?.error}`);
         console.error(`[Modpack] ========== 导入失败 ==========`);
         console.error(`[Modpack] 错误: ${result?.error}`);
     }
@@ -17143,12 +17182,14 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         const _baseStartTime = Date.now();
         progress('base', '正在准备基础版本...', 10);
         console.log(`[mrpack] >>> [步骤1/5] 确保基础版本存在: ${mcVersion} (${new Date().toLocaleTimeString()})`);
+        _writeImportLog(`>>> [步骤1/5] 确保基础版本存在: ${mcVersion}`);
         const baseResult = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
             const elapsed = Math.round((Date.now() - _baseStartTime) / 1000);
             console.log(`[mrpack] 基础版本进度: ${msg} (${Math.round(pct)}%, ${elapsed}s)`);
             progress('base', msg || '正在准备基础版本...', Math.min(Math.round(pct * 0.15), 15));
         });
         console.log(`[mrpack] <<< [步骤1/5] 基础版本完成: error=${baseResult.error || '无'}, alreadyInstalled=${baseResult.alreadyInstalled || false}, 耗时=${Math.round((Date.now() - _baseStartTime) / 1000)}s`);
+        _writeImportLog(`<<< [步骤1/5] 基础版本完成: error=${baseResult.error || '无'}, alreadyInstalled=${baseResult.alreadyInstalled || false}, 耗时=${Math.round((Date.now() - _baseStartTime) / 1000)}s`);
         if (baseResult.error) {
             try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (e) {}
             return { success: false, versionId, error: baseResult.error };
@@ -17167,6 +17208,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
                         }
                         console.log(`[mrpack] >>> [步骤2/5] 安装Forge: ${forgeVer} (MC ${mcVersion}) (${new Date().toLocaleTimeString()})`);
+                        _writeImportLog(`>>> [步骤2/5] 安装Forge: ${forgeVer} (MC ${mcVersion})`);
                         const _forgeStartTime = Date.now();
                         const ir = await installForge(mcVersion, forgeVer, (p, msg) => {
                             const np = p > 1 ? p / 100 : p;
@@ -17175,6 +17217,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             progress('loader-install', msg || '正在安装Forge...', 12 + np * 3);
                         });
                         console.log(`[mrpack] <<< [步骤2/5] Forge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _forgeStartTime) / 1000)}s, error=${ir.error || '无'}`);
+                        _writeImportLog(`<<< [步骤2/5] Forge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _forgeStartTime) / 1000)}s, error=${ir.error || '无'}`);
                         if (!ir.success) throw new Error(ir.error);
                     } else {
                         console.log(`[mrpack] Forge ${loaderVersionId} 已安装，跳过`);
@@ -17188,6 +17231,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
                         }
                         console.log(`[mrpack] >>> [步骤2/5] 安装NeoForge: ${neoforgeVer} (MC ${mcVersion}) (${new Date().toLocaleTimeString()})`);
+                        _writeImportLog(`>>> [步骤2/5] 安装NeoForge: ${neoforgeVer} (MC ${mcVersion})`);
                         const _nfStartTime = Date.now();
                         const ir = await installNeoForge(mcVersion, neoforgeVer, (p, msg) => {
                             const np = p > 1 ? p / 100 : p;
@@ -17196,6 +17240,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             progress('loader-install', msg || '正在安装NeoForge...', 12 + np * 3);
                         });
                         console.log(`[mrpack] <<< [步骤2/5] NeoForge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _nfStartTime) / 1000)}s, error=${ir.error || '无'}`);
+                        _writeImportLog(`<<< [步骤2/5] NeoForge安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _nfStartTime) / 1000)}s, error=${ir.error || '无'}`);
                         if (!ir.success) throw new Error(ir.error);
                     } else {
                         console.log(`[mrpack] NeoForge ${loaderVersionId} 已安装，跳过`);
@@ -17224,6 +17269,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             try { fs.rmSync(path.join(VERSIONS_DIR, loaderVersionId), { recursive: true, force: true }); } catch (e) {}
                         }
                         console.log(`[mrpack] >>> [步骤2/5] 安装Fabric: ${fabricVer} (MC ${mcVersion}) (${new Date().toLocaleTimeString()})`);
+                        _writeImportLog(`>>> [步骤2/5] 安装Fabric: ${fabricVer} (MC ${mcVersion})`);
                         const _fabStartTime = Date.now();
                         const ir = await installFabric(mcVersion, fabricVer, (p, msg) => {
                             const np = p > 1 ? p / 100 : p;
@@ -17232,6 +17278,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
                             progress('loader-install', msg || '正在安装Fabric...', 12 + np * 3);
                         });
                         console.log(`[mrpack] <<< [步骤2/5] Fabric安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _fabStartTime) / 1000)}s, error=${ir.error || '无'}`);
+                        _writeImportLog(`<<< [步骤2/5] Fabric安装完成: success=${ir.success}, 耗时=${Math.round((Date.now() - _fabStartTime) / 1000)}s, error=${ir.error || '无'}`);
 
                         if (!ir.success) throw new Error(ir.error);
                     } else {
@@ -17247,7 +17294,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
 
         const _vcStartTime = Date.now();
         console.log(`[mrpack] >>> [步骤3/5] 创建版本配置 (${new Date().toLocaleTimeString()})`);
-        progress('version-config', '正在创建版本配置...', 14);
+        _writeImportLog(`>>> [步骤3/5] 创建版本配置`);
+        progress('version-config', '正在创建版本配置...', 35);
 
         function pcl2StyleMerge(baseJson, loaderJson, versionId) {
             const merged = { ...baseJson };
@@ -17405,7 +17453,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         }
 
         console.log(`[mrpack] <<< [步骤3/5] 版本配置完成, 耗时=${Math.round((Date.now() - _vcStartTime) / 1000)}s`);
-        progress('loader', '模组加载器就绪', 15);
+        _writeImportLog(`<<< [步骤3/5] 版本配置完成, 耗时=${Math.round((Date.now() - _vcStartTime) / 1000)}s`);
+        progress('loader', '模组加载器就绪', 40);
     }
 
     // 整合包重装/重导入: 检测现有版本JSON是否已合并加载器内容
@@ -17585,7 +17634,8 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     try {
     const _extractStartTime = Date.now();
     console.log(`[mrpack] >>> [步骤4/5] 解压覆盖文件 (${new Date().toLocaleTimeString()})`);
-    progress('extract', '解压覆盖文件...', 17, [], '');
+    _writeImportLog(`>>> [步骤4/5] 解压覆盖文件`);
+    progress('extract', '解压覆盖文件...', 40, [], '');
     const entries = zip.getEntries();
     const overrideFiles = [];
     let extractYieldCounter = 0;
@@ -17625,6 +17675,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         }
     }
     console.log(`[mrpack] <<< [步骤4/5] 解压完成: ${extractCount} 个文件, 耗时=${Math.round((Date.now() - _extractStartTime) / 1000)}s`);
+    _writeImportLog(`<<< [步骤4/5] 解压完成: ${extractCount} 个文件, 耗时=${Math.round((Date.now() - _extractStartTime) / 1000)}s`);
 
     try {
         const vsPath = path.join(versionDir, 'version-settings.json');
@@ -17661,10 +17712,11 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
         return { name: fileName, status: 'pending', progress: 0, size: f.fileSize || 0 };
     });
 
-    progress('mods', `下载 Mod 文件 (共 ${filesList.length} 个)...`, 25, [...overrideFiles, ...modFiles], '');
+    progress('mods', `下载 Mod 文件 (共 ${filesList.length} 个)...`, 50, [...overrideFiles, ...modFiles], '');
 
     const _modsStartTime = Date.now();
     console.log(`[mrpack] >>> [步骤5/5] 模组下载: 共 ${filesList.length} 个, 并发=${PARALLEL_MODS} (${new Date().toLocaleTimeString()})`);
+    _writeImportLog(`>>> [步骤5/5] 模组下载: 共 ${filesList.length} 个, 并发=${PARALLEL_MODS}`);
     let okCount = 0, failCount = 0;
     let inFlight = 0;
     const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 64, 64);
@@ -17988,6 +18040,7 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     DownloadManager.connectionLimit = _prevConnLimit;
     if (abortSignal && abortSignal.aborted) throw new Error('下载已取消');
     console.log(`[mrpack] <<< [步骤5/5] 模组下载完成: ${okCount}成功 ${failCount}失败 (共${filesList.length}个, 并行=${Math.min(PARALLEL_MODS, filesList.length)}, 耗时=${Math.round((Date.now() - _modsStartTime) / 1000)}s)`);
+    _writeImportLog(`<<< [步骤5/5] 模组下载完成: ${okCount}成功 ${failCount}失败, 耗时=${Math.round((Date.now() - _modsStartTime) / 1000)}s`);
     if (failCount > 0) {
         const failedNames = modFiles.filter(m => m.status === 'failed').map(m => m.name).join(', ');
         console.warn(`[mrpack] 失败的模组: ${failedNames}`);
@@ -18303,9 +18356,9 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
 
     if (isNewVersionDirCF) {
         console.log(`[CurseForge] 确保基础版本存在: ${mcVersion}`);
-        progress('base', '正在准备基础版本...', 10);
+        progress('base', '正在准备基础版本...', 5);
         const baseResult = await ensureBaseVersionInstalled(mcVersion, (msg, pct) => {
-            progress('base', msg || '正在准备基础版本...', Math.min(pct, 75));
+            progress('base', msg || '正在准备基础版本...', 5 + Math.min(pct, 100) * 0.15);
         });
         if (baseResult.error) {
             try { if (fs.existsSync(versionDir)) fs.rmSync(versionDir, { recursive: true, force: true }); } catch (e) {}
@@ -18313,7 +18366,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
         }
 
         if (forgeVerCF || neoforgeVerCF || fabricVerCF) {
-            progress('loader-install', '正在安装模组加载器...', 12);
+            progress('loader-install', '正在安装模组加载器...', 20);
             try {
                 if (forgeVerCF) {
                     loaderVersionId = `${mcVersion}-forge-${forgeVerCF}`;
@@ -18325,7 +18378,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                         }
                         console.log(`[CurseForge] 安装模组加载器: Forge ${forgeVerCF} (MC ${mcVersion})`);
                         const ir = await installForge(mcVersion, forgeVerCF, (p, msg) => {
-                            progress('loader-install', msg || '正在安装Forge...', 12 + p * 3);
+                            progress('loader-install', msg || '正在安装Forge...', 20 + p * 15);
                         });
                         if (!ir.success) throw new Error(ir.error);
                     } else {
@@ -18341,7 +18394,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                         }
                         console.log(`[CurseForge] 安装模组加载器: NeoForge ${neoforgeVerCF} (MC ${mcVersion})`);
                         const ir = await installNeoForge(mcVersion, neoforgeVerCF, (p, msg) => {
-                            progress('loader-install', msg || '正在安装NeoForge...', 12 + p * 3);
+                            progress('loader-install', msg || '正在安装NeoForge...', 20 + p * 15);
                         });
                         if (!ir.success) throw new Error(ir.error);
                     } else {
@@ -18372,7 +18425,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
                         }
                         console.log(`[CurseForge] 安装模组加载器: Fabric ${fabricVerCF} (MC ${mcVersion})`);
                         const ir = await installFabric(mcVersion, fabricVerCF, (p, msg) => {
-                            progress('loader-install', msg || '正在安装Fabric...', 12 + p * 3);
+                            progress('loader-install', msg || '正在安装Fabric...', 20 + p * 15);
                         });
                         if (!ir.success) throw new Error(ir.error);
                     } else {
@@ -18386,7 +18439,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
             }
         }
 
-        progress('version-config', '正在创建版本配置...', 14);
+        progress('version-config', '正在创建版本配置...', 35);
 
         if (loaderVersionId) {
             let cfLoaderMainClass = '';
@@ -18422,7 +18475,7 @@ async function _importCurseForge(zip, manifestEntry, filePath, progress, targetV
             console.log(`[CurseForge] 创建版本JSON: ${versionId}.json (无加载器)`);
         }
 
-        progress('loader', '模组加载器就绪', 15);
+        progress('loader', '模组加载器就绪', 40);
     }
 
     let _cfBackupDir = null;
@@ -19696,7 +19749,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
 
             case '/api/mods/search': {
                 await new Promise(r => setImmediate(r));
-                const rawQuery = parsedUrl.query.query || '';
+                let rawQuery = parsedUrl.query.query || '';
                 const source = parsedUrl.query.source || 'any';
                 const loader = parsedUrl.query.loader || '';
                 const mcVersion = parsedUrl.query.version || '';
@@ -19704,6 +19757,21 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 const sort = parsedUrl.query.sort || 'relevance';
                 const limit = parseInt(parsedUrl.query.limit || '15', 10);
                 const offset = parseInt(parsedUrl.query.offset || '0', 10);
+
+                if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(rawQuery)) {
+                    try {
+                        const cnMod = require('./js/mod-chinese-names.js');
+                        const translated = cnMod.translateChineseSearch(rawQuery, 'mod');
+                        if (translated) rawQuery = translated;
+                    } catch (e) {
+                        try {
+                            const cnKeys = Object.entries(require('./js/mod-chinese-names.js').CHINESE_SEARCH_KEYWORDS || {});
+                            for (const [cn, enList] of cnKeys) {
+                                if (rawQuery.includes(cn) || cn.includes(rawQuery)) { rawQuery = enList.join(' '); break; }
+                            }
+                        } catch (_) {}
+                    }
+                }
 
                 const SEARCH_STOP_WORDS = new Set(['forge', 'fabric', 'for', 'mod', 'quilt', 'neoforge', 'the', 'and', 'of']);
                 function processSearchKeywords(text) {
@@ -23169,11 +23237,27 @@ async function handleAPI(pathname, req, res, parsedUrl) {
             }
 
             case '/api/modpacks/search': {
-                const mpQuery = parsedUrl.query.query || '';
+                let mpQuery = parsedUrl.query.query || '';
                 const mpLoader = parsedUrl.query.loader || '';
                 const mpVersion = parsedUrl.query.version || '';
                 const mpLimit = parseInt(parsedUrl.query.limit || '10', 10);
                 const mpOffset = parseInt(parsedUrl.query.offset || '0', 10);
+
+                if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(mpQuery)) {
+                    try {
+                        const cnMod = require('./js/mod-chinese-names.js');
+                        const translated = cnMod.translateChineseSearch(mpQuery, 'modpack');
+                        if (translated) mpQuery = translated;
+                    } catch (e) {
+                        try {
+                            const cnKeys = Object.entries(require('./js/mod-chinese-names.js').CHINESE_SEARCH_KEYWORDS_MODPACK || {});
+                            for (const [cn, enList] of cnKeys) {
+                                if (mpQuery.includes(cn) || cn.includes(mpQuery)) { mpQuery = enList.join(' '); break; }
+                            }
+                        } catch (_) {}
+                    }
+                }
+
                 try {
                     const facets = [['project_type:modpack']];
                     if (mpLoader) facets.push([`categories:${mpLoader}`]);
@@ -25023,10 +25107,13 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                 if (fs.existsSync(disabledPath)) return true;
                 try {
                     const existingFiles = fs.readdirSync(modsDir).filter(f => f.endsWith('.jar') || f.endsWith('.jar.disabled'));
-                    const baseName = depFileName.replace(/[-_]\d+\.\d+\.\d+[\w.\-]*\.jar$/i, '').replace(/\.jar$/i, '').toLowerCase();
+                    const baseName = depFileName.replace(/\.jar$/i, '').replace(/[-_](v?\d[\w.\-]*)$/i, '').toLowerCase();
                     for (const f of existingFiles) {
                         const fLower = f.toLowerCase();
-                        if (baseName.length >= 5 && fLower.includes(baseName)) return true;
+                        const fBase = fLower.replace(/\.jar\.disabled$/i, '').replace(/\.jar$/i, '').replace(/[-_](v?\d[\w.\-]*)$/i, '');
+                        if (baseName.length >= 3 && fBase.length >= 3) {
+                            if (fBase === baseName || fBase.includes(baseName) || baseName.includes(fBase)) return true;
+                        }
                     }
                     if (depProjectId) {
                         const slug = depProjectId.toLowerCase();
@@ -25162,6 +25249,7 @@ async function handleAPI(pathname, req, res, parsedUrl) {
                         const destPath = path.join(destDir, safeName);
 
                         const sessionId = `mod-${Date.now()}`;
+                        const totalSteps = depDownloads.length + 1;
                         modDownloadSessions.set(sessionId, {
                             status: 'downloading', progress: 0, message: '下载中..',
                             fileName: safeName, totalSize: fileSize, downloaded: 0,
@@ -25172,38 +25260,167 @@ async function handleAPI(pathname, req, res, parsedUrl) {
 
                         (async () => {
                             try {
-                                await downloadFile(downloadUrl, destPath, (p) => {
-                                    const session = modDownloadSessions.get(sessionId);
-                                    if (session) {
-                                        session.progress = Math.round(p.progress);
-                                        session.downloaded = p.bytesDownloaded || 0;
-                                        session.message = `下载 ${safeName} ${p.progress.toFixed(0)}%`;
-                                    }
-                                }, 2);
-
                                 for (let di = 0; di < depDownloads.length; di++) {
                                     const dep = depDownloads[di];
                                     const session = modDownloadSessions.get(sessionId);
                                     if (session) {
                                         session.currentDep = di + 1;
-                                        session.message = `下载依赖 ${dep.fileName}`;
+                                        session.message = `下载前置依赖 (${di + 1}/${depDownloads.length}): ${dep.fileName}`;
                                     }
                                     await downloadFile(dep.url, dep.dest, (depProgress) => {
                                         const s = modDownloadSessions.get(sessionId);
                                         if (s) {
-                                            const depBase = 50 + Math.round((di / depDownloads.length) * 50);
-                                            const depWeight = 50 / depDownloads.length;
+                                            const depBase = Math.round((di / totalSteps) * 100);
+                                            const depWeight = 100 / totalSteps;
                                             s.progress = Math.min(99, depBase + Math.round(depProgress.progress * depWeight / 100));
-                                            s.message = `下载依赖 ${dep.fileName} ${depProgress.progress.toFixed(0)}%`;
+                                            s.message = `下载前置依赖 (${di + 1}/${depDownloads.length}): ${dep.fileName} ${depProgress.progress.toFixed(0)}%`;
                                         }
                                     }, 2);
                                 }
 
                                 const session = modDownloadSessions.get(sessionId);
                                 if (session) {
-                                    session.status = 'completed';
-                                    session.progress = 100;
-                                    session.message = `${safeName} 下载完成！`;
+                                    session.message = `下载本体: ${safeName}`;
+                                }
+                                await downloadFile(downloadUrl, destPath, (p) => {
+                                    const s = modDownloadSessions.get(sessionId);
+                                    if (s) {
+                                        const mainBase = Math.round((depDownloads.length / totalSteps) * 100);
+                                        const mainWeight = 100 / totalSteps;
+                                        s.progress = Math.min(99, mainBase + Math.round(p.progress * mainWeight / 100));
+                                        s.downloaded = p.bytesDownloaded || 0;
+                                        s.message = `下载本体: ${safeName} ${p.progress.toFixed(0)}%`;
+                                    }
+                                }, 2);
+
+                                const finalSession = modDownloadSessions.get(sessionId);
+                                if (finalSession) {
+                                    finalSession.status = 'completed';
+                                    finalSession.progress = 100;
+                                    finalSession.message = `${safeName} 下载完成！`;
+                                }
+                            } catch (e) {
+                                const session = modDownloadSessions.get(sessionId);
+                                if (session) {
+                                    session.status = 'failed';
+                                    session.message = `下载失败: ${e.message}`;
+                                }
+                            }
+                        })();
+                    } else if (dvSource === 'curseforge') {
+                        const settings = loadSettingsCached();
+                        const cfApiKey = settings.curseforgeApiKey || '$2a$10$bL4bIL5pUWqfcO7KQtnMReakwtfHbNKh6v1uTpKlzhwoueEJQnPnm';
+                        const cfHeaders = cfApiKey ? { 'x-api-key': cfApiKey } : {};
+
+                        let cfFileData = null;
+                        if (dvVersionId) {
+                            try {
+                                const fileInfo = await fetchJSON(`${CURSEFORGE_API}/mods/${dvProjectId}/files/${dvVersionId}`, cfHeaders);
+                                cfFileData = fileInfo?.data;
+                            } catch (e) {}
+                        }
+                        if (!cfFileData && dvProjectId) {
+                            let loaderType = 0;
+                            if (dvLoader === 'forge') loaderType = 1;
+                            else if (dvLoader === 'fabric') loaderType = 4;
+                            else if (dvLoader === 'neoforge') loaderType = 6;
+                            else if (dvLoader === 'quilt') loaderType = 5;
+                            let cfVerUrl = `${CURSEFORGE_API}/mods/${dvProjectId}/files?pageSize=20`;
+                            if (dvGameVersion) cfVerUrl += `&gameVersion=${encodeURIComponent(dvGameVersion)}`;
+                            if (loaderType) cfVerUrl += `&modLoaderType=${loaderType}`;
+                            try {
+                                const cfRes = await fetchJSON(cfVerUrl, cfHeaders);
+                                cfFileData = cfRes?.data?.[0];
+                            } catch (e) {}
+                        }
+
+                        if (!cfFileData) { sendError('未找到匹配的 CurseForge 文件'); break; }
+
+                        downloadUrl = cfFileData.downloadUrl;
+                        fileName = cfFileData.fileName;
+                        fileSize = cfFileData.fileLength || 0;
+
+                        if (!downloadUrl) { sendError('CurseForge 未提供下载链接（可能需要浏览器下载）'); break; }
+
+                        const depDownloads = [];
+                        if (dvIncludeDeps) {
+                            const cfDeps = cfFileData.dependencies || [];
+                            const requiredDeps = cfDeps.filter(d => (d.relationType === 3 || d.relationType === 5) && d.modId);
+                            for (const dep of requiredDeps) {
+                                try {
+                                    const depModInfo = await fetchJSON(`${CURSEFORGE_API}/mods/${dep.modId}`, cfHeaders);
+                                    let depFileUrl = `${CURSEFORGE_API}/mods/${dep.modId}/files?pageSize=5`;
+                                    if (dvGameVersion) depFileUrl += `&gameVersion=${encodeURIComponent(dvGameVersion)}`;
+                                    const depFiles = await fetchJSON(depFileUrl, cfHeaders);
+                                    const depFile = depFiles?.data?.[0];
+                                    if (depFile && depFile.downloadUrl) {
+                                        const depName = depFile.fileName;
+                                        const depDest = path.join(destDir, depName);
+                                        if (isModAlreadyInstalled(destDir, depName, String(dep.modId))) {
+                                            console.log(`[ModDownload] CurseForge前置已安装，跳过: ${depName} (modId: ${dep.modId})`);
+                                        } else {
+                                            depDownloads.push({ url: depFile.downloadUrl, fileName: depName, dest: depDest, size: depFile.fileLength || 0 });
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.warn(`[ModDownload] CurseForge依赖查询失败: modId=${dep.modId} - ${e.message}`);
+                                }
+                            }
+                        }
+
+                        const safeName = (fileName || `${dvProjectId}.jar`).replace(/[^a-zA-Z0-9._\-]/g, '_');
+                        const destPath = path.join(destDir, safeName);
+
+                        const sessionId = `mod-${Date.now()}`;
+                        const totalSteps = depDownloads.length + 1;
+                        modDownloadSessions.set(sessionId, {
+                            status: 'downloading', progress: 0, message: '下载中..',
+                            fileName: safeName, totalSize: fileSize, downloaded: 0,
+                            dependencies: depDownloads.length, currentDep: 0
+                        });
+
+                        sendJSON({ success: true, sessionId, fileName: safeName });
+
+                        (async () => {
+                            try {
+                                for (let di = 0; di < depDownloads.length; di++) {
+                                    const dep = depDownloads[di];
+                                    const session = modDownloadSessions.get(sessionId);
+                                    if (session) {
+                                        session.currentDep = di + 1;
+                                        session.message = `下载前置依赖 (${di + 1}/${depDownloads.length}): ${dep.fileName}`;
+                                    }
+                                    await downloadFile(dep.url, dep.dest, (depProgress) => {
+                                        const s = modDownloadSessions.get(sessionId);
+                                        if (s) {
+                                            const depBase = Math.round((di / totalSteps) * 100);
+                                            const depWeight = 100 / totalSteps;
+                                            s.progress = Math.min(99, depBase + Math.round(depProgress.progress * depWeight / 100));
+                                            s.message = `下载前置依赖 (${di + 1}/${depDownloads.length}): ${dep.fileName} ${depProgress.progress.toFixed(0)}%`;
+                                        }
+                                    }, 2);
+                                }
+
+                                const session = modDownloadSessions.get(sessionId);
+                                if (session) {
+                                    session.message = `下载本体: ${safeName}`;
+                                }
+                                await downloadFile(downloadUrl, destPath, (p) => {
+                                    const s = modDownloadSessions.get(sessionId);
+                                    if (s) {
+                                        const mainBase = Math.round((depDownloads.length / totalSteps) * 100);
+                                        const mainWeight = 100 / totalSteps;
+                                        s.progress = Math.min(99, mainBase + Math.round(p.progress * mainWeight / 100));
+                                        s.downloaded = p.bytesDownloaded || 0;
+                                        s.message = `下载本体: ${safeName} ${p.progress.toFixed(0)}%`;
+                                    }
+                                }, 2);
+
+                                const finalSession = modDownloadSessions.get(sessionId);
+                                if (finalSession) {
+                                    finalSession.status = 'completed';
+                                    finalSession.progress = 100;
+                                    finalSession.message = `${safeName} 下载完成！`;
                                 }
                             } catch (e) {
                                 const session = modDownloadSessions.get(sessionId);

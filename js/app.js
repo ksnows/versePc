@@ -5004,11 +5004,18 @@ async function downloadAllDeps() {
             if (!dep.compatibleVersion) continue;
             if (seen.has(dep.projectId)) continue;
             seen.add(dep.projectId);
+            const depFileName = (dep.compatibleVersion.fileName || '').toLowerCase();
+            const depBaseName = depFileName.replace(/\.jar$/i, '').replace(/[-_](v?\d[\w.\-]*)$/i, '');
             const alreadyInstalled = installedMods.some(m => {
                 if (m.id === dep.projectId) return true;
                 if (!m.filename) return false;
                 const fn = m.filename.toLowerCase();
                 if (fn.includes(dep.projectId.toLowerCase())) return true;
+                if (depFileName && fn === depFileName) return true;
+                if (depBaseName.length >= 3) {
+                    const mBase = fn.replace(/\.jar\.disabled$/i, '').replace(/\.jar$/i, '').replace(/[-_](v?\d[\w.\-]*)$/i, '');
+                    if (mBase.length >= 3 && (mBase === depBaseName || mBase.includes(depBaseName) || depBaseName.includes(mBase))) return true;
+                }
                 return false;
             });
             if (!alreadyInstalled) toDownload.push(dep);
@@ -7031,6 +7038,18 @@ async function loadAccounts() {
             }).join('');
             
             container.querySelectorAll('.account-avatar-img').forEach(img => {
+                img.onload = function() {
+                    const w = this.naturalWidth || this.width;
+                    const h = this.naturalHeight || this.height;
+                    const isFullSkin = (w === 64 && (h === 64 || h === 32)) || w === 128 || w === 256;
+                    if (isFullSkin) {
+                        const cropped = cropSkinHeadCanvas(this, 64);
+                        if (cropped) {
+                            this.onload = null;
+                            this.src = cropped;
+                        }
+                    }
+                };
                 img.onerror = function() {
                     const avatarDiv = this.parentElement;
                     if (avatarDiv) {
@@ -7082,12 +7101,19 @@ async function loadAccounts() {
                 img.height = 64;
                 img.onload = function() {
                     try {
+                        const w2 = this.naturalWidth || this.width;
+                        const h2 = this.naturalHeight || this.height;
+                        const isFull = (w2 === 64 && (h2 === 64 || h2 === 32)) || w2 === 128 || w2 === 256;
+                        if (isFull) {
+                            const cropped2 = cropSkinHeadCanvas(this, 64);
+                            if (cropped2) { this.onload = null; this.src = cropped2; return; }
+                        }
                         localStorage.setItem('cachedAvatarUrl', accSkinUrl);
                         localStorage.setItem('cachedAvatarId', selectedAccount.id);
                         const canvas = document.createElement('canvas');
                         canvas.width = 64; canvas.height = 64;
                         const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, 64, 64);
+                        ctx.drawImage(this, 0, 0, 64, 64);
                         const dataUrl = canvas.toDataURL('image/png');
                         if (dataUrl && dataUrl.length > 100) {
                             localStorage.setItem('cachedAvatarData', dataUrl);
@@ -7131,6 +7157,13 @@ async function loadAccounts() {
                                         homeAvatar.innerHTML = '';
                                         homeAvatar.appendChild(retryImg);
                                         try {
+                                            const rw = retryImg.naturalWidth || retryImg.width;
+                                            const rh = retryImg.naturalHeight || retryImg.height;
+                                            const rFull = (rw === 64 && (rh === 64 || rh === 32)) || rw === 128 || rw === 256;
+                                            if (rFull) {
+                                                const rCrop = cropSkinHeadCanvas(retryImg, 64);
+                                                if (rCrop) { retryImg.src = rCrop; return; }
+                                            }
                                             const canvas = document.createElement('canvas');
                                             canvas.width = 64; canvas.height = 64;
                                             const ctx = canvas.getContext('2d');
@@ -7157,6 +7190,15 @@ async function loadAccounts() {
                 const img2 = document.createElement('img');
                 img2.src = accSkinUrl;
                 img2.className = 'account-avatar-img';
+                img2.onload = function() {
+                    const w3 = this.naturalWidth || this.width;
+                    const h3 = this.naturalHeight || this.height;
+                    const isFull3 = (w3 === 64 && (h3 === 64 || h3 === 32)) || w3 === 128 || w3 === 256;
+                    if (isFull3) {
+                        const cropped3 = cropSkinHeadCanvas(this, 64);
+                        if (cropped3) { this.onload = null; this.src = cropped3; }
+                    }
+                };
                 img2.onerror = function() {
                     img2.style.display = 'none';
                     if (true) {
@@ -7165,6 +7207,13 @@ async function loadAccounts() {
                             retryImg2.src = accSkinUrl.split('&_=')[0] + '&_=' + Date.now();
                             retryImg2.className = 'account-avatar-img';
                             retryImg2.onload = function() {
+                                const rw2 = this.naturalWidth || this.width;
+                                const rh2 = this.naturalHeight || this.height;
+                                const rFull2 = (rw2 === 64 && (rh2 === 64 || rh2 === 32)) || rw2 === 128 || rw2 === 256;
+                                if (rFull2) {
+                                    const rCrop2 = cropSkinHeadCanvas(this, 64);
+                                    if (rCrop2) { this.src = rCrop2; }
+                                }
                                 launchAvatar.innerHTML = '';
                                 launchAvatar.appendChild(retryImg2);
                             };
