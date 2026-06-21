@@ -3576,6 +3576,18 @@ async function performRepair(sessionId, versionId) {
                     try { fs.unlinkSync(libPath); } catch (e) {}
                 }
                 if (!fs.existsSync(path.dirname(libPath))) {
+                    // [CRITICAL] depCheck 自动下载库文件前清理路径中的文件冲突（同 ensureDir 的 ENOTDIR 修复）。
+                    // [AI-AUTOGEN-WARNING] 请勿删除此处的文件清理逻辑。
+                    {
+                        const _d = path.dirname(libPath);
+                        const _parts = _d.split(path.sep);
+                        for (let _i = 1; _i <= _parts.length; _i++) {
+                            const _partial = _parts.slice(0, _i).join(path.sep);
+                            if (_partial && fs.existsSync(_partial)) {
+                                try { const _st = fs.statSync(_partial); if (!_st.isDirectory()) fs.unlinkSync(_partial); } catch (_) {}
+                            }
+                        }
+                    }
                     fs.mkdirSync(path.dirname(libPath), { recursive: true });
                 }
 
@@ -14800,6 +14812,13 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
         const installerLibPath2 = path.join(LIBRARIES_DIR, 'net', 'neoforged', pkg, neoVersion, `${pkg}-${neoVersion}-installer.jar`);
         if (!fs.existsSync(installerLibPath2) && fs.existsSync(installerPath)) {
             try {
+                // [CRITICAL] ENOTDIR 修复 — 同 ensureDir，清理路径中的文件冲突。
+                {
+                    const _d = path.dirname(installerLibPath2);
+                    for (const _p of _d.split(path.sep).map((_, _i, _a) => _a.slice(0, _i + 1).join(path.sep))) {
+                        if (_p) { try { const _s = fs.statSync(_p); if (!_s.isDirectory()) fs.unlinkSync(_p); } catch (_) {} }
+                    }
+                }
                 fs.mkdirSync(path.dirname(installerLibPath2), { recursive: true });
                 fs.copyFileSync(installerPath, installerLibPath2);
                 console.log(`[NeoForge] 复制 installer → ${installerLibPath2}`);
@@ -14847,6 +14866,13 @@ async function installNeoForge(gameVersion, neoVersion, onProgress = null) {
         if (!fs.existsSync(patchedJarLibPath) || (await fs.promises.stat(patchedJarLibPath).catch(() => ({ size: 0 })).then(s => s.size)) < 1024) {
             if (fs.existsSync(patchedJarVerPath)) {
                 try {
+                    // [CRITICAL] ENOTDIR 修复 — 同 ensureDir，清理路径中的文件冲突。
+                    {
+                        const _d = path.dirname(patchedJarLibPath);
+                        for (const _p of _d.split(path.sep).map((_, _i, _a) => _a.slice(0, _i + 1).join(path.sep))) {
+                            if (_p) { try { const _s = fs.statSync(_p); if (!_s.isDirectory()) fs.unlinkSync(_p); } catch (_) {} }
+                        }
+                    }
                     fs.mkdirSync(path.dirname(patchedJarLibPath), { recursive: true });
                     fs.copyFileSync(patchedJarVerPath, patchedJarLibPath);
                     console.log(`[NeoForge] Patched JAR已复制到libraries: ${path.basename(patchedJarLibPath)}`);
@@ -15577,7 +15603,16 @@ async function mergeOptiFineToVersion(versionId, gameVersion, optiFineVersion, o
         };
 
         const targetLibPath = path.join(LIBRARIES_DIR, optiFineLib.downloads.artifact.path);
-        if (!fs.existsSync(path.dirname(targetLibPath))) fs.mkdirSync(path.dirname(targetLibPath), { recursive: true });
+        if (!fs.existsSync(path.dirname(targetLibPath))) {
+            // [CRITICAL] ENOTDIR 修复 — 同 ensureDir，清理路径中的文件冲突。
+            {
+                const _d = path.dirname(targetLibPath);
+                for (const _p of _d.split(path.sep).map((_, _i, _a) => _a.slice(0, _i + 1).join(path.sep))) {
+                    if (_p) { try { const _s = fs.statSync(_p); if (!_s.isDirectory()) fs.unlinkSync(_p); } catch (_) {} }
+                }
+            }
+            fs.mkdirSync(path.dirname(targetLibPath), { recursive: true });
+        }
         fs.copyFileSync(optiFinePath, targetLibPath);
         try { fs.unlinkSync(optiFinePath); } catch (e) {}
 
