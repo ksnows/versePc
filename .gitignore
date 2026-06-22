@@ -123,3 +123,5 @@ skill-manager.js
 snapshot-manager.js
 workflow-engine.js
 hooks-manager.js
+ai-config.js
+js/ai-chat.js
