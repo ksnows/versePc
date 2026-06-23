@@ -953,11 +953,11 @@ async function _importMrpack(zip, manifestEntry, filePath, progress, targetVersi
     progress('mods', `下载 Mod 文件 (共 ${filesList.length} 个)...`, 50, [...overrideFiles, ...modFiles], '');
 
     const _modsStartTime = Date.now();
+    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 64, 64);
     console.log(`[mrpack] >>> [步骤5/5] 模组下载: 共 ${filesList.length} 个, 并发=${PARALLEL_MODS} (${new Date().toLocaleTimeString()})`);
     utils._writeImportLog(`>>> [步骤5/5] 模组下载: 共 ${filesList.length} 个, 并发=${PARALLEL_MODS}`);
     let okCount = 0, failCount = 0;
     let inFlight = 0;
-    const PARALLEL_MODS = Math.min(parseInt(settings.maxThreads, 10) || 64, 64);
     const _modAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 60000, maxSockets: PARALLEL_MODS * 4 + 16, maxFreeSockets: PARALLEL_MODS * 2 + 8, timeout: 120000 });
     const _prevConnLimit = ctx.DownloadManager.connectionLimit;
     ctx.DownloadManager.connectionLimit = Math.min(Math.max(PARALLEL_MODS * 4, 64), 128);
