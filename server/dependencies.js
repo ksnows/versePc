@@ -14,17 +14,15 @@ const ctx = require('./context');
 const utils = require('./utils');
 const http = require('./http-client');
 const versions = require('./versions');
+const java = require('./java');
 
-// ============================================================================
-// 懒加载 server.js 中尚未抽取到子模块的函数 (避免循环依赖)
-// 这些函数在 server.js 完成迁移后会通过 module.exports 暴露
-// ============================================================================
-let _serverModule = null;
-function _server() {
-    if (_serverModule === null) {
-        try { _serverModule = require('../server'); } catch (_) { _serverModule = {}; }
+// modloaders.js 已 require 本模块，使用懒加载避免循环依赖
+let _modloadersModule = null;
+function _modloaders() {
+    if (_modloadersModule === null) {
+        _modloadersModule = require('./modloaders');
     }
-    return _serverModule;
+    return _modloadersModule;
 }
 
 // ============================================================================
@@ -74,7 +72,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
         console.log(`[DepCheck] version.json中的javaVersion字段:`, JSON.stringify(versionJson.javaVersion));
     }
 
-    const range = _server().getJavaVersionRange(versionId, versionJson);
+    const range = java.getJavaVersionRange(versionId, versionJson);
     const requiredJavaVer = range.min;
     const maxJavaVer = range.max;
     result.java.required = requiredJavaVer;
@@ -82,14 +80,14 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
     result.java.rangeSource = range.source;
     console.log(`[DepCheck] 需要的Java版本: ${requiredJavaVer}${maxJavaVer < 999 ? '~' + maxJavaVer : '+'} (来源: ${range.source})`);
 
-    const javaPath = _server().selectJavaForVersion(versionId, settings, versionJson);
+    const javaPath = java.selectJavaForVersion(versionId, settings, versionJson);
     console.log(`[DepCheck] 选择的Java路径: ${javaPath}`);
 
     if (!javaPath) {
         result.java.ok = false;
         const rangeDesc = maxJavaVer < 999 ? `${requiredJavaVer}~${maxJavaVer}` : `${requiredJavaVer}+`;
-        const sysJava = _server().detectSystemJava();
-        const bunJava = _server().detectBundledJava();
+        const sysJava = java.detectSystemJava();
+        const bunJava = java.detectBundledJava();
         const totalDetected = sysJava.length + bunJava.length;
         if (totalDetected > 0) {
             const detectedList = [...bunJava, ...sysJava].map(j => `Java ${j.majorVersion} (${j.path})`).join(', ');
@@ -295,7 +293,7 @@ async function checkDependencies(versionId, settings, externalVersionDir = null)
                              process.platform === 'darwin' ? 'osx' : 'linux';
     let libTotal = 0;
     for (const lib of libraries) {
-        if (lib.rules && !_server().evaluateRules(lib.rules)) continue;
+        if (lib.rules && !versions.evaluateRules(lib.rules)) continue;
 
         const hasNatives = lib.natives && lib.natives[process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux'];
         const libNameSuffix = lib.name ? lib.name.split(':').pop() : '';
@@ -929,7 +927,7 @@ async function downloadMissingDependencies(missingFiles, onProgress, versionJson
                 progress: 0
             });
         }
-        const result = await _server().ensureBaseVersionInstalled(pv.id);
+        const result = await _modloaders().ensureBaseVersionInstalled(pv.id);
         if (result.error) {
             console.error(`[Download] Failed to install parent version ${pv.id}:`, result.error);
         }

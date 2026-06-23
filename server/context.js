@@ -333,13 +333,10 @@ function cachedLookup(hostname, opts, callback) {
     if (cached && Date.now() - cached.time < ctx.caches.DNS_CACHE_TTL) {
         return callback(null, cached.address, cached.family);
     }
-    const origOpts = opts && opts.all ? { all: true, family: opts.all } : {};
-    require('dns').lookup(hostname, origOpts, (err, address, family) => {
+    require('dns').lookup(hostname, opts, (err, address, family) => {
         if (err) return callback(err);
-        const addr = Array.isArray(address) ? address[0] : address;
-        const fam = Array.isArray(address) ? address[0].family : family;
-        dnsCache.set(hostname, { address: addr, family: fam, time: Date.now() });
-        callback(null, addr, fam);
+        dnsCache.set(hostname, { address, family, time: Date.now() });
+        callback(null, address, family);
     });
 }
 
