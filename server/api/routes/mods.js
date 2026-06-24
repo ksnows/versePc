@@ -1163,18 +1163,37 @@ module.exports = {
                     const settings = versions.loadSettingsCached();
                     const cfApiKey = settings.curseforgeApiKey || '';
                     const cfHeaders = cfApiKey ? { 'x-api-key': cfApiKey } : {};
-                    let cfUrl = `${CURSEFORGE_API}/mods/${mvProjectId}/files`;
-                    const cfParams = [];
-                    if (mvGameVer) cfParams.push(`gameVersion=${mvGameVer}`);
-                    if (mvLoader) {
-                        const loaderMap = { fabric: 4, forge: 1, neoforge: 6, quilt: 5 };
-                        const loaderType = loaderMap[mvLoader.toLowerCase()];
-                        if (loaderType) cfParams.push(`modLoaderType=${loaderType}`);
-                    }
-                    if (cfParams.length > 0) cfUrl += '?' + cfParams.join('&');
 
-                    const cfRes = await http.fetchJSON(cfUrl, cfHeaders, 25000);
-                    const cfFiles = cfRes.data || [];
+                    let allCfFiles = [];
+                    let cfPageIndex = 0;
+                    const cfPageSize = 1000;
+                    let cfHasMore = true;
+
+                    while (cfHasMore) {
+                        let cfUrl = `${CURSEFORGE_API}/mods/${mvProjectId}/files?pageSize=${cfPageSize}&index=${cfPageIndex}`;
+                        const cfParams = [];
+                        if (mvGameVer) cfParams.push(`gameVersion=${mvGameVer}`);
+                        if (mvLoader) {
+                            const loaderMap = { fabric: 4, forge: 1, neoforge: 6, quilt: 5 };
+                            const loaderType = loaderMap[mvLoader.toLowerCase()];
+                            if (loaderType) cfParams.push(`modLoaderType=${loaderType}`);
+                        }
+                        if (cfParams.length > 0) cfUrl += '&' + cfParams.join('&');
+
+                        const cfRes = await http.fetchJSON(cfUrl, cfHeaders, 25000);
+                        const cfBatch = cfRes.data || [];
+                        allCfFiles = allCfFiles.concat(cfBatch);
+
+                        const pagination = cfRes.pagination;
+                        if (pagination && pagination.totalCount > cfPageIndex + cfPageSize) {
+                            cfPageIndex += cfPageSize;
+                        } else {
+                            cfHasMore = false;
+                        }
+                        if (cfBatch.length < cfPageSize) cfHasMore = false;
+                    }
+
+                    const cfFiles = allCfFiles;
                     const byVersion = new Map();
                     for (const f of cfFiles) {
                         const gv = (f.gameVersions || []).find(v => /^\d+\.\d+/.test(v)) || (f.gameVersions || [])[0] || '';
