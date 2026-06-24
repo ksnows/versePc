@@ -1367,7 +1367,20 @@ function getInstalledVersions(forceRefresh) {
         if (externalId) inheritsFromIds.add(externalId);
     }
 
-    const result = installed.filter(v => !inheritsFromIds.has(v.id) || v.error);
+    // [CRITICAL - 2026-06-21] 只隐藏纯原版基础版本，不隐藏加载器版本
+    // 旧逻辑：隐藏所有被 inheritsFrom 引用的版本（包括 Forge/Fabric 版本）
+    // 问题：用户安装整合包后，fixModpackInheritsFrom 把整合包的 inheritsFrom 指向 Forge 版本，
+    //       导致 Forge 版本被隐藏（"版本消失"），但文件夹还在。
+    // 修复：只隐藏没有加载器的原版基础版本（如 "26.2", "1.20.1"），
+    //       加载器版本（Forge/Fabric/NeoForge）永远显示。
+    // [AI-AUTOGEN-WARNING] 不要改回旧的过滤逻辑，否则用户安装整合包后加载器版本会消失。
+    const result = installed.filter(v => {
+        if (v.error) return true;
+        if (!inheritsFromIds.has(v.id)) return true;
+        if (v.isForge || v.isFabric || v.isNeoForge || v.isOptiFine || v.isLiteLoader) return true;
+        if (loaderIdPattern.test(v.id)) return true;
+        return false;
+    });
 
     ctx.caches._versionsCache = result;
     ctx.caches._versionsCacheTime = Date.now();
