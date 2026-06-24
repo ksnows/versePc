@@ -1006,6 +1006,9 @@ ipcMain.handle('activate-verify', async (event, code) => {
     try {
         const crypto = require('crypto');
         const os = require('os');
+        let activationModule;
+        try { activationModule = require('./activation.obfuscated.js'); } catch (e) { activationModule = require('./activation'); }
+        const { validateActivationCode } = activationModule;
 
         const parts = [];
         try { parts.push(os.hostname()); } catch (e) {}
@@ -1026,39 +1029,13 @@ ipcMain.handle('activate-verify', async (event, code) => {
         } catch (e) {}
         const machineId = crypto.createHash('sha256').update(parts.join('|')).digest('hex').toUpperCase().substring(0, 16);
 
-        let c = (code || '').trim().toUpperCase();
+        const c = (code || '').trim().toUpperCase();
         if (!c) return { success: false, message: '请输入激活码' };
-        const codeMatch = c.match(/(VP-[A-F0-9]{6,12}|VS-[A-F0-9]{6,12}|VU-[A-F0-9]{6,12})/i);
-        if (codeMatch) {
-            c = codeMatch[1].toUpperCase();
-        }
-        if (!c.startsWith('VP-') && !c.startsWith('VS-') && !c.startsWith('VU-')) return { success: false, message: '激活码格式无效' };
+        const codeParts = c.split('-');
+        if (codeParts.length < 2 || codeParts.length > 3) return { success: false, message: '激活码格式无效' };
 
         const appVersion = app.getVersion();
-
-        let result;
-        try {
-            const https = require('https');
-            const postData = JSON.stringify({ code: c, machine_id: machineId, app_version: appVersion });
-            const response = await new Promise((resolve, reject) => {
-                const req = https.request({
-                    hostname: 'www.verselauncher.cn',
-                    path: '/api/activate/verify',
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) }
-                }, (res) => {
-                    let data = '';
-                    res.on('data', (chunk) => { data += chunk; });
-                    res.on('end', () => { resolve(JSON.parse(data)); });
-                });
-                req.on('error', reject);
-                req.write(postData);
-                req.end();
-            });
-            result = response?.data || { activated: false };
-        } catch (e) {
-            result = { activated: false };
-        }
+        const result = validateActivationCode(c, machineId, appVersion);
 
         if (!result.activated) {
             return { success: false, message: '激活码无效或与本机不匹配' };
@@ -1069,9 +1046,6 @@ ipcMain.handle('activate-verify', async (event, code) => {
         store['activation_type'] = activationType;
         store['activation_code'] = c;
         store['activation_time'] = new Date().toISOString();
-        if (activationType === 'single') {
-            store['activation_version'] = app.getVersion();
-        }
         fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), () => {});
 
         return { success: true, type: activationType, message: activationType === 'permanent' ? '永久激活成功！' : '单次激活成功！' };
