@@ -145,6 +145,7 @@ const natives = require('./server/natives');
 const launch = require('./server/launch');
 const accounts = require('./server/accounts');
 const router = require('./server/api/router');
+const { checkTampering: _chkTam } = require('./activation-verify');
 
 // ============================================================================
 // 路由依赖注入 - 向各 route 模块传递业务函数
@@ -216,6 +217,13 @@ async function handleNativeAPI(pathname, method, body, query, incomingContentTyp
 
     try {
         const parsedUrl = url.parse(req.url, true);
+
+        if (_chkTam() !== 'ok') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'unauthorized' }));
+            await finishPromise;
+            return { status: 403, headers, body: Buffer.concat(chunks) };
+        }
 
         const apiResult = router.handleAPI(pathname, req, res, parsedUrl);
 

@@ -192,15 +192,15 @@ function extractZipEntry(buf, entryName) {
     return null;
 }
 
-function downloadFile(url, dest) {
+function downloadFile(url, dest, timeoutMs = 15000) {
     return new Promise((resolve, reject) => {
         try {
             const dir = path.dirname(dest);
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
             const mod = url.startsWith('https') ? https : http;
-            const req = mod.get(url, { timeout: 60000 }, (res) => {
+            const req = mod.get(url, { timeout: timeoutMs }, (res) => {
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                    return downloadFile(res.headers.location, dest).then(resolve, reject);
+                    return downloadFile(res.headers.location, dest, timeoutMs).then(resolve, reject);
                 }
                 if (res.statusCode !== 200) { res.resume(); reject(new Error(`HTTP ${res.statusCode}`)); return; }
                 const ws = fs.createWriteStream(dest);
@@ -233,15 +233,23 @@ async function downloadMavenArtifact(mavenCoord) {
     const relativePath = `${groupPath}/${artifact}/${version}/${fileName}`;
     const dest = path.join(LIBS, relativePath);
     if (fs.existsSync(dest) && fs.statSync(dest).size > 100) return true;
-    const mirrors = [
-        `https://maven.minecraftforge.net/${relativePath}`,
-        `https://libraries.minecraft.net/${relativePath}`,
-        `https://bmclapi2.bangbang93.com/maven/${relativePath}`,
-    ];
+
+    // For modloader-related libraries, only use BMCLAPI mirror (domestic, fast)
+    // For other libraries, use BMCLAPI first, then official sources as fallback
+    const isModloaderLib = ['minecraftforge', 'neoforged', 'fabricmc', 'quiltmc'].some(
+        k => parts[0].toLowerCase().includes(k)
+    );
+    const mirrors = isModloaderLib
+        ? [`https://bmclapi2.bangbang93.com/maven/${relativePath}`]
+        : [
+              `https://bmclapi2.bangbang93.com/maven/${relativePath}`,
+              `https://maven.aliyun.com/repository/public/${relativePath}`,
+              `https://libraries.minecraft.net/${relativePath}`,
+          ];
     for (const url of mirrors) {
         try {
             log(`Downloading: ${url}`);
-            await downloadFile(url, dest);
+            await downloadFile(url, dest, 15000);
             if (fs.existsSync(dest) && fs.statSync(dest).size > 100) {
                 log(`Downloaded: ${dest} (${fs.statSync(dest).size} bytes)`);
                 return true;
@@ -310,35 +318,22 @@ async function runProcessor(procInfo, index) {
     }
     if (!resolvedMainClass) { log(`ERROR: No Main-Class for processor ${jar}`); return false; }
 
-    const classpath = [];
-    for (const name of cpNames) {
-        let p = resolveMavenPath(name);
-        if (!p || !fs.existsSync(p)) {
-            log(`[P${index+1}] 类路径JAR不存在，下载: ${name}`);
-            send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `下载依赖 ${path.basename(name)}...` });
-            await downloadMavenArtifact(name);
-            p = resolveMavenPath(name);
-        }
-        if (p && fs.existsSync(p)) classpath.push(p);
-        else log(`[P${index+1}] WARNING: 类路径JAR下载后仍不存在: ${name}`);
-    }
-    log(`[P${index+1}] 类路径: ${classpath.length} 个JAR`);
-    classpath.push(jarPath);
-    const cpStr = classpath.join(';');
+    // Collect all missing maven artifacts to download them in parallel
+    const pendingDownloads = new Set();
+    const collectMissing = (coord) => {
+        if (!coord) return;
+        const p = resolveMavenPath(coord);
+        if (!p || !fs.existsSync(p)) pendingDownloads.add(coord);
+    };
+
+    for (const name of cpNames) collectMissing(name);
 
     const resolvedArgs = procArgs
         .map(a => normalizeVariable(a, variables, side));
 
     for (const rawArg of procArgs) {
         const m = rawArg.match(/^\[([^\]]+)\]$/);
-        if (m) {
-            const p = resolveMavenPath(m[1]);
-            if (p && !fs.existsSync(p)) {
-                log(`[P${index+1}] 数据构件不存在，下载: ${m[1]}`);
-                send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `下载构件 ${path.basename(m[1])}...` });
-                await downloadMavenArtifact(m[1]);
-            }
-        }
+        if (m) collectMissing(m[1]);
     }
 
     for (const arg of resolvedArgs) {
@@ -349,14 +344,29 @@ async function runProcessor(procInfo, index) {
             });
             if (mavenFromArg) {
                 const cm = mavenFromArg.match(/^\[([^\]]+)\]$/);
-                if (cm) {
-                    log(`[P${index+1}] 输入文件不存在，下载: ${cm[1]}`);
-                    send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `下载输入文件...` });
-                    await downloadMavenArtifact(cm[1]);
-                }
+                if (cm) collectMissing(cm[1]);
             }
         }
     }
+
+    if (pendingDownloads.size > 0) {
+        const list = Array.from(pendingDownloads);
+        log(`[P${index+1}] 并行下载 ${list.length} 个依赖: ${list.join(', ')}`);
+        send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `并行下载 ${list.length} 个依赖...` });
+        const results = await Promise.all(list.map(c => downloadMavenArtifact(c)));
+        const failed = list.filter((_, i) => !results[i]);
+        if (failed.length) log(`[P${index+1}] WARNING: 下载失败的依赖: ${failed.join(', ')}`);
+    }
+
+    const classpath = [];
+    for (const name of cpNames) {
+        let p = resolveMavenPath(name);
+        if (p && fs.existsSync(p)) classpath.push(p);
+        else log(`[P${index+1}] WARNING: 类路径JAR仍不存在: ${name}`);
+    }
+    log(`[P${index+1}] 类路径: ${classpath.length} 个JAR`);
+    classpath.push(jarPath);
+    const cpStr = classpath.join(';');
 
     log(`[P${index+1}] 命令: java -cp <${classpath.length} jars> ${resolvedMainClass} <${resolvedArgs.length} args>`);
     send({ type: 'progress', percent: 0.4 + (index / processorsInfo.length) * 0.5, message: `运行处理器 ${index + 1}/${processorsInfo.length}...` });
@@ -364,7 +374,7 @@ async function runProcessor(procInfo, index) {
     return new Promise((resolve) => {
         log(`[P${index+1}] 启动Java进程...`);
         const child = spawn(javaPath, ['-cp', cpStr, resolvedMainClass, ...resolvedArgs], {
-            timeout: 300000,
+            timeout: 120000,
             encoding: 'utf8',
             windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -373,10 +383,17 @@ async function runProcessor(procInfo, index) {
         let stdout = '';
         let stderr = '';
         let lastOutputTime = Date.now();
+        let killed = false;
         const heartbeatTimer = setInterval(() => {
             const elapsed = Math.round((Date.now() - lastOutputTime) / 1000);
             if (elapsed > 10) {
                 log(`[P${index+1}] 等待中... (${elapsed}s 无输出, stdout=${stdout.length}B, stderr=${stderr.length}B)`);
+            }
+            // Auto-kill if no output for 60 seconds (likely hung)
+            if (elapsed > 60 && !killed) {
+                killed = true;
+                log(`[P${index+1}] 60秒无输出，自动终止Java进程`);
+                try { child.kill('SIGKILL'); } catch(_) {}
             }
         }, 15000);
 
@@ -398,6 +415,7 @@ async function runProcessor(procInfo, index) {
         });
 
         child.on('error', (err) => {
+            clearInterval(heartbeatTimer);
             log(`ERROR: ${err.message}`);
             resolve(false);
         });
@@ -405,6 +423,53 @@ async function runProcessor(procInfo, index) {
 }
 
 async function main() {
+    // Pre-download ALL dependencies for ALL processors before running any of them.
+    // This avoids repeated network round-trips between processor runs.
+    send({ type: 'progress', percent: 0.35, message: `预下载所有依赖 (${processorsInfo.length} 个处理器)...` });
+    log(`\n=== Pre-download phase: scanning all processors ===`);
+
+    const allPendingDownloads = new Set();
+    for (let i = 0; i < processorsInfo.length; i++) {
+        const proc = processorsInfo[i];
+        // Collect processor jar itself
+        if (proc.jar) {
+            const p = resolveMavenPath(proc.jar);
+            if (!p || !fs.existsSync(p)) allPendingDownloads.add(proc.jar);
+        }
+        // Collect classpath jars
+        if (proc.classpath) {
+            for (const name of proc.classpath) {
+                const p = resolveMavenPath(name);
+                if (!p || !fs.existsSync(p)) allPendingDownloads.add(name);
+            }
+        }
+        // Collect maven args [group:artifact:version]
+        if (proc.args) {
+            for (const rawArg of proc.args) {
+                const m = rawArg.match(/^\[([^\]]+)\]$/);
+                if (m) {
+                    const p = resolveMavenPath(m[1]);
+                    if (!p || !fs.existsSync(p)) allPendingDownloads.add(m[1]);
+                }
+            }
+        }
+    }
+
+    if (allPendingDownloads.size > 0) {
+        const list = Array.from(allPendingDownloads);
+        log(`Pre-downloading ${list.length} artifacts: ${list.join(', ')}`);
+        send({ type: 'progress', percent: 0.38, message: `并行预下载 ${list.length} 个依赖...` });
+        const results = await Promise.all(list.map(c => downloadMavenArtifact(c)));
+        const failed = list.filter((_, i) => !results[i]);
+        if (failed.length) {
+            log(`WARNING: Pre-download failed for: ${failed.join(', ')}`);
+        } else {
+            log(`All ${list.length} artifacts pre-downloaded successfully`);
+        }
+    } else {
+        log(`All dependencies already present, skipping pre-download`);
+    }
+
     let allOk = true;
     for (let i = 0; i < processorsInfo.length; i++) {
         send({ type: 'progress', percent: 0.4 + (i / processorsInfo.length) * 0.5, message: `Running processor ${i + 1}/${processorsInfo.length}...` });

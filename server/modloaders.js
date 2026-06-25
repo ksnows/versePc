@@ -35,6 +35,19 @@ function _server() {
 const SERVER_DIR = path.join(__dirname, '..');
 
 // ============================================================================
+// Async curl download helper - non-blocking alternative to execSync(curl)
+// ============================================================================
+function _curlDownload(url, destPath) {
+    return new Promise((resolve, reject) => {
+        const cmd = `curl --silent --location --connect-timeout 10 --max-time 60 --output "${destPath}" "${url}"`;
+        exec(cmd, { timeout: 90000, windowsHide: true, stdio: 'ignore' }, (err) => {
+            if (err) { reject(err); return; }
+            resolve();
+        });
+    });
+}
+
+// ============================================================================
 // Forge 核心库下载
 // ============================================================================
 
@@ -496,81 +509,129 @@ async function ensureBaseVersionInstalled(gameVersion, onProgress = null) {
         const totalLibs = needDownloadLibs.length;
         let downloadedLibs = 0;
 
-        for (const lib of libraries) {
-            if (lib.rules && !versions.evaluateRules(lib.rules)) continue;
-
-            if (lib.downloads?.artifact) {
-                const libPath = utils.safeLibPath(lib.downloads.artifact.path);
-                if (!libPath) continue;
-                const needDownload = !fs.existsSync(libPath) ||
-                    (lib.downloads.artifact.sha1 && !(await utils.verifyFileSha1(libPath, lib.downloads.artifact.sha1)));
-                if (needDownload && lib.downloads.artifact.url) {
-                    downloadedLibs++;
-                    if (totalLibs > 0) {
-                        report(`正在下载库文件 (${downloadedLibs}/${totalLibs})...`, 30 + Math.round(downloadedLibs / totalLibs * 35));
+        const _collectLibTasks = () => {
+            const tasks = [];
+            for (const lib of libraries) {
+                if (lib.rules && !versions.evaluateRules(lib.rules)) continue;
+                if (lib.downloads?.artifact) {
+                    const libPath = utils.safeLibPath(lib.downloads.artifact.path);
+                    if (!libPath) continue;
+                    const needDownload = !fs.existsSync(libPath) ||
+                        (lib.downloads.artifact.sha1 && !utils.verifyFileSha1Sync(libPath, lib.downloads.artifact.sha1));
+                    if (needDownload && lib.downloads.artifact.url) {
+                        tasks.push({ type: 'artifact', lib, libPath });
                     }
-                    try {
-                        if (fs.existsSync(libPath)) fs.unlinkSync(libPath);
-                        await http.downloadFileWithMirror(lib.downloads.artifact.url, libPath, null, 3, null, 60000);
-                    } catch (e) {
-                        console.log(`[BaseVersion] 下载库失败 ${lib.name}: ${e.message}, 尝试curl...`);
-                        const _bmcl = lib.downloads.artifact.url.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/maven/');
-                        const _fm = lib.downloads.artifact.url.replace('https://libraries.minecraft.net/', 'https://maven.minecraftforge.net/');
-                        try { utils.ensureDirForFile(libPath); execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libPath}" "${_bmcl}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
-                        if (!fs.existsSync(libPath) || fs.statSync(libPath).size < 100) {
-                            try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libPath}" "${_fm}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
-                        }
-                        if (!fs.existsSync(libPath) || fs.statSync(libPath).size < 100) {
-                            try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libPath}" "${lib.downloads.artifact.url}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                } else if (lib.name) {
+                    const parts = lib.name.split(':');
+                    if (parts.length >= 3) {
+                        const groupPath = parts[0].replace(/\./g, '/');
+                        const lname = parts[1];
+                        const lversion = parts[2];
+                        const classifier = parts.length >= 4 ? parts[3] : '';
+                        const jarName = classifier ? `${lname}-${lversion}-${classifier}.jar` : `${lname}-${lversion}.jar`;
+                        const libFile = path.join(ctx.dirs.LIBRARIES_DIR, parts[0].replace(/\./g, path.sep), lname, lversion, jarName);
+                        if (!fs.existsSync(libFile)) {
+                            tasks.push({ type: 'name', lib, libFile, groupPath, lname, lversion, jarName });
                         }
                     }
                 }
-            } else if (lib.name) {
-                const parts = lib.name.split(':');
-                if (parts.length >= 3) {
-                    const groupPath = parts[0].replace(/\./g, '/');
-                    const lname = parts[1];
-                    const lversion = parts[2];
-                    const classifier = parts.length >= 4 ? parts[3] : '';
-                    const jarName = classifier ? `${lname}-${lversion}-${classifier}.jar` : `${lname}-${lversion}.jar`;
-                    const libFile = path.join(ctx.dirs.LIBRARIES_DIR, parts[0].replace(/\./g, path.sep), lname, lversion, jarName);
-                    if (!fs.existsSync(libFile)) {
-                        downloadedLibs++;
-                        if (totalLibs > 0) {
-                            report(`正在下载库文件 (${downloadedLibs}/${totalLibs})...`, 30 + Math.round(downloadedLibs / totalLibs * 35));
-                        }
-                        const baseUrl = lib.url || 'https://libraries.minecraft.net/';
-                        const downloadUrl = `${baseUrl}${groupPath}/${lname}/${lversion}/${jarName}`;
-                        try {
-                            await http.downloadFileWithMirror(downloadUrl, libFile);
-                        } catch (e) {
-                            console.log(`[BaseVersion] 下载库失败 ${lib.name}: ${e.message}, 尝试curl...`);
-                            const _bmcl2 = downloadUrl.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/maven/');
-                            const _fm2 = downloadUrl.replace('https://libraries.minecraft.net/', 'https://maven.minecraftforge.net/');
-                            try { utils.ensureDirForFile(libFile); execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libFile}" "${_bmcl2}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
-                            if (!fs.existsSync(libFile) || fs.statSync(libFile).size < 100) {
-                                try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libFile}" "${_fm2}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
-                            }
-                            if (!fs.existsSync(libFile) || fs.statSync(libFile).size < 100) {
-                                try { execSync(`curl --silent --location --connect-timeout 10 --max-time 60 --output "${libFile}" "${downloadUrl}"`, { timeout: 90000, windowsHide: true, stdio: 'ignore' }); } catch (_) {}
+                if (lib.natives) {
+                    const nativeKey = lib.natives[process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux'];
+                    if (nativeKey) {
+                        const classifier = nativeKey.replace('${arch}', process.arch === 'x64' ? '64' : '32');
+                        const nativeDownload = lib.downloads?.classifiers?.[classifier];
+                        if (nativeDownload) {
+                            const nativeFile = path.join(ctx.dirs.LIBRARIES_DIR, nativeDownload.path);
+                            if (!fs.existsSync(nativeFile)) {
+                                tasks.push({ type: 'native', lib, nativeDownload, nativeFile });
                             }
                         }
                     }
                 }
             }
+            return tasks;
+        };
 
-            if (lib.natives) {
-                const nativeKey = lib.natives[process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux'];
-                if (nativeKey) {
-                    const classifier = nativeKey.replace('${arch}', process.arch === 'x64' ? '64' : '32');
-                    const nativeDownload = lib.downloads?.classifiers?.[classifier];
-                    if (nativeDownload) {
-                        const nativeFile = path.join(ctx.dirs.LIBRARIES_DIR, nativeDownload.path);
-                        if (!fs.existsSync(nativeFile)) {
+        const _allLibTasks = _collectLibTasks();
+        const _libParallel = 32;
+        if (_allLibTasks.length > 0) {
+            let _libDone = 0;
+            let _libActive = 0;
+            let _libIdx = 0;
+            let _libFinish = null;
+            const _scheduleLib = () => {
+                while (_libActive < _libParallel && _libIdx < _allLibTasks.length) {
+                    const task = _allLibTasks[_libIdx++];
+                    _libActive++;
+                    (async () => {
+                        if (task.type === 'artifact') {
                             try {
-                                await http.downloadFileWithMirror(nativeDownload.url, nativeFile);
+                                if (fs.existsSync(task.libPath)) fs.unlinkSync(task.libPath);
+                                await http.downloadFileWithMirror(task.lib.downloads.artifact.url, task.libPath, null, 3, null, 60000);
                             } catch (e) {
-                                console.log(`[BaseVersion] Failed to download native ${path.basename(nativeDownload.path)}: ${e.message}`);
+                                console.log(`[BaseVersion] 下载库失败 ${task.lib.name}: ${e.message}, 尝试curl...`);
+                                const _bmcl = task.lib.downloads.artifact.url.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/maven/');
+                                const _fm = task.lib.downloads.artifact.url.replace('https://libraries.minecraft.net/', 'https://maven.minecraftforge.net/');
+                                try { utils.ensureDirForFile(task.libPath); await _curlDownload(_bmcl, task.libPath); } catch (_) {}
+                                if (!fs.existsSync(task.libPath) || fs.statSync(task.libPath).size < 100) {
+                                    try { await _curlDownload(_fm, task.libPath); } catch (_) {}
+                                }
+                                if (!fs.existsSync(task.libPath) || fs.statSync(task.libPath).size < 100) {
+                                    try { await _curlDownload(task.lib.downloads.artifact.url, task.libPath); } catch (_) {}
+                                }
+                            }
+                        } else if (task.type === 'name') {
+                            const baseUrl = task.lib.url || 'https://libraries.minecraft.net/';
+                            const downloadUrl = `${baseUrl}${task.groupPath}/${task.lname}/${task.lversion}/${task.jarName}`;
+                            try {
+                                await http.downloadFileWithMirror(downloadUrl, task.libFile);
+                            } catch (e) {
+                                console.log(`[BaseVersion] 下载库失败 ${task.lib.name}: ${e.message}, 尝试curl...`);
+                                const _bmcl2 = downloadUrl.replace('https://libraries.minecraft.net/', 'https://bmclapi2.bangbang93.com/maven/');
+                                const _fm2 = downloadUrl.replace('https://libraries.minecraft.net/', 'https://maven.minecraftforge.net/');
+                                try { utils.ensureDirForFile(task.libFile); await _curlDownload(_bmcl2, task.libFile); } catch (_) {}
+                                if (!fs.existsSync(task.libFile) || fs.statSync(task.libFile).size < 100) {
+                                    try { await _curlDownload(_fm2, task.libFile); } catch (_) {}
+                                }
+                                if (!fs.existsSync(task.libFile) || fs.statSync(task.libFile).size < 100) {
+                                    try { await _curlDownload(downloadUrl, task.libFile); } catch (_) {}
+                                }
+                            }
+                        } else if (task.type === 'native') {
+                            try {
+                                await http.downloadFileWithMirror(task.nativeDownload.url, task.nativeFile);
+                            } catch (e) {
+                                console.log(`[BaseVersion] Failed to download native ${path.basename(task.nativeDownload.path)}: ${e.message}`);
+                            }
+                        }
+                    })().finally(() => {
+                        _libActive--;
+                        _libDone++;
+                        downloadedLibs = _libDone;
+                        if (totalLibs > 0) {
+                            report(`正在下载库文件 (${downloadedLibs}/${totalLibs})...`, 30 + Math.round(downloadedLibs / totalLibs * 35));
+                        }
+                        if (_libActive === 0 && _libDone >= _allLibTasks.length && _libFinish) _libFinish();
+                        else if (_libActive < _libParallel && _libIdx < _allLibTasks.length) _scheduleLib();
+                    });
+                }
+            };
+            await new Promise(resolve => { _libFinish = resolve; _scheduleLib(); });
+        } else {
+            for (const lib of libraries) {
+                if (lib.natives) {
+                    const nativeKey = lib.natives[process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux'];
+                    if (nativeKey) {
+                        const classifier = nativeKey.replace('${arch}', process.arch === 'x64' ? '64' : '32');
+                        const nativeDownload = lib.downloads?.classifiers?.[classifier];
+                        if (nativeDownload) {
+                            const nativeFile = path.join(ctx.dirs.LIBRARIES_DIR, nativeDownload.path);
+                            if (!fs.existsSync(nativeFile)) {
+                                try {
+                                    await http.downloadFileWithMirror(nativeDownload.url, nativeFile);
+                                } catch (e) {
+                                    console.log(`[BaseVersion] Failed to download native ${path.basename(nativeDownload.path)}: ${e.message}`);
+                                }
                             }
                         }
                     }
@@ -1719,7 +1780,7 @@ async function installForge(gameVersion, forgeVersion, onProgress = null, mirror
                         }
                         if (missing.length > 0 && onProgress) onProgress(0.95, `下载 Forge 库文件 (0/${missing.length})...`);
                         if (missing.length > 0) {
-                            const FORGE_LIB_PARALLEL = 8;
+                            const FORGE_LIB_PARALLEL = 32;
                             let completed = 0;
                             let failed = 0;
                             let active = 0;

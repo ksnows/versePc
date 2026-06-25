@@ -532,6 +532,12 @@ async function verifyFileSha1(filePath, expectedSha1) {
     return actual === expectedSha1;
 }
 
+function verifyFileSha1Sync(filePath, expectedSha1) {
+    if (!expectedSha1) return true;
+    const actual = calculateSHA1(filePath);
+    return actual === expectedSha1;
+}
+
 // ============================================================================
 // 初始化
 // ============================================================================
@@ -569,4 +575,5 @@ module.exports = {
     isJarIntact,
     calculateSHA1,
     verifyFileSha1,
+    verifyFileSha1Sync,
 };

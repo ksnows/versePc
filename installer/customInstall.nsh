@@ -1,10 +1,14 @@
 !macro customInit
     SetAutoClose false
     ${nsProcess::KillProcess} "VersePC.exe" $R0
-    Sleep 500
+    Sleep 300
     ${nsProcess::KillProcess} "VersePC.exe" $R0
-    Sleep 500
+    Sleep 300
     ${nsProcess::KillProcess} "VersePC.exe" $R0
+    Sleep 300
+    nsExec::ExecToStack 'taskkill /F /IM VersePC.exe /T'
+    Sleep 500
+    nsExec::ExecToStack 'taskkill /F /IM VersePC.exe /T'
     Sleep 300
 
     ; --- VC++ 运行库自动检测与安装 ---
@@ -35,9 +39,20 @@
 !macro customUnInit
     SetAutoClose false
     ${nsProcess::KillProcess} "VersePC.exe" $R0
-    Sleep 500
+    Sleep 300
     ${nsProcess::KillProcess} "VersePC.exe" $R0
+    Sleep 300
+    nsExec::ExecToStack 'taskkill /F /IM VersePC.exe /T'
     Sleep 500
+
+    MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "是否保留游戏版本和存档数据？$\n$\n版本文件夹包含已安装的游戏版本和存档，保留后可重新安装 VersePC 继续使用。" IDYES _keep_versions IDNO _remove_versions
+    _keep_versions:
+        DetailPrint "保留版本文件夹"
+        Goto _versions_done
+    _remove_versions:
+        DetailPrint "删除版本文件夹"
+        RMDir /r "$PROFILE\.versepc\versions"
+    _versions_done:
 !macroend
 
 !macro customInstallMode

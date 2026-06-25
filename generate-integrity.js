@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const INTEGRITY_FILES = [
     'main.js',
@@ -25,14 +26,48 @@ function main() {
     const manifest = {};
     const aiEnabled = process.env.ENABLE_AI === 'true';
 
-    // Inject IS_BETA into main.js at build time. Replaces the __IS_BETA__ placeholder
-    // so the packaged app no longer depends on runtime env detection (which caused
-    // false positives when beta.flag was shipped inside release builds).
     const mainPath = path.join(projectRoot, 'main.js');
     let mainContent = fs.readFileSync(mainPath, 'utf8');
-    mainContent = mainContent.replace(/__IS_BETA__/g, aiEnabled ? 'true' : 'false');
+    mainContent = mainContent.replace(
+        /let IS_BETA = \(\(\) => \{ try \{ return [^;]+; \} catch \(_\) \{ return false; \} \}\)\(\);/,
+        `let IS_BETA = (() => { try { return ${aiEnabled ? 'true' : 'false'}; } catch (_) { return false; } })();`
+    );
     fs.writeFileSync(mainPath, mainContent);
     console.log(`  main.js: __IS_BETA__ -> ${aiEnabled}`);
+
+    if (aiEnabled) {
+        const aiChatPath = path.join(projectRoot, 'js', 'ai-chat.js');
+        const aiChatBakPath = path.join(projectRoot, 'js', 'ai-chat.js.bak');
+        if (fs.existsSync(aiChatPath)) {
+            fs.copyFileSync(aiChatPath, aiChatBakPath);
+            try {
+                execSync(
+                    `npx javascript-obfuscator "${aiChatPath}" --output "${aiChatPath}" --target node --string-array-encoding rc4 --string-array-threshold 0.75 --rename-globals false --self-defending false`,
+                    { stdio: 'pipe', cwd: projectRoot }
+                );
+                console.log('  js/ai-chat.js: obfuscated');
+            } catch (e) {
+                console.warn('  WARN: ai-chat obfuscation failed, using original:', e.message);
+                fs.copyFileSync(aiChatBakPath, aiChatPath);
+            }
+        }
+    }
+
+    const avPath = path.join(projectRoot, 'activation-verify.js');
+    const avBakPath = path.join(projectRoot, 'activation-verify.js.bak');
+    if (aiEnabled && fs.existsSync(avPath)) {
+        fs.copyFileSync(avPath, avBakPath);
+        try {
+            execSync(
+                `npx javascript-obfuscator "${avPath}" --output "${avPath}" --target node --string-array-encoding rc4 --string-array-threshold 1 --rename-globals false --self-defending false`,
+                { stdio: 'pipe', cwd: projectRoot }
+            );
+            console.log('  activation-verify.js: obfuscated');
+        } catch (e) {
+            console.warn('  WARN: activation-verify obfuscation failed:', e.message);
+            fs.copyFileSync(avBakPath, avPath);
+        }
+    }
 
     for (const file of INTEGRITY_FILES) {
         const filePath = path.join(projectRoot, file);
