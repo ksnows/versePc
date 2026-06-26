@@ -2672,6 +2672,33 @@ async function navigateToPage(pageName) {
         const placeholder = document.getElementById('explore-placeholder');
         const chatContainer = document.getElementById('explore-chat-container');
         
+        if (!isAIEnabled) {
+            if (placeholder) {
+                placeholder.style.display = 'block';
+                placeholder.innerHTML = `
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:40px;text-align:center;">
+                        <h2 style="color:var(--text-primary);margin:0 0 12px;font-size:24px;font-weight:600;">功能未开放</h2>
+                        <p style="color:var(--text-secondary);margin:0 0 8px;font-size:15px;line-height:1.6;max-width:400px;">
+                            此功能需要赞助后才能使用
+                        </p>
+                        <p style="color:var(--text-secondary);margin:0 0 32px;font-size:14px;line-height:1.6;max-width:400px;">
+                            感谢你的支持，赞助后即可解锁全部实验性功能
+                        </p>
+                        <button onclick="window.electronAPI?.openExternal('https://afdian.com/a/versejava')" style="display:inline-flex;align-items:center;gap:8px;padding:14px 32px;background:linear-gradient(135deg,#9b59b6 0%,#8e44ad 100%);color:white;text-decoration:none;border-radius:12px;font-size:16px;font-weight:600;transition:all 0.3s ease;box-shadow:0 4px 15px rgba(155,89,182,0.3);border:none;cursor:pointer;" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 20px rgba(155,89,182,0.4)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 15px rgba(155,89,182,0.3)'">
+                            前往赞助
+                        </button>
+                        <p style="color:var(--text-tertiary);margin:24px 0 0;font-size:12px;">
+                            当前版本已免费开放
+                        </p>
+                    </div>
+                `;
+            }
+            if (chatContainer) chatContainer.style.display = 'none';
+            target.classList.add('active');
+            target.scrollTop = 0;
+            return;
+        }
+        
         if (placeholder) {
             placeholder.style.display = 'block';
             placeholder.innerHTML = `
@@ -12140,7 +12167,7 @@ async function submitActivationCode(btn) {
     btn.disabled = true;
     btn.textContent = '处理中...';
     statusEl.className = 'activation-status info';
-    statusEl.textContent = '当前版本已免费开放，无需激活码。';
+    statusEl.textContent = '当前版本已免费开放，无需给你们最崇拜的豆杰大师供奉十块钱哦！';
     try {
         if (window.electronAPI?.activateVerify) {
             await window.electronAPI.activateVerify(input.value.trim() || 'FREE');

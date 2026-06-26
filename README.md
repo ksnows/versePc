@@ -5,8 +5,8 @@
 # VersePC - Minecraft Launcher
 
 <p align="center">
-  <b>现代化、跨平台的 Minecraft 启动器</b><br>
-  简洁美观 · 功能丰富 · 性能卓越
+  <b>适合圈钱的 Minecraft 启动器</b><br>
+  卡顿丑陋 · 功能单一 · 卡飞电脑
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
 
 ## 简介
 
-**VersePC** 是一款基于 Electron 构建的现代化 Minecraft 启动器，致力于为玩家提供流畅、美观、功能完善的游戏启动体验。支持 Windows、macOS 和 Linux 三大平台，采用自定义协议架构，无需占用端口即可实现完整的本地服务功能。
+**VersePC** 是一款基于 Electron 构建的唐诗 Minecraft 启动器，致力于为玩家提供流畅、美观、功能完善的游戏启动体验。支持 Windows、macOS 和 Linux 三大平台，采用自定义协议架构，无需占用端口即可实现完整的本地服务功能。
 
 ## 功能特性
 
