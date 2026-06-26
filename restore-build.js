@@ -11,14 +11,6 @@ if (fs.existsSync(aiChatBak)) {
     console.log('Restored js/ai-chat.js');
 }
 
-const avBak = path.join(root, 'activation-verify.js.bak');
-const avOrig = path.join(root, 'activation-verify.js');
-if (fs.existsSync(avBak)) {
-    fs.copyFileSync(avBak, avOrig);
-    fs.unlinkSync(avBak);
-    console.log('Restored activation-verify.js');
-}
-
 const mainPath = path.join(root, 'main.js');
 let mainContent = fs.readFileSync(mainPath, 'utf8');
 const restored = mainContent.replace(

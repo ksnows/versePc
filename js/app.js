@@ -2689,7 +2689,7 @@ async function navigateToPage(pageName) {
                             前往赞助
                         </button>
                         <p style="color:var(--text-tertiary);margin:24px 0 0;font-size:12px;">
-                            赞助后联系开发者获取激活码
+                            当前版本已免费开放
                         </p>
                     </div>
                 `;
@@ -2700,50 +2700,24 @@ async function navigateToPage(pageName) {
             return;
         }
         
-        let isActivated = false;
-        try {
-            if (window.electronAPI?.activateStatus) {
-                const activationStatus = window.electronAPI.activateStatus();
-                if (activationStatus && typeof activationStatus.then === 'function') {
-                    const result = await activationStatus;
-                    isActivated = result && result.activated;
-                } else {
-                    isActivated = activationStatus && activationStatus.activated;
-                }
-            }
-        } catch (e) {}
-        
-        if (!isActivated) {
-            if (placeholder) {
-                placeholder.style.display = 'block';
-                placeholder.innerHTML = `
-                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:40px;text-align:center;">
-                        <h2 style="color:var(--text-primary);margin:0 0 12px;font-size:24px;font-weight:600;">需要激活码</h2>
-                        <p style="color:var(--text-secondary);margin:0 0 8px;font-size:15px;line-height:1.6;max-width:400px;">
-                            请输入激活码以使用AI助手功能
-                        </p>
-                        <p style="color:var(--text-secondary);margin:0 0 32px;font-size:14px;line-height:1.6;max-width:400px;">
-                            请前往设置页面输入激活码
-                        </p>
-                        <button onclick="
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.getElementById('page-settings-other').classList.add('active');
-" style="display:inline-flex;align-items:center;gap:8px;padding:14px 32px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;text-decoration:none;border-radius:12px;font-size:16px;font-weight:600;transition:all 0.3s ease;box-shadow:0 4px 15px rgba(102,126,234,0.3);border:none;cursor:pointer;" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 6px 20px rgba(102,126,234,0.4)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 15px rgba(102,126,234,0.3)'">
-                            前往 设置页面
-                        </button>
-                        <p style="color:var(--text-tertiary);margin:24px 0 0;font-size:12px;">
-                            在设置页面中输入激活码即可解锁AI助手功能
-                        </p>
-                    </div>
-                `;
-            }
-            if (chatContainer) chatContainer.style.display = 'none';
-            target.classList.add('active');
-            target.scrollTop = 0;
-            return;
+        if (placeholder) {
+            placeholder.style.display = 'block';
+            placeholder.innerHTML = `
+                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:40px;text-align:center;">
+                    <h2 style="color:var(--text-primary);margin:0 0 12px;font-size:24px;font-weight:600;">功能已免费开放</h2>
+                    <p style="color:var(--text-secondary);margin:0 0 8px;font-size:15px;line-height:1.6;max-width:400px;">
+                        当前版本不再需要激活码，相关功能已直接启用
+                    </p>
+                    <p style="color:var(--text-secondary);margin:0 0 32px;font-size:14px;line-height:1.6;max-width:400px;">
+                        你可以直接继续使用，无需额外操作
+                    </p>
+                </div>
+            `;
         }
-        
-        if (placeholder) placeholder.style.display = 'none';
+        if (chatContainer) chatContainer.style.display = 'block';
+        target.classList.add('active');
+        target.scrollTop = 0;
+        return;
         if (chatContainer) chatContainer.style.display = '';
         
         const disclaimerModal = document.getElementById('experimental-disclaimer-modal');
@@ -12191,33 +12165,24 @@ async function submitActivationCode(btn) {
     const input = document.getElementById('activation-code-input');
     const statusEl = document.getElementById('activation-status');
     if (!input || !statusEl) return;
-    const code = input.value.trim();
-    if (!code) {
-        statusEl.className = 'activation-status failed';
-        statusEl.textContent = '请输入激活码';
-        return;
-    }
     btn.disabled = true;
-    btn.textContent = '验证中...';
+    btn.textContent = '处理中...';
     statusEl.className = 'activation-status info';
-    statusEl.textContent = '正在验证...';
+    statusEl.textContent = '当前版本已免费开放，无需给你们最崇拜的豆杰大师供奉十块钱哦！';
     try {
-        const result = await window.electronAPI.activateVerify(code);
-        if (result.success) {
-            statusEl.className = 'activation-status activated';
-            statusEl.textContent = '✓ ' + result.message;
-            input.value = '';
-            updateActivationStatus();
-        } else {
-            statusEl.className = 'activation-status failed';
-            statusEl.textContent = '✗ ' + result.message;
+        if (window.electronAPI?.activateVerify) {
+            await window.electronAPI.activateVerify(input.value.trim() || 'FREE');
         }
+        statusEl.className = 'activation-status activated';
+        statusEl.textContent = '✓ 功能已免费开放';
+        input.value = '';
+        updateActivationStatus();
     } catch (e) {
-        statusEl.className = 'activation-status failed';
-        statusEl.textContent = '✗ 验证失败';
+        statusEl.className = 'activation-status activated';
+        statusEl.textContent = '✓ 功能已免费开放';
     }
     btn.disabled = false;
-    btn.textContent = '激活';
+    btn.textContent = '已开放';
 }
 
 async function updateActivationStatus() {
@@ -12225,15 +12190,12 @@ async function updateActivationStatus() {
         const status = await window.electronAPI.activateStatus();
         const statusEl = document.getElementById('activation-status');
         if (!statusEl) return;
-        if (status.activated) {
-            statusEl.className = 'activation-status activated';
-            const typeLabel = status.type === 'permanent' ? '永久授权' : '单次授权';
-            statusEl.textContent = '✓ 已激活 (' + typeLabel + ')';
-            const input = document.getElementById('activation-code-input');
-            const btn = document.getElementById('activate-btn');
-            if (input) input.style.display = 'none';
-            if (btn) btn.style.display = 'none';
-        }
+        statusEl.className = 'activation-status activated';
+        statusEl.textContent = '✓ 功能已免费开放';
+        const input = document.getElementById('activation-code-input');
+        const btn = document.getElementById('activate-btn');
+        if (input) input.style.display = 'none';
+        if (btn) btn.style.display = 'none';
     } catch (e) {}
 }
 
@@ -12256,18 +12218,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    let _acChk = 0;
     const _acTick = async () => {
         try {
-            const s = await window.electronAPI?.activateStatus?.();
-            if (!s || !s.activated) {
-                _acChk++;
-                if (_acChk > 2) {
-                    document.querySelectorAll('.nav-btn').forEach(b => {
-                        if (b.id === 'nav-explore-btn') b.style.display = 'none';
-                    });
-                }
-            } else { _acChk = 0; }
+            await window.electronAPI?.activateStatus?.();
         } catch (_) {}
     };
     setInterval(_acTick, 120000);

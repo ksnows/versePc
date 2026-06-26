@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const _schemaVer = 3;
+const _schemaVer = 4;
 const _storePath = path.join(os.homedir(), '.versepc', 'app-store.json');
 
 function _readStore() {
@@ -10,15 +10,18 @@ function _readStore() {
         const raw = fs.readFileSync(_storePath, 'utf-8');
         return JSON.parse(raw);
     } catch (_) {
-        return null;
+        return {};
     }
 }
 
+function _writeStore(store) {
+    try {
+        fs.mkdirSync(path.dirname(_storePath), { recursive: true });
+        fs.writeFileSync(_storePath, JSON.stringify(store, null, 2), 'utf8');
+    } catch (_) {}
+}
+
 function checkTampering() {
-    const store = _readStore();
-    if (store === null) return 'store_corrupt';
-    if (store['activation_type'] && store['activation_schema_ver'] !== _schemaVer) return 'schema_mismatch';
-    if (store['activation_type'] && !store['activation_code']) return 'code_missing';
     return 'ok';
 }
 
@@ -34,14 +37,16 @@ function clearActivation(store) {
 
 function autoRecover() {
     const store = _readStore();
-    if (store === null) return;
-    const result = checkTampering();
-    if (result !== 'ok') {
-        clearActivation(store);
-        try {
-            fs.writeFileSync(_storePath, JSON.stringify(store, null, 2), 'utf8');
-        } catch (_) {}
-    }
+    if (!store || typeof store !== 'object') return;
+    const next = {
+        ...store,
+        activation_type: 'free',
+        activation_time: store['activation_time'] || new Date().toISOString(),
+        activation_schema_ver: _schemaVer
+    };
+    delete next['activation_code'];
+    delete next['activation_version'];
+    _writeStore(next);
 }
 
-module.exports = { checkTampering, autoRecover, _schemaVer };
+module.exports = { checkTampering, autoRecover, clearActivation, _schemaVer };

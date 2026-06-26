@@ -1050,92 +1050,16 @@ ipcMain.handle('read-file-buffer', async (event, filePath) => {
 
 ipcMain.handle('activate-verify', async (event, code) => {
     try {
-        const crypto = require('crypto');
-        const os = require('os');
-        const requestJson = (url, body) => new Promise((resolve, reject) => {
-            try {
-                const { net } = require('electron');
-                const req = net.request({ url, method: 'POST' });
-                const payload = JSON.stringify(body);
-                req.setHeader('Content-Type', 'application/json');
-                req.setHeader('User-Agent', 'VersePC/' + app.getVersion());
-                req.on('response', (res) => {
-                    let text = '';
-                    res.on('data', (chunk) => { text += chunk.toString(); });
-                    res.on('end', () => {
-                        try {
-                            if ((res.headers?.['content-type'] || '').indexOf('application/json') === -1) {
-                                return reject(new Error('服务端返回非JSON(' + res.statusCode + ')'));
-                            }
-                            resolve(JSON.parse(text || '{}'));
-                        } catch (e) {
-                            reject(new Error('解析服务端响应失败'));
-                        }
-                    });
-                });
-                req.on('error', (err) => reject(err));
-                req.write(payload);
-                req.end();
-            } catch (err) {
-                reject(err);
-            }
-        });
-
-        const parts = [];
-        try { parts.push(os.hostname()); } catch (e) {}
-        try { parts.push(os.arch()); } catch (e) {}
-        try { parts.push(os.platform()); } catch (e) {}
-        try { const cpus = os.cpus(); if (cpus.length > 0) parts.push(cpus[0].model); } catch (e) {}
-        try { parts.push(String(os.totalmem())); } catch (e) {}
-        try {
-            const nets = os.networkInterfaces();
-            for (const name of Object.keys(nets)) {
-                for (const iface of nets[name]) {
-                    if (!iface.internal && iface.mac && iface.mac !== '00:00:00:00:00:00') {
-                        parts.push(iface.mac);
-                        break;
-                    }
-                }
-            }
-        } catch (e) {}
-        const machineId = crypto.createHash('sha256').update(parts.join('|')).digest('hex').toUpperCase().substring(0, 16);
-
+        let activationType = 'free';
         let c = (code || '').trim().toUpperCase();
-        if (!c) return { success: false, message: '请输入激活码' };
-        const codeMatch = c.match(/(VU-[A-F0-9]{6,12})/i);
-        if (codeMatch) c = codeMatch[1].toUpperCase();
-        if (!c.startsWith('VU-')) return { success: false, message: '旧版激活码已失效，请前往官网申请新密钥\nhttps://verselauncher.cn/community' };
-
-        const baseUrl = 'https://www.verselauncher.cn';
-        const endpoints = [baseUrl + '/api/activate/verify', baseUrl + '/.netlify/functions/activate/verify', baseUrl + '/functions/api/activate/verify'];
-
-        let data = null;
-        let lastErr = null;
-        const body = { activation_code: c, machine_id: machineId, app_version: app.getVersion() };
-        for (const url of endpoints) {
-            try {
-                const json = await requestJson(url, body);
-                data = json?.data || json;
-                lastErr = null;
-                break;
-            } catch (err) {
-                lastErr = err.message || '网络异常';
-            }
-        }
-
-        if (!data || !data.activated) {
-            return { success: false, message: lastErr ? ('激活验证失败: ' + lastErr) : '激活码无效或与本机不匹配' };
-        }
-
-        const activationType = data.type || 'single';
         const store = loadStore();
         store['activation_type'] = activationType;
-        store['activation_code'] = c;
+        store['activation_code'] = c || 'FREE';
         store['activation_time'] = new Date().toISOString();
         store['activation_schema_ver'] = ACTIVATION_SCHEMA_VERSION;
         fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), () => {});
 
-        return { success: true, type: activationType, message: activationType === 'permanent' ? '永久激活成功！' : '单次激活成功！' };
+        return { success: true, type: activationType, message: '已启用免费模式，功能已全部开放。' };
     } catch (e) {
         return { success: false, message: '验证过程出错: ' + e.message };
     }
@@ -1143,20 +1067,15 @@ ipcMain.handle('activate-verify', async (event, code) => {
 
 ipcMain.handle('activate-status', async () => {
     const store = loadStore();
-    // Invalidate activations recorded under an older schema so users covered by an
-    // override update are forced to re-activate.
-    if (store['activation_type'] && store['activation_schema_ver'] !== ACTIVATION_SCHEMA_VERSION) {
-        delete store['activation_type'];
-        delete store['activation_code'];
-        delete store['activation_time'];
-        delete store['activation_version'];
-        delete store['activation_schema_ver'];
+    if (!store['activation_type']) {
+        store['activation_type'] = 'free';
+        store['activation_time'] = store['activation_time'] || new Date().toISOString();
+        store['activation_schema_ver'] = ACTIVATION_SCHEMA_VERSION;
         fs.writeFile(STORE_PATH, JSON.stringify(store, null, 2), () => {});
-        return { activated: false, type: null, time: null };
     }
     return {
-        activated: !!store['activation_type'],
-        type: store['activation_type'] || null,
+        activated: true,
+        type: store['activation_type'] || 'free',
         time: store['activation_time'] || null
     };
 });
