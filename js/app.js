@@ -1126,7 +1126,6 @@ function showSupportModal(count) {
 }
 
 function openSupportPage() {
-    window.open('https://ifdian.net/a/versejava?tab=home', '_blank');
     dismissSupportModal();
 }
 
@@ -1162,8 +1161,8 @@ var ANNOUNCEMENT_CONTENT = {
 
         <div class="announcement-section">
             <h4>实验性功能</h4>
-            <p>实验性功能（AI 助手等）目前需要<strong>赞助后获取测试版</strong>才能解锁使用。</p>
-            <p>如果你对实验性功能感兴趣，欢迎前往 <a href="javascript:void(0)" onclick="window.electronAPI?.openExternal('https://afdian.com/a/versejava')" style="color:#9b59b6;font-weight:bold;">爱发电</a> 支持我们的发展</p>
+            <p>实验性功能（AI 助手等）已直接开放使用。</p>
+            <p>你可以在对应页面直接体验，无需额外操作。</p>
         </div>
 
         <div class="announcement-section">
