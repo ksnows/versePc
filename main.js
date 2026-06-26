@@ -2509,7 +2509,7 @@ function matchPattern(filename, pattern) {
 // IS_BETA is injected at build time via generate-integrity.js placeholder replacement.
 // This avoids relying on runtime env detection (which caused false positives when
 // beta.flag was packaged into release builds).
-let IS_BETA = (() => { try { return __IS_BETA__; } catch (_) { return false; } })();
+let IS_BETA = (() => { try { return false; } catch (_) { return false; } })();
 
 const UPDATE_JSON_SOURCES = IS_BETA ? [
     'https://cdn.jsdelivr.net/gh/doujie081231/VersePC-beta@main/update.json',
