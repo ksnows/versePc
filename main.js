@@ -1300,6 +1300,7 @@ ipcMain.handle('editor:scan-dir', async (event, dirPath) => {
 });
 
 const terminalSessions = new Map();
+const mcpClients = new Map();
 
 const pendingVersionSelections = new Map();
 
@@ -7414,8 +7415,6 @@ ${toolDescriptions}
         }
         return { error: '会话不存在' };
     });
-
-    const mcpClients = new Map();
 
     async function startMcpServer(serverName, config) {
         const { spawn } = require('child_process');
