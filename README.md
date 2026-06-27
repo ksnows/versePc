@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> 我是豆杰，这个才是真号！[doujie081231](https://github.com/doujie081231)是冒充我的！大家帮我点点举报！谢谢大家！
+> 无论圈钱与否，我豆杰都会一直开发下去的！但我还是最爱圈钱！
+
 <div align="center">
   <img src="img/icon.png" alt="VersePC Logo" width="120">
   <h1>VersePC</h1>
